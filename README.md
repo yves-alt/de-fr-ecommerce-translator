@@ -26,7 +26,7 @@ This Streamlit web application demonstrates an AI-powered translation workflow f
 | **German Residue Detection** | Automatically detects and fixes remaining German words |
 | **Smart Validation** | Product names validated (max 40 chars, no commas/brackets) |
 | **Structure Preservation** | Excel formatting, formulas, and structure remain intact |
-| **Secure Configuration** | API keys stored in environment variables, never in code |
+| **Secure Configuration** | API keys loaded from secrets — never hardcoded in source code |
 
 ---
 
@@ -38,66 +38,107 @@ This Streamlit web application demonstrates an AI-powered translation workflow f
 | **Streamlit** | Web application framework |
 | **openpyxl** | Excel file manipulation |
 | **OpenAI API** | AI translation engine (GPT-4o-mini) |
-| **python-dotenv** | Secure environment variable management |
+| **python-dotenv** | Local environment variable loading |
 
 ---
 
-## Installation
+## Local Setup
 
 ### Prerequisites
 
 - Python 3.8 or higher
 - An OpenAI API key ([Get one here](https://platform.openai.com/api-keys))
 
-### Setup
+### Installation
 
 ```bash
 # Clone the repository
 git clone https://github.com/yves-alt/de-fr-ecommerce-translator.git
 cd de-fr-ecommerce-translator
 
-# Create virtual environment
+# Create a virtual environment
 python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
+source venv/bin/activate  # Windows: venv\Scripts\activate
 
 # Install dependencies
 pip install -r requirements.txt
-
-# Configure environment
-cp .env.example .env
-# Edit .env and add your OpenAI API key
 ```
 
----
+### Configure your API key locally
 
-## Configuration
+```bash
+cp .env.example .env
+```
 
-Create a `.env` file in the project root:
+Edit `.env` and add your real key:
 
 ```env
-OPENAI_API_KEY=your-openai-api-key-here
+OPENAI_API_KEY=sk-proj-your-real-key-here
 ```
 
-> **Security:** Never commit the `.env` file. It's already included in `.gitignore`.
+> **Never commit `.env` to Git.** It is already listed in `.gitignore`.
 
----
-
-## Usage
-
-### Start the Application
+### Run locally
 
 ```bash
 streamlit run app.py
 ```
 
-The app opens automatically at: **http://localhost:8501**
+The app opens at **http://localhost:8501**
 
-### Workflow
+---
 
-1. **Upload** — Select your German Excel file (.xlsx)
-2. **Translate** — Click the "Translate Excel File" button
-3. **Monitor** — Watch real-time progress tracking
-4. **Download** — Get your translated file (FR-filename.xlsx)
+## Deployment — Streamlit Community Cloud
+
+> **Before deploying, read the security rules below.**
+
+### Steps
+
+1. Push your code to a **public or private GitHub repository**
+   - Make sure `.env` is **not** committed (it is gitignored)
+   - Make sure real Excel files are **not** committed (`.xlsx` is gitignored)
+
+2. Go to [share.streamlit.io](https://share.streamlit.io) and click **New app**
+
+3. Connect your GitHub repository and set:
+   - **Main file path:** `app.py`
+
+4. Before clicking Deploy, open **Advanced settings → Secrets** and paste:
+
+```toml
+OPENAI_API_KEY = "sk-proj-your-real-key-here"
+```
+
+5. Click **Deploy**
+
+The app reads `OPENAI_API_KEY` from Streamlit secrets on Cloud, and from `.env` locally. No key is ever stored in the source code.
+
+---
+
+## How the API Key is Loaded
+
+The app uses a safe fallback system in this order:
+
+1. **`st.secrets["OPENAI_API_KEY"]`** — used on Streamlit Cloud
+2. **`.env` file via python-dotenv** — used for local development
+3. **Error message** — shown in the app if neither source provides a key
+
+```python
+# No API key is ever hardcoded in app.py
+```
+
+---
+
+## Security Rules
+
+| Rule | Status |
+|------|--------|
+| `.env` committed to Git | Never |
+| Real API key in source code | Never |
+| Real Excel/product files on GitHub | Never |
+| API key in `secrets.toml` committed | Never (gitignored) |
+| `.env.example` contains a placeholder only | Yes |
+| `.streamlit/secrets.toml.example` is safe to commit | Yes (placeholder only) |
 
 ---
 
@@ -109,8 +150,6 @@ The app opens automatically at: **http://localhost:8501**
 
 ### Supported Columns
 
-The following columns are automatically translated when present:
-
 | Column | Description |
 |--------|-------------|
 | `name` | Product name (max 40 chars) |
@@ -121,6 +160,30 @@ The following columns are automatically translated when present:
 | `qualityDetail` | Quality information |
 | `textileCompositionCover1` | Textile composition |
 | `variantName` | Product variant name |
+
+---
+
+## Project Structure
+
+```
+de-fr-ecommerce-translator/
+├── app.py                          # Main Streamlit application
+├── requirements.txt                # Python dependencies
+├── .env.example                    # Local config template (no real keys)
+├── .streamlit/
+│   └── secrets.toml.example        # Streamlit Cloud secrets template
+├── .gitignore                      # Excludes .env, *.xlsx, secrets.toml
+└── README.md                       # This file
+```
+
+---
+
+## Workflow
+
+1. **Upload** — Select your German Excel file (.xlsx)
+2. **Translate** — Click the "Translate Excel File" button
+3. **Monitor** — Watch real-time progress tracking
+4. **Download** — Get your translated file (FR-filename.xlsx)
 
 ---
 
@@ -137,49 +200,6 @@ The following columns are automatically translated when present:
 
 ---
 
-## Deployment Options
-
-### Local Development
-```bash
-streamlit run app.py
-```
-
-### Streamlit Cloud
-1. Push code to GitHub (without `.env`)
-2. Go to [share.streamlit.io](https://share.streamlit.io)
-3. Connect your repository
-4. Add `OPENAI_API_KEY` in Secrets (Settings → Secrets)
-
-### Docker (Optional)
-```bash
-docker build -t de-fr-translator .
-docker run -p 8501:8501 -e OPENAI_API_KEY=your-key de-fr-translator
-```
-
----
-
-## Project Structure
-
-```
-de-fr-ecommerce-translator/
-├── app.py              # Main Streamlit application
-├── requirements.txt    # Python dependencies
-├── .env.example        # Environment template
-├── .gitignore          # Git ignore rules
-└── README.md           # Documentation
-```
-
----
-
-## Demo
-
-To test the application, create a sample Excel file with:
-- Sheet name: "Tabelle1"
-- Columns: `articleNumber`, `name`, `colorDetail`, `materialDetail`
-- Sample German product data
-
----
-
 ## Author
 
 **Yves Koulle Banga**
@@ -190,7 +210,7 @@ To test the application, create a sample Excel file with:
 
 ## License
 
-MIT License - See [LICENSE](LICENSE) for details.
+MIT License — See [LICENSE](LICENSE) for details.
 
 ---
 

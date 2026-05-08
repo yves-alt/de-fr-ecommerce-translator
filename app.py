@@ -664,11 +664,27 @@ def detect_german_residue(text: str) -> list[str]:
 # TRANSLATION FUNCTIONS
 # =============================================================================
 
+def _get_api_key() -> str | None:
+    """Return API key — tries st.secrets first (Streamlit Cloud), then .env (local)."""
+    try:
+        key = st.secrets.get("OPENAI_API_KEY")
+        if key:
+            return key
+    except Exception:
+        pass
+    return os.environ.get("OPENAI_API_KEY")
+
+
 def get_openai_client():
-    """Initialize OpenAI client from environment variable."""
-    api_key = os.environ.get("OPENAI_API_KEY")
+    """Initialize OpenAI client from Streamlit secrets or .env file."""
+    api_key = _get_api_key()
     if not api_key:
-        st.error("⚠️ OPENAI_API_KEY environment variable not set!")
+        st.error(
+            "⚠️ **OPENAI_API_KEY not configured.**\n\n"
+            "- **Locally:** add `OPENAI_API_KEY=sk-...` to your `.env` file.\n"
+            "- **Streamlit Cloud:** go to App settings → Secrets and add:\n"
+            "  ```\n  OPENAI_API_KEY = \"sk-...\"\n  ```"
+        )
         st.stop()
     return OpenAI(api_key=api_key)
 
@@ -1101,10 +1117,16 @@ def main():
     render_header()
 
     # Check for API key
-    if not os.environ.get("OPENAI_API_KEY"):
+    if not _get_api_key():
         st.markdown('''
         <div class="warning-message">
-            <span class="text">⚠️ OPENAI_API_KEY environment variable not set.</span>
+            <div class="text">⚠️ OPENAI_API_KEY not configured.</div>
+            <br>
+            <small style="color:#92400e;">
+            <strong>Locally:</strong> add <code>OPENAI_API_KEY=sk-...</code> to your <code>.env</code> file.<br>
+            <strong>Streamlit Cloud:</strong> go to App settings → Secrets and add:<br>
+            <code>OPENAI_API_KEY = "sk-..."</code>
+            </small>
         </div>
         ''', unsafe_allow_html=True)
         st.stop()
