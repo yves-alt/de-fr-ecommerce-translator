@@ -79,6 +79,47 @@ FRENCH_ACCEPTABLE_WORDS = [
     "beige", "taupe", "polyester", "set", "bouclé", "boucle",
 ]
 
+# Column headers that must NEVER be translated
+PROTECTED_KEYWORDS = [
+    "articlenumber", "article_number", "sku", "productid", "product_id",
+]
+
+# Headers containing these keywords are flagged as "possibly missed" if not matched
+IMPORTANT_KEYWORDS = [
+    "name", "color", "colour", "delivery", "measurement",
+    "quality", "textile", "composition", "material", "variant",
+]
+
+# Tier 1: header normalized to lowercase must EQUAL one of these aliases
+TRANSLATE_ALIASES_T1 = {
+    "name":                     ["name", "productname", "product_name"],
+    "colorDetail":              ["colordetail", "colourdetail", "color_detail", "colour_detail"],
+    "deliveryScope":            ["deliveryscope", "delivery_scope", "lieferumfang"],
+    "materialDetail":           ["materialdetail", "materialdetails", "material_detail", "compositionmatiere"],
+    "otherMeasurements":        ["othermeasurements", "other_measurements", "masse", "abmessungen"],
+    "qualityDetail":            ["qualitydetail", "quality_detail"],
+    "textileCompositionCover1": [
+        "textilecompositioncover1", "textilecompositioncover",
+        "textilecomposition",       "textecomposition",
+        "compositioncover",         "compositioncover1",
+        "textecompositioncover1",
+    ],
+    "variantName":              ["variantname", "variant_name", "variantenname"],
+}
+
+# Tier 2: header normalized to lowercase must CONTAIN one of these substrings
+# Processed in order; first match wins. More specific entries listed first.
+TRANSLATE_ALIASES_T2 = {
+    "textileCompositionCover1": ["textilecomposition", "textecomposition", "textilcomposition", "textile", "textil", "composition"],
+    "materialDetail":           ["material"],
+    "colorDetail":              ["color", "colour"],
+    "deliveryScope":            ["delivery"],
+    "otherMeasurements":        ["measurement"],
+    "qualityDetail":            ["quality"],
+    "variantName":              ["variant"],
+    "name":                     ["productname"],
+}
+
 
 # =============================================================================
 # CUSTOM CSS - VIBRANT DESIGN
@@ -591,6 +632,65 @@ def format_time(seconds):
     return str(timedelta(seconds=int(seconds)))[2:7]
 
 
+def render_column_report(classification: dict):
+    """Render the Column Detection Report card (shown before translation starts)."""
+    to_translate = classification["to_translate"]
+    protected    = classification["protected"]
+    ignored      = classification["ignored"]
+    possible_missed = classification["possible_missed"]
+
+    st.markdown('''
+    <div class="card">
+        <div class="card-header">
+            <div class="card-header-icon">🔎</div>
+            Column Detection Report
+        </div>
+    </div>
+    ''', unsafe_allow_html=True)
+
+    if to_translate:
+        items_html = ""
+        for header, (_, canonical) in to_translate.items():
+            if header == canonical:
+                items_html += f"<li><code>{header}</code></li>"
+            else:
+                items_html += f"<li><code>{header}</code> → matched as <em>{canonical}</em></li>"
+        st.markdown(f'''
+        <div class="info-box">
+            <p><strong>✅ Columns selected for translation ({len(to_translate)}):</strong></p>
+            <ul style="margin:8px 0 0 0;padding-left:20px;">{items_html}</ul>
+        </div>
+        ''', unsafe_allow_html=True)
+    else:
+        st.markdown('''
+        <div class="warning-message">
+            <div class="text">⚠️ No translatable columns detected in this sheet.</div>
+        </div>
+        ''', unsafe_allow_html=True)
+
+    if protected:
+        prot_list = " ".join(f"<code>{h}</code>" for h in protected)
+        st.markdown(f'''
+        <div class="info-box">
+            <p><strong>🔒 Protected (never translated):</strong> {prot_list}</p>
+        </div>
+        ''', unsafe_allow_html=True)
+
+    if possible_missed:
+        missed_html = " ".join(f"<code>{h}</code>" for h in possible_missed)
+        st.markdown(f'''
+        <div class="warning-message">
+            <div class="text">⚠️ Possible missed translation column(s): {missed_html}</div>
+            <br><small style="color:#92400e;">These columns look important but did not match any
+            known pattern. Check the column names in the file.</small>
+        </div>
+        ''', unsafe_allow_html=True)
+
+    if ignored:
+        with st.expander(f"Ignored columns ({len(ignored)})"):
+            st.markdown(", ".join(f"`{h}`" for h in ignored))
+
+
 def render_footer():
     """Render the app footer with branding."""
     st.markdown('''
@@ -828,15 +928,68 @@ def detect_target_sheet(sheet_names: list) -> str | None:
 
 
 def detect_columns(worksheet) -> dict:
-    """Read first row to detect column names and their indices."""
+    """Read first row to detect column names and their indices. Works on read-only worksheets."""
     columns = {}
-    for cell in worksheet[1]:
-        if cell.value is not None:
-            columns[str(cell.value).strip()] = cell.column
+    for row in worksheet.iter_rows(min_row=1, max_row=1):
+        for cell in row:
+            if cell.value is not None:
+                columns[str(cell.value).strip()] = cell.column
     return columns
 
 
-def process_excel_with_progress(uploaded_file, progress_bar, progress_container, sheet_name: str):
+def classify_columns(all_columns: dict) -> dict:
+    """
+    Classify worksheet headers into four buckets.
+
+    Returns:
+        to_translate:    {header: (col_idx, canonical_name)}
+        protected:       {header: col_idx}
+        ignored:         {header: col_idx}
+        possible_missed: [header, ...]
+    """
+    to_translate   = {}
+    protected      = {}
+    ignored        = {}
+    possible_missed = []
+
+    for header, col_idx in all_columns.items():
+        normalized = header.strip().lower()
+
+        # --- Protected: never translate ---
+        if any(pk in normalized for pk in PROTECTED_KEYWORDS):
+            protected[header] = col_idx
+            continue
+
+        # --- Tier 1: exact alias equality ---
+        canonical = None
+        for can, aliases in TRANSLATE_ALIASES_T1.items():
+            if normalized in aliases:
+                canonical = can
+                break
+
+        # --- Tier 2: substring match (only if Tier 1 missed) ---
+        if canonical is None:
+            for can, substrings in TRANSLATE_ALIASES_T2.items():
+                if any(sub in normalized for sub in substrings):
+                    canonical = can
+                    break
+
+        if canonical is not None:
+            to_translate[header] = (col_idx, canonical)
+        else:
+            ignored[header] = col_idx
+            if any(ik in normalized for ik in IMPORTANT_KEYWORDS):
+                possible_missed.append(header)
+
+    return {
+        "to_translate":    to_translate,
+        "protected":       protected,
+        "ignored":         ignored,
+        "possible_missed": possible_missed,
+    }
+
+
+def process_excel_with_progress(uploaded_file, progress_bar, progress_container, sheet_name: str, column_classification: dict):
     """Process the uploaded Excel file with real-time progress tracking."""
     client = get_openai_client()
 
@@ -857,18 +1010,15 @@ def process_excel_with_progress(uploaded_file, progress_bar, progress_container,
 
         worksheet = workbook[sheet_name]
         stats["sheet_name"] = sheet_name
-        all_columns = detect_columns(worksheet)
 
-        columns_to_process = {
-            name: idx for name, idx in all_columns.items()
-            if name in COLUMNS_TO_TRANSLATE
-        }
+        # to_translate: {header: (col_idx, canonical_name)}
+        to_translate = column_classification["to_translate"]
 
-        if not columns_to_process:
+        if not to_translate:
             raise ValueError("No translatable columns found in the file.")
 
         total_rows = worksheet.max_row - 1
-        total_cells = total_rows * len(columns_to_process)
+        total_cells = total_rows * len(to_translate)
         processed_cells = 0
 
         start_time = time.time()
@@ -879,12 +1029,11 @@ def process_excel_with_progress(uploaded_file, progress_bar, progress_container,
         for row_num in range(2, worksheet.max_row + 1):
             row_index = row_num - 1
 
-            for col_name, col_idx in columns_to_process.items():
+            for col_header, (col_idx, canonical) in to_translate.items():
                 processed_cells += 1
                 elapsed = time.time() - start_time
                 progress = processed_cells / total_cells
 
-                # Calculate estimated remaining time
                 if processed_cells > 0:
                     time_per_cell = elapsed / processed_cells
                     remaining_cells = total_cells - processed_cells
@@ -892,10 +1041,8 @@ def process_excel_with_progress(uploaded_file, progress_bar, progress_container,
                 else:
                     estimated_remaining = 0
 
-                # Update progress bar
-                progress_bar.progress(progress * 0.7)  # 70% for translation phase
+                progress_bar.progress(progress * 0.7)
 
-                # Update progress display
                 progress_container.markdown(f'''
                 <div class="progress-card">
                     <div class="progress-title">⚡ Translation in progress — sheet: <strong>{sheet_name}</strong></div>
@@ -915,7 +1062,7 @@ def process_excel_with_progress(uploaded_file, progress_bar, progress_container,
                     </div>
                     <div class="progress-current">
                         <span>📍 Row {row_index} / {total_rows}</span>
-                        <span>📝 {col_name}</span>
+                        <span>📝 {col_header}</span>
                     </div>
                     <div class="progress-time">
                         <div class="time-item">
@@ -938,9 +1085,9 @@ def process_excel_with_progress(uploaded_file, progress_bar, progress_container,
                     stats["cells_skipped"] += 1
                     continue
 
-                translated = translate_text(client, original_value, col_name)
+                translated = translate_text(client, original_value, canonical)
 
-                if col_name == "name":
+                if canonical == "name":
                     translated = validate_product_name(translated)
 
                 cell.value = translated
@@ -950,12 +1097,12 @@ def process_excel_with_progress(uploaded_file, progress_bar, progress_container,
         # PHASE 2: German Residue Check
         # =================================================================
         residue_check_cells = 0
-        total_residue_cells = total_rows * len(columns_to_process)
+        total_residue_cells = total_rows * len(to_translate)
 
         for row_num in range(2, worksheet.max_row + 1):
             row_index = row_num - 1
 
-            for col_name, col_idx in columns_to_process.items():
+            for col_header, (col_idx, canonical) in to_translate.items():
                 residue_check_cells += 1
                 elapsed = time.time() - start_time
                 progress = 0.7 + (residue_check_cells / total_residue_cells) * 0.25
@@ -981,7 +1128,7 @@ def process_excel_with_progress(uploaded_file, progress_bar, progress_container,
                     </div>
                     <div class="progress-current">
                         <span>🔎 Checking row {row_index} / {total_rows}</span>
-                        <span>📝 {col_name}</span>
+                        <span>📝 {col_header}</span>
                     </div>
                     <div class="progress-time">
                         <div class="time-item">
@@ -1004,17 +1151,17 @@ def process_excel_with_progress(uploaded_file, progress_bar, progress_container,
                 detected = detect_german_residue(text)
 
                 if detected:
-                    corrected = fix_german_residue(client, text, col_name)
+                    corrected = fix_german_residue(client, text, canonical)
                     stats["residue_corrections"] += 1
 
                     detected_2 = detect_german_residue(corrected)
                     if detected_2:
-                        corrected = fix_german_residue(client, corrected, col_name)
+                        corrected = fix_german_residue(client, corrected, canonical)
                         stats["residue_corrections"] += 1
 
                         detected_3 = detect_german_residue(corrected)
                         if detected_3:
-                            corrected = fix_german_residue(client, corrected, col_name)
+                            corrected = fix_german_residue(client, corrected, canonical)
                             stats["residue_corrections"] += 1
 
                             detected_4 = detect_german_residue(corrected)
@@ -1022,7 +1169,7 @@ def process_excel_with_progress(uploaded_file, progress_bar, progress_container,
                                 stats["unresolved_warnings"] += 1
                                 stats["warning_details"].append({
                                     "row": row_num,
-                                    "column": col_name,
+                                    "column": col_header,
                                     "text": corrected[:50] + "..." if len(corrected) > 50 else corrected,
                                     "residue": detected_4[:3]
                                 })
@@ -1064,7 +1211,7 @@ def process_excel_with_progress(uploaded_file, progress_bar, progress_container,
         ''', unsafe_allow_html=True)
 
         for row_num in range(2, worksheet.max_row + 1):
-            for col_name, col_idx in columns_to_process.items():
+            for col_header, (col_idx, canonical) in to_translate.items():
                 cell = worksheet.cell(row=row_num, column=col_idx)
                 cell_value = cell.value
 
@@ -1075,20 +1222,20 @@ def process_excel_with_progress(uploaded_file, progress_bar, progress_container,
                 detected = detect_german_residue(text)
 
                 if detected:
-                    corrected = fix_german_residue(client, text, col_name)
+                    corrected = fix_german_residue(client, text, canonical)
                     stats["residue_corrections"] += 1
 
                     final_detected = detect_german_residue(corrected)
                     if final_detected:
                         existing = any(
-                            w["row"] == row_num and w["column"] == col_name
+                            w["row"] == row_num and w["column"] == col_header
                             for w in stats["warning_details"]
                         )
                         if not existing:
                             stats["unresolved_warnings"] += 1
                             stats["warning_details"].append({
                                 "row": row_num,
-                                "column": col_name,
+                                "column": col_header,
                                 "text": corrected[:50] + "..." if len(corrected) > 50 else corrected,
                                 "residue": final_detected[:3]
                             })
@@ -1103,6 +1250,12 @@ def process_excel_with_progress(uploaded_file, progress_bar, progress_container,
         workbook.close()
 
         stats["total_time"] = format_time(time.time() - start_time)
+        stats["quality_gate"] = {
+            "no_residue":        stats["unresolved_warnings"] == 0,
+            "protected_columns": list(column_classification["protected"].keys()),
+            "possible_missed":   column_classification["possible_missed"],
+            "translated_columns": list(to_translate.keys()),
+        }
 
         return output, stats
 
@@ -1175,10 +1328,9 @@ def main():
 
         output_filename = f"FR-{uploaded_file.name}"
 
-        # Resolve target sheet
+        # Resolve target sheet + classify columns in a single workbook peek
         wb_peek = load_workbook(BytesIO(uploaded_file.getvalue()), read_only=True, data_only=True)
         available_sheets = wb_peek.sheetnames
-        wb_peek.close()
 
         auto_sheet = detect_target_sheet(available_sheets)
 
@@ -1191,11 +1343,18 @@ def main():
                 key="sheet_selector"
             )
 
+        peek_headers = detect_columns(wb_peek[selected_sheet])
+        wb_peek.close()
+
+        classification = classify_columns(peek_headers)
+
         st.markdown(f'''
         <div class="info-box">
             <p>Processing sheet: <strong>{selected_sheet}</strong></p>
         </div>
         ''', unsafe_allow_html=True)
+
+        render_column_report(classification)
 
         # Translation section
         st.markdown('''
@@ -1230,7 +1389,8 @@ def main():
                     uploaded_file,
                     progress_bar,
                     progress_container,
-                    selected_sheet
+                    selected_sheet,
+                    classification
                 )
 
                 progress_container.empty()
@@ -1247,6 +1407,41 @@ def main():
                 ''', unsafe_allow_html=True)
 
                 render_stats(stats)
+
+                # Quality Gate
+                qg = stats.get("quality_gate", {})
+                st.markdown('''
+                <div class="card">
+                    <div class="card-header">
+                        <div class="card-header-icon">🛡️</div>
+                        Quality Gate
+                    </div>
+                </div>
+                ''', unsafe_allow_html=True)
+
+                gate_rows = [
+                    ("✅" if qg.get("no_residue") else "⚠️",
+                     "German residue",
+                     "None detected" if qg.get("no_residue") else "Residue found — see warnings below"),
+                    ("✅", "Row 1 (headers)", "Untouched"),
+                    ("✅" if qg.get("protected_columns") else "ℹ️",
+                     "Protected columns",
+                     ", ".join(qg.get("protected_columns", [])) or "None found in sheet"),
+                    ("⚠️" if qg.get("possible_missed") else "✅",
+                     "Missed columns check",
+                     ", ".join(qg.get("possible_missed", [])) or "All important columns accounted for"),
+                ]
+                gate_html = "".join(
+                    f"<tr><td style='padding:6px 12px;font-size:16px;'>{icon}</td>"
+                    f"<td style='padding:6px 12px;font-weight:600;color:#1e293b;'>{label}</td>"
+                    f"<td style='padding:6px 12px;color:#64748b;font-size:13px;'>{value}</td></tr>"
+                    for icon, label, value in gate_rows
+                )
+                st.markdown(f'''
+                <div style="background:#f8fafc;border-radius:12px;padding:8px 16px;border:1px solid #e2e8f0;margin:16px 0;">
+                    <table style="width:100%;border-collapse:collapse;">{gate_html}</table>
+                </div>
+                ''', unsafe_allow_html=True)
 
                 processed_sheet = stats.get("sheet_name", "unknown")
                 if stats["unresolved_warnings"] == 0:
