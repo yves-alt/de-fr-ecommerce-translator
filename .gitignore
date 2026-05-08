@@ -1,0 +1,125 @@
+# =============================================================================
+# German to French E-commerce Translator - Git Ignore
+# =============================================================================
+
+# =============================================================================
+# SECURITY - NEVER COMMIT THESE
+# =============================================================================
+
+# Environment variables (contains API keys)
+.env
+.env.local
+.env.*.local
+.env.production
+.env.development
+
+# API keys and secrets
+*.key
+*.pem
+secrets.toml
+secrets/
+
+# =============================================================================
+# DATA FILES - NEVER COMMIT
+# =============================================================================
+
+# Excel files (may contain confidential product data)
+*.xlsx
+*.xls
+*.xlsm
+*.xlsb
+FR-*.xlsx
+
+# CSV and data files
+*.csv
+data/
+
+# =============================================================================
+# PYTHON
+# =============================================================================
+
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+venv/
+.venv/
+ENV/
+env/
+.env/
+
+# =============================================================================
+# IDE AND EDITORS
+# =============================================================================
+
+.idea/
+.vscode/
+*.swp
+*.swo
+*.sublime-project
+*.sublime-workspace
+.spyderproject
+.spyproject
+*.code-workspace
+
+# =============================================================================
+# OS FILES
+# =============================================================================
+
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# =============================================================================
+# LOGS AND TEMP FILES
+# =============================================================================
+
+*.log
+logs/
+*.tmp
+*.temp
+*.bak
+*.cache
+
+# =============================================================================
+# STREAMLIT
+# =============================================================================
+
+.streamlit/secrets.toml
+
+# =============================================================================
+# TESTING
+# =============================================================================
+
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+*.py,cover
