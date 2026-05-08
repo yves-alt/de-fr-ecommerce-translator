@@ -29,7 +29,7 @@ load_dotenv()
 # CONFIGURATION
 # =============================================================================
 
-TARGET_SHEET = "Tabelle1"
+CANDIDATE_SHEETS = ["Tabelle1", "Translations"]
 
 COLUMNS_TO_TRANSLATE = [
     "name",
@@ -814,6 +814,18 @@ Return ONLY the corrected French text."""
 # EXCEL PROCESSING WITH PROGRESS
 # =============================================================================
 
+def detect_target_sheet(workbook) -> str:
+    """Return the first matching candidate sheet, or raise a clear error listing available sheets."""
+    for name in CANDIDATE_SHEETS:
+        if name in workbook.sheetnames:
+            return name
+    available = ", ".join(f'"{s}"' for s in workbook.sheetnames)
+    raise ValueError(
+        f"No target sheet found. Expected one of: {CANDIDATE_SHEETS}. "
+        f"Available sheets: {available}"
+    )
+
+
 def detect_columns(worksheet) -> dict:
     """Read first row to detect column names and their indices."""
     columns = {}
@@ -842,10 +854,9 @@ def process_excel_with_progress(uploaded_file, progress_bar, progress_container)
     try:
         workbook = load_workbook(filename=tmp_path, data_only=False)
 
-        if TARGET_SHEET not in workbook.sheetnames:
-            raise ValueError(f"Sheet '{TARGET_SHEET}' not found. Available: {workbook.sheetnames}")
-
-        worksheet = workbook[TARGET_SHEET]
+        sheet_name = detect_target_sheet(workbook)
+        worksheet = workbook[sheet_name]
+        stats["sheet_name"] = sheet_name
         all_columns = detect_columns(worksheet)
 
         columns_to_process = {
@@ -887,7 +898,7 @@ def process_excel_with_progress(uploaded_file, progress_bar, progress_container)
                 # Update progress display
                 progress_container.markdown(f'''
                 <div class="progress-card">
-                    <div class="progress-title">⚡ Translation in progress...</div>
+                    <div class="progress-title">⚡ Translation in progress — sheet: <strong>{sheet_name}</strong></div>
                     <div class="progress-grid">
                         <div class="progress-stat">
                             <p class="progress-stat-value">{stats["cells_translated"]}</p>
@@ -953,7 +964,7 @@ def process_excel_with_progress(uploaded_file, progress_bar, progress_container)
 
                 progress_container.markdown(f'''
                 <div class="progress-card">
-                    <div class="progress-title">🔍 Checking German residue...</div>
+                    <div class="progress-title">🔍 Checking German residue — sheet: <strong>{sheet_name}</strong></div>
                     <div class="progress-grid">
                         <div class="progress-stat">
                             <p class="progress-stat-value">{stats["cells_translated"]}</p>
@@ -1143,7 +1154,7 @@ def main():
 
     st.markdown('''
     <div class="info-box">
-        <p>Upload a German Excel file containing the sheet <strong>Tabelle1</strong>.
+        <p>Upload a German Excel file containing a sheet named <strong>Tabelle1</strong> or <strong>Translations</strong>.
         The translator will process: name, colorDetail, deliveryScope, materialDetail, and other product columns.</p>
     </div>
     ''', unsafe_allow_html=True)
@@ -1213,13 +1224,14 @@ def main():
 
                 render_stats(stats)
 
+                processed_sheet = stats.get("sheet_name", "unknown")
                 if stats["unresolved_warnings"] == 0:
                     st.markdown(f'''
                     <div class="success-message">
                         <span class="icon">✓</span>
                         <div>
                             <span class="text">Translation complete!</span><br>
-                            <small style="color: #065f46;">No German residue detected • Total time: {stats.get("total_time", "N/A")}</small>
+                            <small style="color: #065f46;">Sheet processed: <strong>{processed_sheet}</strong> • No German residue detected • Total time: {stats.get("total_time", "N/A")}</small>
                         </div>
                     </div>
                     ''', unsafe_allow_html=True)
@@ -1227,7 +1239,7 @@ def main():
                     st.markdown(f'''
                     <div class="warning-message">
                         <span class="text">⚠️ Translation complete with {stats["unresolved_warnings"]} warning(s).</span><br>
-                        <small>Some cells may need manual review • Total time: {stats.get("total_time", "N/A")}</small>
+                        <small>Sheet processed: <strong>{processed_sheet}</strong> • Some cells may need manual review • Total time: {stats.get("total_time", "N/A")}</small>
                     </div>
                     ''', unsafe_allow_html=True)
 
