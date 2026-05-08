@@ -29,7 +29,7 @@ load_dotenv()
 # CONFIGURATION
 # =============================================================================
 
-CANDIDATE_SHEETS = ["Tabelle1", "Translations"]
+CANDIDATE_SHEETS = ["Tabelle1", "Translations", "Sheet1"]
 
 COLUMNS_TO_TRANSLATE = [
     "name",
@@ -814,16 +814,17 @@ Return ONLY the corrected French text."""
 # EXCEL PROCESSING WITH PROGRESS
 # =============================================================================
 
-def detect_target_sheet(workbook) -> str:
-    """Return the first matching candidate sheet, or raise a clear error listing available sheets."""
+def detect_target_sheet(sheet_names: list) -> str | None:
+    """
+    Return the auto-selected sheet name, or None if the caller must show a picker.
+    Priority: CANDIDATE_SHEETS in order → single-sheet workbook → None (multi-sheet, no match).
+    """
     for name in CANDIDATE_SHEETS:
-        if name in workbook.sheetnames:
+        if name in sheet_names:
             return name
-    available = ", ".join(f'"{s}"' for s in workbook.sheetnames)
-    raise ValueError(
-        f"No target sheet found. Expected one of: {CANDIDATE_SHEETS}. "
-        f"Available sheets: {available}"
-    )
+    if len(sheet_names) == 1:
+        return sheet_names[0]
+    return None
 
 
 def detect_columns(worksheet) -> dict:
@@ -835,7 +836,7 @@ def detect_columns(worksheet) -> dict:
     return columns
 
 
-def process_excel_with_progress(uploaded_file, progress_bar, progress_container):
+def process_excel_with_progress(uploaded_file, progress_bar, progress_container, sheet_name: str):
     """Process the uploaded Excel file with real-time progress tracking."""
     client = get_openai_client()
 
@@ -854,7 +855,6 @@ def process_excel_with_progress(uploaded_file, progress_bar, progress_container)
     try:
         workbook = load_workbook(filename=tmp_path, data_only=False)
 
-        sheet_name = detect_target_sheet(workbook)
         worksheet = workbook[sheet_name]
         stats["sheet_name"] = sheet_name
         all_columns = detect_columns(worksheet)
@@ -1154,8 +1154,9 @@ def main():
 
     st.markdown('''
     <div class="info-box">
-        <p>Upload a German Excel file containing a sheet named <strong>Tabelle1</strong> or <strong>Translations</strong>.
-        The translator will process: name, colorDetail, deliveryScope, materialDetail, and other product columns.</p>
+        <p>Upload a German Excel file. The app will auto-detect the sheet to translate
+        (<strong>Tabelle1</strong>, <strong>Translations</strong>, or <strong>Sheet1</strong>).
+        For other sheet names, you will be asked to choose.</p>
     </div>
     ''', unsafe_allow_html=True)
 
@@ -1173,6 +1174,28 @@ def main():
         ''', unsafe_allow_html=True)
 
         output_filename = f"FR-{uploaded_file.name}"
+
+        # Resolve target sheet
+        wb_peek = load_workbook(BytesIO(uploaded_file.getvalue()), read_only=True, data_only=True)
+        available_sheets = wb_peek.sheetnames
+        wb_peek.close()
+
+        auto_sheet = detect_target_sheet(available_sheets)
+
+        if auto_sheet is not None:
+            selected_sheet = auto_sheet
+        else:
+            selected_sheet = st.selectbox(
+                "Multiple sheets found — select the sheet to translate:",
+                available_sheets,
+                key="sheet_selector"
+            )
+
+        st.markdown(f'''
+        <div class="info-box">
+            <p>Processing sheet: <strong>{selected_sheet}</strong></p>
+        </div>
+        ''', unsafe_allow_html=True)
 
         # Translation section
         st.markdown('''
@@ -1206,7 +1229,8 @@ def main():
                 output_bytes, stats = process_excel_with_progress(
                     uploaded_file,
                     progress_bar,
-                    progress_container
+                    progress_container,
+                    selected_sheet
                 )
 
                 progress_container.empty()
