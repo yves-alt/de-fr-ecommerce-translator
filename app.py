@@ -1737,6 +1737,7 @@ def process_excel_with_progress(
     sheet_name: str,
     column_classification: dict,
     batch_size: int = DEFAULT_BATCH_SIZE,
+    highlight_review_warnings: bool = False,
 ) -> tuple[BytesIO, dict]:
     client   = get_openai_client()
     tm       = load_translation_memory()
@@ -1904,10 +1905,14 @@ def process_excel_with_progress(
             for row_num, col_header, col_idx, canonical, text in cells_queue
         }
 
-        # ── Capture original Excel highlights before writing any translations ───
-        # These are the source cell fills from the uploaded German file.
-        # original_excel_highlights are preserved for clean cells and take no
-        # part in the review_warning decision — they are a separate signal.
+        # ── Signal separation ─────────────────────────────────────────────────
+        # Three independent signals — only the first two may affect Excel color:
+        #   original_excel_highlights : source cell fills → always preserved
+        #   review_warnings           : quality issues  → REVIEW_FILL only when
+        #                               highlight_review_warnings=True (opt-in checkbox)
+        #   glossary_hits             : analytics only  → NEVER affect cell color
+
+        # Capture original fills from the source workbook before writing anything.
         original_excel_highlights: dict[tuple, object] = {}
         for (rn, ci) in results:
             src_cell = worksheet.cell(row=rn, column=ci)
@@ -1918,32 +1923,41 @@ def process_excel_with_progress(
                     pass
 
         review_items: list[dict] = []
+        cells_original_highlight = 0   # audit: source fills restored
+        cells_review_highlighted  = 0  # audit: cells highlighted due to review warning
 
-        # Write all translations back and apply fill based on signal type:
-        #   review_warning         → REVIEW_FILL (yellow)
-        #   original_excel_highlight only → restore source fill
-        #   glossary_hit (no warning)     → no fill change (tracked in analytics only)
         for (row_num, col_idx), translation in results.items():
             cell       = worksheet.cell(row=row_num, column=col_idx)
             cell.value = translation
             src_text, src_canonical = source_lookup.get((row_num, col_idx), (translation, "other"))
+            has_original = (row_num, col_idx) in original_excel_highlights
 
-            # Glossary hits are already counted in glossary_run_stats; they do NOT
-            # influence the quality check or cell color here.
+            # Quality analysis — glossary_hits are already in glossary_run_stats and
+            # have no path to cell.fill regardless of the outcome here.
             issues = analyze_translation_quality(src_text, translation, src_canonical, glossary)
+
             if issues:
-                # review_warning: real quality problem → yellow highlight for human review
-                cell.fill = REVIEW_FILL
+                # review_warning detected — record for dashboard display.
                 review_items.append({
                     "row":         row_num,
                     "col_idx":     col_idx,
                     "translation": translation[:60] + "…" if len(translation) > 60 else translation,
                     "issues":      issues,
                 })
-            elif (row_num, col_idx) in original_excel_highlights:
-                # original_excel_highlight: no quality issue — restore source formatting
+                if highlight_review_warnings:
+                    # User opted in via checkbox → apply yellow review fill.
+                    cell.fill = REVIEW_FILL
+                    cells_review_highlighted += 1
+                elif has_original:
+                    # Opt-in is off; still restore the original source highlight.
+                    cell.fill = original_excel_highlights[(row_num, col_idx)]
+                    cells_original_highlight += 1
+                # else: no fill — warning shown in dashboard only (default behavior)
+            elif has_original:
+                # Clean translation with original source highlight → preserve it.
                 cell.fill = original_excel_highlights[(row_num, col_idx)]
-            # else: clean cell, no original highlight → leave fill as default
+                cells_original_highlight += 1
+            # else: clean cell, no original highlight → no color applied
 
         total_cells_for_passes = total_rows * len(to_translate)
 
@@ -2062,6 +2076,11 @@ def process_excel_with_progress(
         stats["review_count"] = len(review_items)
         stats["retry_count"]  = retry_count[0]
 
+        # Audit counters for the export highlighting report
+        stats["original_highlights_preserved"] = cells_original_highlight
+        stats["review_highlights_applied"]      = cells_review_highlighted
+        stats["highlight_review_warnings"]      = highlight_review_warnings
+
         return output, stats
 
     finally:
@@ -2169,6 +2188,17 @@ def translator_page():
                 value=DEFAULT_BATCH_SIZE,
                 help="Higher = fewer API calls but larger requests. Default 20 is optimal for most files.",
             )
+            st.markdown("---")
+            highlight_warnings_in_excel = st.checkbox(
+                "Highlight review warnings in exported Excel",
+                value=False,
+                key="highlight_warnings_excel",
+                help=(
+                    "When checked, cells flagged by Human Review Mode are highlighted "
+                    "yellow in the exported file. Off by default — warnings appear in the "
+                    "dashboard report only, and original source highlights are always preserved."
+                ),
+            )
 
         st.markdown('<div class="section-label">Translate</div>', unsafe_allow_html=True)
         st.markdown("""
@@ -2193,6 +2223,7 @@ def translator_page():
                     uploaded_file, progress_bar, progress_container,
                     selected_sheet, classification,
                     batch_size=int(batch_size),
+                    highlight_review_warnings=highlight_warnings_in_excel,
                 )
                 progress_container.empty()
                 progress_bar.empty()
@@ -2277,9 +2308,14 @@ def translator_page():
                 review_items = stats.get("review_items", [])
                 if review_items:
                     st.markdown('<div class="section-label">Human Review</div>', unsafe_allow_html=True)
+                    excel_note = (
+                        "highlighted yellow in downloaded Excel"
+                        if highlight_warnings_in_excel
+                        else "shown in this report only — no Excel color added"
+                    )
                     with st.expander(
                         f"Review Recommended — {len(review_items)} cell(s) flagged "
-                        f"(highlighted yellow in downloaded Excel)"
+                        f"({excel_note})"
                     ):
                         for item in review_items:
                             issues_str = " · ".join(i["reason"] for i in item["issues"])
@@ -2293,6 +2329,33 @@ def translator_page():
                                 </div>
                             </div>
                             """, unsafe_allow_html=True)
+
+                # ── Export Audit ──
+                n_orig  = stats.get("original_highlights_preserved", 0)
+                n_rev   = stats.get("review_highlights_applied", 0)
+                n_gloss = stats.get("glossary_hits", 0)
+                rev_label = (
+                    f"{n_rev} cell(s) highlighted (checkbox enabled)"
+                    if highlight_warnings_in_excel
+                    else f"0 — checkbox off, {len(review_items)} warning(s) in dashboard only"
+                )
+                orig_label = f"{n_orig} cell(s) — source formatting preserved" if n_orig else "None in this file"
+                audit_rows = [
+                    ("📋", "Original source highlights",    orig_label),
+                    ("🟡" if n_rev else "✅", "Review warnings in Excel", rev_label),
+                    ("✅", "Glossary hits in Excel",
+                     f"{n_gloss} hit(s) tracked in analytics — no cell color applied"),
+                ]
+                audit_html = "".join(
+                    f"""<div class="qg-row">
+                        <span class="qg-icon">{icon}</span>
+                        <span class="qg-label">{label}</span>
+                        <span class="qg-value">{value}</span>
+                    </div>"""
+                    for icon, label, value in audit_rows
+                )
+                st.markdown('<div class="section-label">Export Audit</div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="qg">{audit_html}</div>', unsafe_allow_html=True)
 
                 # ── Completion banner ──
                 cost_str = (
