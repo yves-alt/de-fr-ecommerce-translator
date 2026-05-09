@@ -397,74 +397,108 @@ def _normalize_header(header: str) -> set[str]:
 # DESIGN SYSTEM — CSS
 # =============================================================================
 
-def inject_custom_css():
-    st.markdown("""
+def inject_custom_css(theme: str = "Dark"):
+    dark = theme == "Dark"
+
+    # ── Background tokens ──────────────────────────────────────────────────────
+    bg_app    = "#0a0a0f"                 if dark else "#f4f4fa"
+    bg_sb     = "#06060d"                 if dark else "#eceaf6"
+    bg_card   = "#111118"                 if dark else "#ffffff"
+    bg_input  = "#18181f"                 if dark else "#f0f0f8"
+    bg_hover  = "rgba(255,255,255,0.02)"  if dark else "rgba(0,0,0,0.025)"
+    bg_subtle = "rgba(255,255,255,0.025)" if dark else "rgba(0,0,0,0.03)"
+    # ── Border / divider tokens ────────────────────────────────────────────────
+    divider   = "rgba(255,255,255,0.05)"  if dark else "rgba(0,0,0,0.07)"
+    divider_s = "rgba(255,255,255,0.04)"  if dark else "rgba(0,0,0,0.05)"
+    border    = "rgba(255,255,255,0.06)"  if dark else "rgba(0,0,0,0.09)"
+    border_sm = "rgba(255,255,255,0.07)"  if dark else "rgba(0,0,0,0.09)"
+    border_md = "rgba(255,255,255,0.08)"  if dark else "rgba(0,0,0,0.10)"
+    border_dsh= "rgba(255,255,255,0.09)"  if dark else "rgba(0,0,0,0.12)"
+    border_hv = "rgba(255,255,255,0.12)"  if dark else "rgba(0,0,0,0.16)"
+    hover_rb  = "rgba(255,255,255,0.05)"  if dark else "rgba(0,0,0,0.06)"
+    # ── Text tokens ───────────────────────────────────────────────────────────
+    text      = "#f1f0f7" if dark else "#1a1a2e"
+    text2     = "#686880" if dark else "#5a5a7a"
+    text2b    = "#4a4a60" if dark else "#6a6a8a"
+    text3     = "#3a3a52" if dark else "#7070a0"
+    text4     = "#2e2e44" if dark else "#9090b8"
+    text5     = "#22223a" if dark else "#aaaacc"
+    text6     = "#1e1e2e" if dark else "#b0b0cc"
+    # ── Component-specific tokens ──────────────────────────────────────────────
+    sb_btn    = "#3a3a52" if dark else "#8888aa"
+    code_bg   = "rgba(255,255,255,0.07)" if dark else "rgba(0,0,0,0.06)"
+    code_clr  = "#9b9bbb" if dark else "#6060a0"
+    prog_trk  = "rgba(255,255,255,0.05)" if dark else "rgba(0,0,0,0.08)"
+    chip_bg   = "rgba(255,255,255,0.04)" if dark else "rgba(0,0,0,0.04)"
+    chip_bdr  = "rgba(255,255,255,0.08)" if dark else "rgba(0,0,0,0.09)"
+
+    st.markdown(f"""
     <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
 
     /* ── Reset & Base ─────────────────────────────────────────── */
-    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
 
-    .stApp {
-        background-color: #0a0a0f !important;
+    .stApp {{
+        background-color: {bg_app} !important;
         font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-        color: #f1f0f7;
+        color: {text};
         -webkit-font-smoothing: antialiased;
-    }
+    }}
 
     [data-testid="stAppViewContainer"],
     [data-testid="stMain"],
-    .main {
-        background-color: #0a0a0f !important;
-    }
+    .main {{
+        background-color: {bg_app} !important;
+    }}
 
-    .main .block-container {
+    .main .block-container {{
         padding: 2.5rem 2.5rem 4rem !important;
         max-width: 1080px !important;
-    }
+    }}
 
     #MainMenu, footer, header,
     div[data-testid="stDecoration"],
-    [data-testid="stToolbar"] { display: none !important; visibility: hidden !important; }
+    [data-testid="stToolbar"] {{ display: none !important; visibility: hidden !important; }}
 
     /* ── Animations ───────────────────────────────────────────── */
-    @keyframes fadeUp {
-        from { opacity: 0; transform: translateY(14px); }
-        to   { opacity: 1; transform: translateY(0); }
-    }
-    @keyframes glow-pulse {
-        0%, 100% { box-shadow: 0 0 0 0 rgba(124,92,252,0.5); }
-        50%       { box-shadow: 0 0 0 7px rgba(124,92,252,0); }
-    }
-    @keyframes dot-pulse {
-        0%, 100% { opacity: 1; transform: scale(1); }
-        50%       { opacity: 0.4; transform: scale(0.75); }
-    }
-    @keyframes slide-in {
-        from { opacity: 0; transform: translateX(-6px); }
-        to   { opacity: 1; transform: translateX(0); }
-    }
+    @keyframes fadeUp {{
+        from {{ opacity: 0; transform: translateY(14px); }}
+        to   {{ opacity: 1; transform: translateY(0); }}
+    }}
+    @keyframes glow-pulse {{
+        0%, 100% {{ box-shadow: 0 0 0 0 rgba(124,92,252,0.5); }}
+        50%       {{ box-shadow: 0 0 0 7px rgba(124,92,252,0); }}
+    }}
+    @keyframes dot-pulse {{
+        0%, 100% {{ opacity: 1; transform: scale(1); }}
+        50%       {{ opacity: 0.4; transform: scale(0.75); }}
+    }}
+    @keyframes slide-in {{
+        from {{ opacity: 0; transform: translateX(-6px); }}
+        to   {{ opacity: 1; transform: translateX(0); }}
+    }}
 
     /* ── Sidebar ──────────────────────────────────────────────── */
-    [data-testid="stSidebar"] {
-        background-color: #06060d !important;
-        border-right: 1px solid rgba(255,255,255,0.05) !important;
+    [data-testid="stSidebar"] {{
+        background-color: {bg_sb} !important;
+        border-right: 1px solid {divider} !important;
         min-width: 216px !important;
-    }
-    [data-testid="stSidebarContent"] { padding: 20px 14px !important; }
+    }}
+    [data-testid="stSidebarContent"] {{ padding: 20px 14px !important; }}
 
     [data-testid="stSidebar"] p,
     [data-testid="stSidebar"] span,
     [data-testid="stSidebar"] div,
-    [data-testid="stSidebar"] label { color: #686880 !important; }
+    [data-testid="stSidebar"] label {{ color: {text2} !important; }}
 
-    [data-testid="stSidebar"] hr {
+    [data-testid="stSidebar"] hr {{
         border: none !important;
-        border-top: 1px solid rgba(255,255,255,0.05) !important;
+        border-top: 1px solid {divider} !important;
         margin: 10px 0 !important;
-    }
+    }}
 
-    [data-testid="stSidebar"] [data-testid="stRadio"] label {
+    [data-testid="stSidebar"] [data-testid="stRadio"] label {{
         font-size: 13px !important;
         font-weight: 500 !important;
         padding: 8px 10px !important;
@@ -472,16 +506,16 @@ def inject_custom_css():
         cursor: pointer !important;
         transition: color 0.15s, background 0.15s !important;
         display: block !important;
-    }
-    [data-testid="stSidebar"] [data-testid="stRadio"] label:hover {
-        color: #f1f0f7 !important;
-        background: rgba(255,255,255,0.05) !important;
-    }
+    }}
+    [data-testid="stSidebar"] [data-testid="stRadio"] label:hover {{
+        color: {text} !important;
+        background: {hover_rb} !important;
+    }}
 
-    [data-testid="stSidebar"] .stButton > button {
+    [data-testid="stSidebar"] .stButton > button {{
         background: transparent !important;
-        color: #3a3a52 !important;
-        border: 1px solid rgba(255,255,255,0.06) !important;
+        color: {sb_btn} !important;
+        border: 1px solid {border} !important;
         border-radius: 8px !important;
         font-size: 12px !important;
         font-weight: 500 !important;
@@ -489,177 +523,189 @@ def inject_custom_css():
         box-shadow: none !important;
         letter-spacing: 0.01em !important;
         transition: color 0.15s, border-color 0.15s, background 0.15s !important;
-    }
-    [data-testid="stSidebar"] .stButton > button:hover {
+    }}
+    [data-testid="stSidebar"] .stButton > button:hover {{
         color: #f87171 !important;
         border-color: rgba(248,113,113,0.25) !important;
         background: rgba(248,113,113,0.06) !important;
         transform: none !important;
         box-shadow: none !important;
-    }
+    }}
 
-    .sb-brand { padding: 6px 0 18px; }
-    .sb-wordmark {
+    .sb-brand {{ padding: 6px 0 18px; }}
+    .sb-wordmark {{
         display: flex; align-items: center; gap: 9px;
         font-size: 14px; font-weight: 700; letter-spacing: -0.02em;
-        color: #f1f0f7 !important;
-    }
-    .sb-dot {
+        color: {text} !important;
+    }}
+    .sb-dot {{
         width: 7px; height: 7px; border-radius: 50%;
         background: #7c5cfc; flex-shrink: 0;
-    }
-    .sb-org {
+    }}
+    .sb-org {{
         font-size: 10px; font-weight: 600; text-transform: uppercase;
-        letter-spacing: 0.09em; color: #28283c !important;
+        letter-spacing: 0.09em; color: {text5} !important;
         margin-top: 3px; padding-left: 16px;
-    }
-    .sb-nav-label {
+    }}
+    .sb-nav-label {{
         font-size: 10px; font-weight: 600; text-transform: uppercase;
-        letter-spacing: 0.1em; color: #28283c !important;
+        letter-spacing: 0.1em; color: {text5} !important;
         padding: 0 10px; margin-bottom: 4px; display: block;
-    }
-    .sb-user {
-        background: rgba(255,255,255,0.025);
-        border: 1px solid rgba(255,255,255,0.05);
-        border-radius: 8px; padding: 10px 12px; margin: 6px 0;
-    }
-    .sb-user-label {
+    }}
+    .sb-theme-label {{
         font-size: 10px; font-weight: 600; text-transform: uppercase;
-        letter-spacing: 0.08em; color: #28283c !important; display: block;
-    }
-    .sb-user-email {
-        font-size: 11px; color: #4a4a66 !important;
+        letter-spacing: 0.1em; color: {text5} !important;
+        padding: 0 10px; margin-bottom: 4px; display: block;
+    }}
+    .sb-user {{
+        background: {bg_subtle};
+        border: 1px solid {divider};
+        border-radius: 8px; padding: 10px 12px; margin: 6px 0;
+    }}
+    .sb-user-label {{
+        font-size: 10px; font-weight: 600; text-transform: uppercase;
+        letter-spacing: 0.08em; color: {text5} !important; display: block;
+    }}
+    .sb-user-email {{
+        font-size: 11px; color: {text2b} !important;
         margin-top: 4px; display: block; word-break: break-all;
         font-family: Menlo, Monaco, 'Cascadia Code', monospace;
-    }
+    }}
 
     /* ── Login page ───────────────────────────────────────────── */
-    .login-hero {
+    .login-hero {{
         text-align: center; padding: 56px 0 36px;
         animation: fadeUp 0.5s ease;
-    }
-    .login-lockup {
+    }}
+    .login-lockup {{
         display: inline-flex; align-items: center; gap: 9px;
-        font-size: 13px; font-weight: 600; color: #3a3a52;
+        font-size: 13px; font-weight: 600; color: {text3};
         letter-spacing: 0.07em; text-transform: uppercase;
         margin-bottom: 36px;
-    }
-    .login-lockup-dot { width: 7px; height: 7px; border-radius: 50%; background: #7c5cfc; }
-    .login-title {
-        font-size: 34px; font-weight: 800; color: #f1f0f7;
+    }}
+    .login-lockup-dot {{ width: 7px; height: 7px; border-radius: 50%; background: #7c5cfc; }}
+    .login-title {{
+        font-size: 34px; font-weight: 800; color: {text};
         letter-spacing: -0.04em; margin: 0 0 10px; line-height: 1.1;
-    }
-    .login-subtitle { font-size: 14px; color: #3a3a52; font-weight: 400; }
-    .login-footer {
-        text-align: center; font-size: 11px; color: #1e1e2e;
+    }}
+    .login-subtitle {{ font-size: 14px; color: {text3}; font-weight: 400; }}
+    .login-footer {{
+        text-align: center; font-size: 11px; color: {text6};
         margin-top: 18px; font-weight: 500;
-    }
+    }}
+    .login-form-title {{
+        font-size: 19px; font-weight: 700; color: {text};
+        letter-spacing: -0.03em;
+    }}
+    .login-form-sub {{
+        font-size: 12px; color: {text4}; margin-top: 5px;
+    }}
 
-    [data-testid="stForm"] {
-        background: #111118 !important;
-        border: 1px solid rgba(255,255,255,0.07) !important;
+    [data-testid="stForm"] {{
+        background: {bg_card} !important;
+        border: 1px solid {border_sm} !important;
         border-radius: 14px !important;
         padding: 32px 36px !important;
         animation: fadeUp 0.45s ease 0.08s both;
-    }
+    }}
 
     /* ── Page header ──────────────────────────────────────────── */
-    .page-hd {
+    .page-hd {{
         padding: 2px 0 26px;
-        border-bottom: 1px solid rgba(255,255,255,0.05);
+        border-bottom: 1px solid {divider};
         margin-bottom: 28px;
         animation: fadeUp 0.3s ease;
-    }
-    .page-hd-title {
-        font-size: 22px; font-weight: 700; color: #f1f0f7;
+    }}
+    .page-hd-title {{
+        font-size: 22px; font-weight: 700; color: {text};
         letter-spacing: -0.03em; line-height: 1.2;
-    }
-    .page-hd-sub { font-size: 13px; color: #3a3a52; margin-top: 4px; font-weight: 400; }
+    }}
+    .page-hd-sub {{ font-size: 13px; color: {text3}; margin-top: 4px; font-weight: 400; }}
 
     /* ── Section label ────────────────────────────────────────── */
-    .section-label {
-        font-size: 11px; font-weight: 700; color: #2e2e44;
+    .section-label {{
+        font-size: 11px; font-weight: 700; color: {text4};
         text-transform: uppercase; letter-spacing: 0.1em;
         margin: 28px 0 12px;
-    }
+    }}
 
     /* ── Cards ────────────────────────────────────────────────── */
-    .card {
-        background: #111118;
-        border: 1px solid rgba(255,255,255,0.06);
+    .card {{
+        background: {bg_card};
+        border: 1px solid {border};
         border-radius: 12px; padding: 24px; margin: 10px 0;
         animation: fadeUp 0.3s ease;
         transition: border-color 0.2s;
-    }
-    .card:hover { border-color: rgba(255,255,255,0.11); }
-    .card-title {
-        font-size: 12px; font-weight: 700; color: #3a3a52;
+    }}
+    .card:hover {{ border-color: {border_hv}; }}
+    .card-title {{
+        font-size: 12px; font-weight: 700; color: {text3};
         text-transform: uppercase; letter-spacing: 0.09em;
         margin-bottom: 18px; padding-bottom: 14px;
-        border-bottom: 1px solid rgba(255,255,255,0.05);
-    }
+        border-bottom: 1px solid {divider};
+    }}
 
     /* ── Alert / message blocks ───────────────────────────────── */
-    .alert {
+    .alert {{
         display: flex; gap: 11px; align-items: flex-start;
         padding: 13px 16px; border-radius: 9px; margin: 10px 0;
         font-size: 13px; line-height: 1.55;
         animation: fadeUp 0.3s ease;
-    }
-    .alert-icon { font-size: 14px; flex-shrink: 0; margin-top: 1px; }
-    .alert-info  { background: rgba(90,140,248,0.07); border: 1px solid rgba(90,140,248,0.14); color: #7a9ff5; }
-    .alert-success { background: rgba(16,185,129,0.07); border: 1px solid rgba(16,185,129,0.14); color: #4fcba4; }
-    .alert-warn  { background: rgba(245,158,11,0.07); border: 1px solid rgba(245,158,11,0.14); color: #c89a44; }
-    .alert strong { color: #f1f0f7; font-weight: 600; }
-    .alert code {
+    }}
+    .alert-icon {{ font-size: 14px; flex-shrink: 0; margin-top: 1px; }}
+    .alert-info  {{ background: rgba(90,140,248,0.07); border: 1px solid rgba(90,140,248,0.14); color: #7a9ff5; }}
+    .alert-success {{ background: rgba(16,185,129,0.07); border: 1px solid rgba(16,185,129,0.14); color: #4fcba4; }}
+    .alert-warn  {{ background: rgba(245,158,11,0.07); border: 1px solid rgba(245,158,11,0.14); color: #c89a44; }}
+    .alert strong {{ color: {text}; font-weight: 600; }}
+    .alert code {{
         font-family: Menlo, Monaco, monospace; font-size: 11px;
-        background: rgba(255,255,255,0.07); padding: 1px 5px; border-radius: 4px;
-        color: #9b9bbb;
-    }
+        background: {code_bg}; padding: 1px 5px; border-radius: 4px;
+        color: {code_clr};
+    }}
 
     /* ── Stat result cards ────────────────────────────────────── */
-    .result-grid { display: grid; grid-template-columns: repeat(4,1fr); gap: 10px; margin: 18px 0; }
-    .result-card {
-        background: #111118; border: 1px solid rgba(255,255,255,0.06);
+    .result-grid {{ display: grid; grid-template-columns: repeat(4,1fr); gap: 10px; margin: 18px 0; }}
+    .result-card {{
+        background: {bg_card}; border: 1px solid {border};
         border-radius: 11px; padding: 18px 16px;
         transition: border-color 0.2s, transform 0.2s;
         animation: fadeUp 0.35s ease;
-    }
-    .result-card:hover { border-color: rgba(255,255,255,0.12); transform: translateY(-2px); }
-    .result-card-label {
-        font-size: 10px; font-weight: 700; color: #2e2e44;
+    }}
+    .result-card:hover {{ border-color: {border_hv}; transform: translateY(-2px); }}
+    .result-card-label {{
+        font-size: 10px; font-weight: 700; color: {text4};
         text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 10px;
-    }
-    .result-card-value {
+    }}
+    .result-card-value {{
         font-size: 28px; font-weight: 800; letter-spacing: -0.04em;
-        font-variant-numeric: tabular-nums; color: #f1f0f7;
-    }
-    .result-card-value.accent  { color: #7c5cfc; }
-    .result-card-value.success { color: #10b981; }
-    .result-card-value.warn    { color: #f59e0b; }
+        font-variant-numeric: tabular-nums; color: {text};
+    }}
+    .result-card-value.accent  {{ color: #7c5cfc; }}
+    .result-card-value.success {{ color: #10b981; }}
+    .result-card-value.warn    {{ color: #f59e0b; }}
 
     /* ── Column chips ─────────────────────────────────────────── */
-    .chip {
+    .chip {{
         display: inline-flex; align-items: center; gap: 5px;
         padding: 3px 10px; border-radius: 5px;
         font-size: 11px; font-weight: 600;
         font-family: Menlo, Monaco, 'Cascadia Code', monospace;
         margin: 3px 3px 3px 0;
-    }
-    .chip-accent {
+    }}
+    .chip-accent {{
         background: rgba(124,92,252,0.1);
         border: 1px solid rgba(124,92,252,0.18);
         color: #9b7fff;
-    }
-    .chip-muted {
-        background: rgba(255,255,255,0.04);
-        border: 1px solid rgba(255,255,255,0.08);
-        color: #3a3a52;
-    }
-    .chip-arrow { color: #3a3a52; font-family: sans-serif; font-weight: 400; }
+    }}
+    .chip-muted {{
+        background: {chip_bg};
+        border: 1px solid {chip_bdr};
+        color: {text3};
+    }}
+    .chip-arrow {{ color: {text3}; font-family: sans-serif; font-weight: 400; }}
 
     /* ── File chip ────────────────────────────────────────────── */
-    .file-chip {
+    .file-chip {{
         display: inline-flex; align-items: center; gap: 8px;
         background: rgba(124,92,252,0.08);
         border: 1px solid rgba(124,92,252,0.18);
@@ -667,226 +713,241 @@ def inject_custom_css():
         font-size: 12px; font-weight: 600; margin: 8px 0;
         font-family: Menlo, Monaco, 'Cascadia Code', monospace;
         animation: slide-in 0.25s ease;
-    }
+    }}
 
     /* ── Progress shell ───────────────────────────────────────── */
-    .prog-shell {
-        background: #111118;
-        border: 1px solid rgba(255,255,255,0.06);
+    .prog-shell {{
+        background: {bg_card};
+        border: 1px solid {border};
         border-radius: 12px; padding: 26px 28px; margin: 14px 0;
         animation: fadeUp 0.3s ease;
-    }
-    .prog-head {
+    }}
+    .prog-head {{
         display: flex; align-items: center;
         justify-content: space-between; margin-bottom: 18px;
-    }
-    .prog-phase {
-        font-size: 12px; font-weight: 700; color: #f1f0f7;
+    }}
+    .prog-phase {{
+        font-size: 12px; font-weight: 700; color: {text};
         text-transform: uppercase; letter-spacing: 0.07em;
-    }
-    .prog-sheet { font-size: 11px; color: #2e2e44; margin-top: 3px; }
-    .prog-badge {
+    }}
+    .prog-sheet {{ font-size: 11px; color: {text4}; margin-top: 3px; }}
+    .prog-badge {{
         display: inline-flex; align-items: center; gap: 5px;
         padding: 3px 10px; border-radius: 20px;
         font-size: 10px; font-weight: 700; letter-spacing: 0.06em;
         background: rgba(124,92,252,0.12);
         border: 1px solid rgba(124,92,252,0.22);
         color: #9b7fff;
-    }
-    .prog-badge-dot {
+    }}
+    .prog-badge-dot {{
         width: 5px; height: 5px; border-radius: 50%; background: #7c5cfc;
         animation: dot-pulse 1.4s ease infinite;
-    }
-    .prog-track {
+    }}
+    .prog-track {{
         width: 100%; height: 3px;
-        background: rgba(255,255,255,0.05);
+        background: {prog_trk};
         border-radius: 2px; overflow: hidden; margin: 14px 0;
         position: relative;
-    }
-    .prog-bar {
+    }}
+    .prog-bar {{
         height: 3px; border-radius: 2px;
         background: linear-gradient(90deg, #7c5cfc 0%, #5a8cf8 100%);
         transition: width 0.4s ease; position: relative;
-    }
-    .prog-bar::after {
+    }}
+    .prog-bar::after {{
         content: ''; position: absolute; right: -1px; top: -2px;
         width: 7px; height: 7px; background: #9b7fff;
         border-radius: 50%; animation: glow-pulse 1.6s ease infinite;
-    }
-    .prog-item {
+    }}
+    .prog-item {{
         display: flex; align-items: center; gap: 8px;
-        font-size: 12px; color: #3a3a52; margin: 10px 0;
+        font-size: 12px; color: {text3}; margin: 10px 0;
         font-family: Menlo, Monaco, 'Cascadia Code', monospace;
-    }
-    .prog-item-dot {
+    }}
+    .prog-item-dot {{
         width: 5px; height: 5px; border-radius: 50%; background: #7c5cfc; flex-shrink: 0;
         animation: dot-pulse 1.4s ease infinite;
-    }
-    .prog-item-col { color: #9b7fff; }
-    .prog-item-row { color: #2e2e44; margin-left: 6px; }
-    .prog-stats {
+    }}
+    .prog-item-col {{ color: #9b7fff; }}
+    .prog-item-row {{ color: {text4}; margin-left: 6px; }}
+    .prog-stats {{
         display: flex; gap: 28px; margin-top: 18px; padding-top: 14px;
-        border-top: 1px solid rgba(255,255,255,0.04);
+        border-top: 1px solid {divider_s};
         flex-wrap: wrap;
-    }
-    .prog-stat-val {
-        font-size: 15px; font-weight: 700; color: #f1f0f7;
+    }}
+    .prog-stat-val {{
+        font-size: 15px; font-weight: 700; color: {text};
         font-variant-numeric: tabular-nums; display: block;
-    }
-    .prog-stat-lbl {
-        font-size: 9px; font-weight: 700; color: #2e2e44;
+    }}
+    .prog-stat-lbl {{
+        font-size: 9px; font-weight: 700; color: {text4};
         text-transform: uppercase; letter-spacing: 0.09em;
         margin-top: 2px; display: block;
-    }
+    }}
 
     /* ── Quality gate ─────────────────────────────────────────── */
-    .qg {
-        background: #111118; border: 1px solid rgba(255,255,255,0.06);
+    .qg {{
+        background: {bg_card}; border: 1px solid {border};
         border-radius: 11px; overflow: hidden; margin: 14px 0;
         animation: fadeUp 0.35s ease;
-    }
-    .qg-row {
+    }}
+    .qg-row {{
         display: flex; align-items: center; gap: 16px;
         padding: 13px 20px;
-        border-bottom: 1px solid rgba(255,255,255,0.04);
+        border-bottom: 1px solid {divider_s};
         font-size: 13px;
         transition: background 0.15s;
-    }
-    .qg-row:last-child { border-bottom: none; }
-    .qg-row:hover { background: rgba(255,255,255,0.02); }
-    .qg-icon { flex-shrink: 0; font-size: 13px; }
-    .qg-label { font-weight: 600; color: #686880; min-width: 160px; font-size: 12px; }
-    .qg-value { color: #3a3a52; font-size: 12px; font-family: Menlo, Monaco, monospace; }
+    }}
+    .qg-row:last-child {{ border-bottom: none; }}
+    .qg-row:hover {{ background: {bg_hover}; }}
+    .qg-icon {{ flex-shrink: 0; font-size: 13px; }}
+    .qg-label {{ font-weight: 600; color: {text2}; min-width: 160px; font-size: 12px; }}
+    .qg-value {{ color: {text3}; font-size: 12px; font-family: Menlo, Monaco, monospace; }}
 
     /* ── Warning detail ───────────────────────────────────────── */
-    .warn-detail {
+    .warn-detail {{
         display: flex; gap: 12px; align-items: flex-start;
         padding: 13px 16px; margin: 7px 0;
         background: rgba(245,158,11,0.04);
         border: 1px solid rgba(245,158,11,0.1);
-        border-radius: 9px; font-size: 12px; color: #686880;
+        border-radius: 9px; font-size: 12px; color: {text2};
         animation: fadeUp 0.3s ease;
-    }
-    .warn-detail-dot {
+    }}
+    .warn-detail-dot {{
         width: 5px; height: 5px; border-radius: 50%;
         background: #f59e0b; margin-top: 4px; flex-shrink: 0;
-    }
-    .warn-detail strong { color: #c8952a; }
+    }}
+    .warn-detail strong {{ color: #c8952a; }}
 
     /* ── Success / completion banner ──────────────────────────── */
-    .success-banner {
+    .success-banner {{
         display: flex; align-items: center; gap: 16px;
         padding: 20px 24px;
         background: rgba(16,185,129,0.06);
         border: 1px solid rgba(16,185,129,0.14);
         border-radius: 11px; margin: 16px 0;
         animation: fadeUp 0.3s ease;
-    }
-    .success-banner-icon {
+    }}
+    .success-banner-icon {{
         width: 36px; height: 36px; border-radius: 50%;
         background: rgba(16,185,129,0.15);
         border: 1px solid rgba(16,185,129,0.25);
         display: flex; align-items: center; justify-content: center;
         font-size: 16px; flex-shrink: 0;
-    }
-    .success-banner-title { font-size: 14px; font-weight: 700; color: #10b981; }
-    .success-banner-sub   { font-size: 11px; color: #2e4a40; margin-top: 3px; }
+    }}
+    .success-banner-title {{ font-size: 14px; font-weight: 700; color: #10b981; }}
+    .success-banner-sub   {{ font-size: 11px; color: #2e4a40; margin-top: 3px; }}
 
-    .warn-banner {
+    .warn-banner {{
         padding: 18px 22px;
         background: rgba(245,158,11,0.05);
         border: 1px solid rgba(245,158,11,0.12);
         border-radius: 11px; margin: 16px 0;
         animation: fadeUp 0.3s ease;
-    }
-    .warn-banner-title { font-size: 14px; font-weight: 700; color: #c89a44; }
-    .warn-banner-sub   { font-size: 11px; color: #3a2e1a; margin-top: 3px; }
+    }}
+    .warn-banner-title {{ font-size: 14px; font-weight: 700; color: #c89a44; }}
+    .warn-banner-sub   {{ font-size: 11px; color: #3a2e1a; margin-top: 3px; }}
 
     /* ── Metric cards ─────────────────────────────────────────── */
-    .kpi-row   { display: grid; grid-template-columns: repeat(4,1fr); gap: 10px; margin: 18px 0; }
-    .kpi-row-3 { display: grid; grid-template-columns: repeat(3,1fr); gap: 10px; margin: 18px 0; }
-    .kpi {
-        background: #111118;
-        border: 1px solid rgba(255,255,255,0.06);
+    .kpi-row   {{ display: grid; grid-template-columns: repeat(4,1fr); gap: 10px; margin: 18px 0; }}
+    .kpi-row-3 {{ display: grid; grid-template-columns: repeat(3,1fr); gap: 10px; margin: 18px 0; }}
+    .kpi {{
+        background: {bg_card};
+        border: 1px solid {border};
         border-radius: 11px; padding: 20px 18px;
         transition: border-color 0.2s, transform 0.2s;
         animation: fadeUp 0.35s ease;
-    }
-    .kpi:hover { border-color: rgba(255,255,255,0.12); transform: translateY(-2px); }
-    .kpi-label {
-        font-size: 10px; font-weight: 700; color: #2e2e44;
+    }}
+    .kpi:hover {{ border-color: {border_hv}; transform: translateY(-2px); }}
+    .kpi-label {{
+        font-size: 10px; font-weight: 700; color: {text4};
         text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 10px;
-    }
-    .kpi-value {
+    }}
+    .kpi-value {{
         font-size: 28px; font-weight: 800; letter-spacing: -0.04em;
-        color: #f1f0f7; font-variant-numeric: tabular-nums;
-    }
-    .kpi-value.accent  { color: #7c5cfc; }
-    .kpi-value.success { color: #10b981; }
-    .kpi-value.warn    { color: #f59e0b; }
-    .kpi-sub { font-size: 11px; color: #2e2e44; margin-top: 5px; }
+        color: {text}; font-variant-numeric: tabular-nums;
+    }}
+    .kpi-value.accent  {{ color: #7c5cfc; }}
+    .kpi-value.success {{ color: #10b981; }}
+    .kpi-value.warn    {{ color: #f59e0b; }}
+    .kpi-sub {{ font-size: 11px; color: {text4}; margin-top: 5px; }}
 
     /* ── Hero metric ──────────────────────────────────────────── */
-    .hero-kpi {
+    .hero-kpi {{
         text-align: center; padding: 52px 32px; border-radius: 14px;
         background: linear-gradient(135deg, rgba(124,92,252,0.07) 0%, rgba(90,140,248,0.07) 100%);
         border: 1px solid rgba(124,92,252,0.16); margin: 20px 0;
         animation: fadeUp 0.4s ease;
-    }
-    .hero-kpi-value {
+    }}
+    .hero-kpi-value {{
         font-size: 80px; font-weight: 800; letter-spacing: -0.05em; line-height: 1;
         background: linear-gradient(135deg, #7c5cfc 0%, #5a8cf8 100%);
         -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;
         margin: 0;
-    }
-    .hero-kpi-label { font-size: 15px; color: #3a3a52; margin: 14px 0 0; font-weight: 500; }
-    .hero-kpi-sub   { font-size: 12px; color: #22223a; margin: 6px 0 0; }
+    }}
+    .hero-kpi-label {{ font-size: 15px; color: {text3}; margin: 14px 0 0; font-weight: 500; }}
+    .hero-kpi-sub   {{ font-size: 12px; color: {text5}; margin: 6px 0 0; }}
 
     /* ── History ──────────────────────────────────────────────── */
-    .history-empty {
+    .history-empty {{
         text-align: center; padding: 70px 20px;
-        color: #2e2e44; font-size: 14px; font-weight: 500;
-    }
-    .cloud-note {
+        color: {text4}; font-size: 14px; font-weight: 500;
+    }}
+    .history-empty-sub {{ font-size: 12px; color: {text5}; }}
+    .history-empty-sub strong {{ color: {text4}; }}
+    .cloud-note {{
         padding: 11px 15px; border-radius: 8px; margin: 14px 0;
         font-size: 11px; line-height: 1.5;
         background: rgba(90,140,248,0.06);
         border: 1px solid rgba(90,140,248,0.12);
         color: #4a6899;
-    }
+    }}
+
+    /* ── Footer ───────────────────────────────────────────────── */
+    .footer-author {{ color: {text3} !important; }}
+    .footer-version {{ color: {text6} !important; }}
 
     /* ── Streamlit native overrides ───────────────────────────── */
-    [data-testid="stTextInput"] input {
-        background: #18181f !important;
-        border: 1px solid rgba(255,255,255,0.08) !important;
+    [data-testid="stTextInput"] input {{
+        background: {bg_input} !important;
+        border: 1px solid {border_md} !important;
         border-radius: 8px !important;
-        color: #f1f0f7 !important;
+        color: {text} !important;
         font-size: 13px !important;
         caret-color: #7c5cfc !important;
-    }
-    [data-testid="stTextInput"] input:focus {
+    }}
+    [data-testid="stTextInput"] input:focus {{
         border-color: rgba(124,92,252,0.45) !important;
         box-shadow: 0 0 0 3px rgba(124,92,252,0.1) !important;
         outline: none !important;
-    }
-    [data-testid="stTextInput"] label p { color: #4a4a60 !important; font-size: 12px !important; font-weight: 500 !important; }
+    }}
+    [data-testid="stTextInput"] label p {{ color: {text2b} !important; font-size: 12px !important; font-weight: 500 !important; }}
 
-    [data-testid="stSelectbox"] > div > div {
-        background: #18181f !important;
-        border: 1px solid rgba(255,255,255,0.08) !important;
+    [data-testid="stNumberInput"] input {{
+        background: {bg_input} !important;
+        border: 1px solid {border_md} !important;
         border-radius: 8px !important;
-        color: #f1f0f7 !important;
+        color: {text} !important;
         font-size: 13px !important;
-    }
-    [data-testid="stSelectbox"] label p { color: #4a4a60 !important; font-size: 12px !important; }
+    }}
+    [data-testid="stNumberInput"] label p {{ color: {text2b} !important; font-size: 12px !important; }}
 
-    .stProgress { padding: 6px 0 !important; }
-    .stProgress > div > div > div {
+    [data-testid="stSelectbox"] > div > div {{
+        background: {bg_input} !important;
+        border: 1px solid {border_md} !important;
+        border-radius: 8px !important;
+        color: {text} !important;
+        font-size: 13px !important;
+    }}
+    [data-testid="stSelectbox"] label p {{ color: {text2b} !important; font-size: 12px !important; }}
+
+    .stProgress {{ padding: 6px 0 !important; }}
+    .stProgress > div > div > div {{
         background: linear-gradient(90deg, #7c5cfc 0%, #5a8cf8 100%) !important;
         border-radius: 2px !important;
-    }
+    }}
 
-    .stButton > button {
+    .stButton > button {{
         background: #7c5cfc !important;
         color: #fff !important;
         border: none !important;
@@ -897,15 +958,15 @@ def inject_custom_css():
         letter-spacing: 0.01em !important;
         transition: background 0.15s, transform 0.15s, box-shadow 0.15s !important;
         box-shadow: 0 2px 10px rgba(124,92,252,0.35) !important;
-    }
-    .stButton > button:hover {
+    }}
+    .stButton > button:hover {{
         background: #8f71ff !important;
         transform: translateY(-1px) !important;
         box-shadow: 0 5px 18px rgba(124,92,252,0.45) !important;
-    }
-    .stButton > button:active { transform: translateY(0) !important; }
+    }}
+    .stButton > button:active {{ transform: translateY(0) !important; }}
 
-    .stDownloadButton > button {
+    .stDownloadButton > button {{
         background: rgba(16,185,129,0.1) !important;
         color: #10b981 !important;
         border: 1px solid rgba(16,185,129,0.22) !important;
@@ -915,68 +976,68 @@ def inject_custom_css():
         font-size: 13px !important;
         box-shadow: none !important;
         transition: background 0.15s, border-color 0.15s, transform 0.15s !important;
-    }
-    .stDownloadButton > button:hover {
+    }}
+    .stDownloadButton > button:hover {{
         background: rgba(16,185,129,0.16) !important;
         border-color: rgba(16,185,129,0.38) !important;
         transform: translateY(-1px) !important;
-    }
+    }}
 
     [data-testid="stFileUploader"] section,
-    [data-testid="stFileUploader"] > div {
-        background: rgba(255,255,255,0.02) !important;
-        border: 1.5px dashed rgba(255,255,255,0.09) !important;
+    [data-testid="stFileUploader"] > div {{
+        background: {bg_hover} !important;
+        border: 1.5px dashed {border_dsh} !important;
         border-radius: 11px !important;
         transition: border-color 0.2s, background 0.2s !important;
-    }
+    }}
     [data-testid="stFileUploader"] section:hover,
-    [data-testid="stFileUploader"] > div:hover {
+    [data-testid="stFileUploader"] > div:hover {{
         border-color: rgba(124,92,252,0.38) !important;
         background: rgba(124,92,252,0.03) !important;
-    }
+    }}
     [data-testid="stFileUploader"] span,
-    [data-testid="stFileUploader"] p { color: #3a3a52 !important; font-size: 13px !important; }
-    [data-testid="stFileUploader"] small { color: #22223a !important; }
-    [data-testid="stFileUploader"] button {
+    [data-testid="stFileUploader"] p {{ color: {text3} !important; font-size: 13px !important; }}
+    [data-testid="stFileUploader"] small {{ color: {text5} !important; }}
+    [data-testid="stFileUploader"] button {{
         background: rgba(124,92,252,0.1) !important;
         color: #9b7fff !important;
         border: 1px solid rgba(124,92,252,0.2) !important;
         border-radius: 7px !important;
         font-size: 12px !important;
         font-weight: 600 !important;
-    }
+    }}
 
-    [data-testid="stExpander"] {
-        background: #111118 !important;
-        border: 1px solid rgba(255,255,255,0.06) !important;
+    [data-testid="stExpander"] {{
+        background: {bg_card} !important;
+        border: 1px solid {border} !important;
         border-radius: 9px !important;
-    }
-    [data-testid="stExpander"] summary {
-        color: #3a3a52 !important;
+    }}
+    [data-testid="stExpander"] summary {{
+        color: {text3} !important;
         font-size: 12px !important;
         font-weight: 600 !important;
         padding: 10px 14px !important;
-    }
+    }}
 
-    [data-testid="stDataFrame"] {
+    [data-testid="stDataFrame"] {{
         border-radius: 11px !important;
         overflow: hidden !important;
-        border: 1px solid rgba(255,255,255,0.06) !important;
-    }
+        border: 1px solid {border} !important;
+    }}
 
-    .site-footer {
+    .site-footer {{
         margin-top: 80px; padding: 22px 0;
-        border-top: 1px solid rgba(255,255,255,0.04);
+        border-top: 1px solid {divider_s};
         display: flex; align-items: center; justify-content: space-between;
-        font-size: 11px; color: #1e1e2e;
+        font-size: 11px; color: {text6};
         animation: fadeUp 0.4s ease;
-    }
+    }}
 
-    @media (max-width: 780px) {
-        .kpi-row, .result-grid { grid-template-columns: repeat(2,1fr) !important; }
-        .hero-kpi-value { font-size: 52px !important; }
-        .main .block-container { padding: 1.5rem 1.2rem 3rem !important; }
-    }
+    @media (max-width: 780px) {{
+        .kpi-row, .result-grid {{ grid-template-columns: repeat(2,1fr) !important; }}
+        .hero-kpi-value {{ font-size: 52px !important; }}
+        .main .block-container {{ padding: 1.5rem 1.2rem 3rem !important; }}
+    }}
     </style>
     """, unsafe_allow_html=True)
 
@@ -1168,14 +1229,23 @@ def render_sidebar() -> str:
             st.session_state["authenticated"] = False
             st.rerun()
 
+        st.markdown("---")
+        st.markdown('<span class="sb-theme-label">Appearance</span>', unsafe_allow_html=True)
+        st.radio(
+            "Theme",
+            ["Dark", "Light"],
+            key="theme",
+            label_visibility="collapsed",
+        )
+
     return page
 
 
 def render_footer():
     st.markdown("""
     <div class="site-footer">
-        <span>Built by <strong style="color:#3a3a52;">Yves Koulle Banga</strong></span>
-        <span style="color:#1a1a2a;">DE→FR Translator · v5.0</span>
+        <span>Built by <strong class="footer-author">Yves Koulle Banga</strong></span>
+        <span class="footer-version">DE→FR Translator · v5.0</span>
     </div>
     """, unsafe_allow_html=True)
 
@@ -1962,12 +2032,8 @@ def login_page():
         with st.form("login_form"):
             st.markdown("""
             <div style="text-align:center;margin-bottom:24px;">
-                <div style="font-size:19px;font-weight:700;color:#f1f0f7;letter-spacing:-0.03em;">
-                    Sign in
-                </div>
-                <div style="font-size:12px;color:#2e2e44;margin-top:5px;">
-                    Internal access · Home24 e-commerce tools
-                </div>
+                <div class="login-form-title">Sign in</div>
+                <div class="login-form-sub">Internal access · Home24 e-commerce tools</div>
             </div>
             """, unsafe_allow_html=True)
 
@@ -2269,8 +2335,8 @@ def history_page():
         st.markdown("""
         <div class="history-empty">
             No translations yet.<br>
-            <span style="font-size:12px;color:#1a1a2a;">
-                Go to <strong style="color:#2e2e44;">Translator</strong> to get started.
+            <span class="history-empty-sub">
+                Go to <strong>Translator</strong> to get started.
             </span>
         </div>
         """, unsafe_allow_html=True)
@@ -2342,7 +2408,7 @@ def analytics_page():
         st.markdown("""
         <div class="history-empty">
             No data yet.<br>
-            <span style="font-size:12px;color:#1a1a2a;">
+            <span class="history-empty-sub">
                 Complete a translation to see analytics.
             </span>
         </div>
@@ -2727,10 +2793,12 @@ def main():
         initial_sidebar_state="expanded" if is_auth else "collapsed",
     )
 
-    inject_custom_css()
-
     if "authenticated" not in st.session_state:
         st.session_state["authenticated"] = False
+    if "theme" not in st.session_state:
+        st.session_state["theme"] = "Dark"
+
+    inject_custom_css(st.session_state["theme"])
 
     if not st.session_state["authenticated"]:
         login_page()
