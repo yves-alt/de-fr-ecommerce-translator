@@ -28,7 +28,9 @@ load_dotenv()
 # CONFIGURATION
 # =============================================================================
 
-HISTORY_FILE = Path(__file__).parent / "translation_history.json"
+HISTORY_FILE  = Path(__file__).parent / "translation_history.json"
+TM_FILE       = Path(__file__).parent / "translation_memory.json"
+GLOSSARY_FILE = Path(__file__).parent / "glossary.json"
 
 CANDIDATE_SHEETS = ["Tabelle1", "Translations", "Sheet1"]
 
@@ -37,10 +39,59 @@ COLUMNS_TO_TRANSLATE = [
     "otherMeasurements", "qualityDetail", "textileCompositionCover1", "variantName",
 ]
 
-OPENAI_MODEL = "gpt-4o-mini"
+OPENAI_MODEL           = "gpt-4o-mini"
 _INPUT_COST_PER_TOKEN  = 0.15 / 1_000_000
 _OUTPUT_COST_PER_TOKEN = 0.60 / 1_000_000
 MANUAL_SECONDS_PER_CELL = 45
+
+DEFAULT_BATCH_SIZE  = 20
+MAX_BATCH_RETRIES   = 2
+API_TIMEOUT_SECONDS = 45
+
+DEFAULT_GLOSSARY_TERMS = {
+    "Bezug":         "Revêtement",
+    "Gestell":       "Structure",
+    "Füße":          "Pieds",
+    "Bettwäsche":    "linge de lit",
+    "Webstoff":      "tissu tissé",
+    "Strukturstoff": "tissu structuré",
+    "Samtstoff":     "tissu velours",
+    "Velours":       "velours",
+    "Eiche":         "chêne",
+    "Buche":         "hêtre",
+    "Kiefer":        "pin",
+    "Nussbaum":      "noyer",
+    "Ahorn":         "érable",
+    "Birke":         "bouleau",
+    "Massiv":        "massif",
+    "Furnier":       "plaqué",
+    "lackiert":      "verni",
+    "geölt":         "huilé",
+    "gebeizt":       "teinté",
+    "dunkelgrau":    "gris foncé",
+    "hellgrau":      "gris clair",
+    "dunkelbraun":   "brun foncé",
+    "hellbraun":     "brun clair",
+    "dunkelblau":    "bleu foncé",
+    "hellblau":      "bleu clair",
+    "dunkelgrün":    "vert foncé",
+    "hellgrün":      "vert clair",
+    "Anthrazit":     "anthracite",
+    "Sandbeige":     "beige sable",
+    "Baumwolle":     "coton",
+    "Leinen":        "lin",
+    "Wolle":         "laine",
+    "Sofa":          "Canapé",
+    "Sessel":        "Fauteuil",
+    "Ecksofa":       "Canapé d'angle",
+    "Schlafsofa":    "Canapé-lit",
+    "Tisch":         "Table",
+    "Stuhl":         "Chaise",
+    "Schrank":       "Armoire",
+    "Kommode":       "Commode",
+    "Regal":         "Étagère",
+    "inkl.":         "inclus",
+}
 
 GERMAN_RESIDUE_WORDS = [
     "mit", "ohne", "und", "oder", "für", "aus", "inkl", "inklusive",
@@ -163,6 +214,123 @@ def save_history_record(record: dict) -> None:
 
 
 # =============================================================================
+# TRANSLATION MEMORY
+# =============================================================================
+
+def _tm_col_type(canonical: str) -> str:
+    if canonical == "name":
+        return "name"
+    if canonical == "materialDetail":
+        return "materialDetail"
+    return "other"
+
+
+def _tm_key(text: str, col_type: str) -> str:
+    return f"{col_type}:{' '.join(text.strip().split())}"
+
+
+def load_translation_memory() -> dict:
+    if TM_FILE.exists():
+        try:
+            with open(TM_FILE, encoding="utf-8") as f:
+                data = json.load(f)
+            if "entries" in data and "global_stats" in data:
+                return data
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {
+        "entries": {},
+        "global_stats": {
+            "total_hits":            0,
+            "total_misses":          0,
+            "total_api_calls_saved": 0,
+        },
+    }
+
+
+def save_translation_memory(tm: dict) -> None:
+    try:
+        with open(TM_FILE, "w", encoding="utf-8") as f:
+            json.dump(tm, f, indent=2, ensure_ascii=False)
+    except OSError:
+        pass
+
+
+def tm_get(tm: dict, text: str, col_type: str) -> str | None:
+    key   = _tm_key(text, col_type)
+    entry = tm["entries"].get(key)
+    if entry is not None:
+        entry["hit_count"] = entry.get("hit_count", 0) + 1
+        return entry["translation"]
+    return None
+
+
+def tm_put(tm: dict, source: str, translation: str, col_type: str) -> None:
+    key = _tm_key(source, col_type)
+    if key not in tm["entries"]:
+        tm["entries"][key] = {
+            "translation": translation,
+            "col_type":    col_type,
+            "created_at":  datetime.now().isoformat(timespec="seconds"),
+            "hit_count":   0,
+        }
+
+
+# =============================================================================
+# GLOSSARY SYSTEM
+# =============================================================================
+
+def load_glossary() -> dict:
+    if GLOSSARY_FILE.exists():
+        try:
+            with open(GLOSSARY_FILE, encoding="utf-8") as f:
+                data = json.load(f)
+            if "terms" in data:
+                return data
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {
+        "terms": DEFAULT_GLOSSARY_TERMS.copy(),
+        "stats": {"total_hits": 0, "term_counts": {}},
+    }
+
+
+def save_glossary(glossary: dict) -> None:
+    try:
+        with open(GLOSSARY_FILE, "w", encoding="utf-8") as f:
+            json.dump(glossary, f, indent=2, ensure_ascii=False)
+    except OSError:
+        pass
+
+
+def _glossary_prompt_block(glossary: dict) -> str:
+    terms = glossary.get("terms", {})
+    if not terms:
+        return ""
+    lines = [f"- {de} → {fr}" for de, fr in list(terms.items())[:25]]
+    return "\nAlways use these standard terms consistently:\n" + "\n".join(lines)
+
+
+def count_glossary_hits(text: str, glossary: dict) -> dict:
+    hits      = {}
+    terms     = glossary.get("terms", {})
+    text_lower = text.lower()
+    for de_term in terms:
+        pattern = r'\b' + re.escape(de_term.lower()) + r'\b'
+        if re.search(pattern, text_lower):
+            hits[de_term] = hits.get(de_term, 0) + 1
+    return hits
+
+
+def update_glossary_stats(glossary: dict, term_counts: dict) -> None:
+    s  = glossary.setdefault("stats", {"total_hits": 0, "term_counts": {}})
+    tc = s.setdefault("term_counts", {})
+    for term, count in term_counts.items():
+        tc[term]           = tc.get(term, 0) + count
+        s["total_hits"]    = s.get("total_hits", 0) + count
+
+
+# =============================================================================
 # DESIGN SYSTEM — CSS
 # =============================================================================
 
@@ -222,7 +390,6 @@ def inject_custom_css():
     }
     [data-testid="stSidebarContent"] { padding: 20px 14px !important; }
 
-    /* Override ALL text colors inside sidebar */
     [data-testid="stSidebar"] p,
     [data-testid="stSidebar"] span,
     [data-testid="stSidebar"] div,
@@ -234,7 +401,6 @@ def inject_custom_css():
         margin: 10px 0 !important;
     }
 
-    /* Nav radio items */
     [data-testid="stSidebar"] [data-testid="stRadio"] label {
         font-size: 13px !important;
         font-weight: 500 !important;
@@ -249,7 +415,6 @@ def inject_custom_css():
         background: rgba(255,255,255,0.05) !important;
     }
 
-    /* Sidebar logout button */
     [data-testid="stSidebar"] .stButton > button {
         background: transparent !important;
         color: #3a3a52 !important;
@@ -270,7 +435,6 @@ def inject_custom_css():
         box-shadow: none !important;
     }
 
-    /* Sidebar brand / user HTML blocks */
     .sb-brand { padding: 6px 0 18px; }
     .sb-wordmark {
         display: flex; align-items: center; gap: 9px;
@@ -328,7 +492,6 @@ def inject_custom_css():
         margin-top: 18px; font-weight: 500;
     }
 
-    /* Style the Streamlit form as the login card */
     [data-testid="stForm"] {
         background: #111118 !important;
         border: 1px solid rgba(255,255,255,0.07) !important;
@@ -391,7 +554,7 @@ def inject_custom_css():
         color: #9b9bbb;
     }
 
-    /* ── Stat result cards (2×2 after translation) ────────────── */
+    /* ── Stat result cards ────────────────────────────────────── */
     .result-grid { display: grid; grid-template-columns: repeat(4,1fr); gap: 10px; margin: 18px 0; }
     .result-card {
         background: #111118; border: 1px solid rgba(255,255,255,0.06);
@@ -501,6 +664,7 @@ def inject_custom_css():
     .prog-stats {
         display: flex; gap: 28px; margin-top: 18px; padding-top: 14px;
         border-top: 1px solid rgba(255,255,255,0.04);
+        flex-wrap: wrap;
     }
     .prog-stat-val {
         font-size: 15px; font-weight: 700; color: #f1f0f7;
@@ -575,7 +739,7 @@ def inject_custom_css():
     .warn-banner-title { font-size: 14px; font-weight: 700; color: #c89a44; }
     .warn-banner-sub   { font-size: 11px; color: #3a2e1a; margin-top: 3px; }
 
-    /* ── Metric cards (history & analytics) ──────────────────── */
+    /* ── Metric cards ─────────────────────────────────────────── */
     .kpi-row   { display: grid; grid-template-columns: repeat(4,1fr); gap: 10px; margin: 18px 0; }
     .kpi-row-3 { display: grid; grid-template-columns: repeat(3,1fr); gap: 10px; margin: 18px 0; }
     .kpi {
@@ -599,7 +763,7 @@ def inject_custom_css():
     .kpi-value.warn    { color: #f59e0b; }
     .kpi-sub { font-size: 11px; color: #2e2e44; margin-top: 5px; }
 
-    /* ── Hero metric (analytics time saved) ───────────────────── */
+    /* ── Hero metric ──────────────────────────────────────────── */
     .hero-kpi {
         text-align: center; padding: 52px 32px; border-radius: 14px;
         background: linear-gradient(135deg, rgba(124,92,252,0.07) 0%, rgba(90,140,248,0.07) 100%);
@@ -629,8 +793,6 @@ def inject_custom_css():
     }
 
     /* ── Streamlit native overrides ───────────────────────────── */
-
-    /* Inputs */
     [data-testid="stTextInput"] input {
         background: #18181f !important;
         border: 1px solid rgba(255,255,255,0.08) !important;
@@ -646,7 +808,6 @@ def inject_custom_css():
     }
     [data-testid="stTextInput"] label p { color: #4a4a60 !important; font-size: 12px !important; font-weight: 500 !important; }
 
-    /* Select box */
     [data-testid="stSelectbox"] > div > div {
         background: #18181f !important;
         border: 1px solid rgba(255,255,255,0.08) !important;
@@ -656,14 +817,12 @@ def inject_custom_css():
     }
     [data-testid="stSelectbox"] label p { color: #4a4a60 !important; font-size: 12px !important; }
 
-    /* Streamlit progress bar */
     .stProgress { padding: 6px 0 !important; }
     .stProgress > div > div > div {
         background: linear-gradient(90deg, #7c5cfc 0%, #5a8cf8 100%) !important;
         border-radius: 2px !important;
     }
 
-    /* Primary translate button */
     .stButton > button {
         background: #7c5cfc !important;
         color: #fff !important;
@@ -683,7 +842,6 @@ def inject_custom_css():
     }
     .stButton > button:active { transform: translateY(0) !important; }
 
-    /* Download button */
     .stDownloadButton > button {
         background: rgba(16,185,129,0.1) !important;
         color: #10b981 !important;
@@ -701,7 +859,6 @@ def inject_custom_css():
         transform: translateY(-1px) !important;
     }
 
-    /* File uploader */
     [data-testid="stFileUploader"] section,
     [data-testid="stFileUploader"] > div {
         background: rgba(255,255,255,0.02) !important;
@@ -726,7 +883,6 @@ def inject_custom_css():
         font-weight: 600 !important;
     }
 
-    /* Expander */
     [data-testid="stExpander"] {
         background: #111118 !important;
         border: 1px solid rgba(255,255,255,0.06) !important;
@@ -739,14 +895,12 @@ def inject_custom_css():
         padding: 10px 14px !important;
     }
 
-    /* Dataframe */
     [data-testid="stDataFrame"] {
         border-radius: 11px !important;
         overflow: hidden !important;
         border: 1px solid rgba(255,255,255,0.06) !important;
     }
 
-    /* Footer */
     .site-footer {
         margin-top: 80px; padding: 22px 0;
         border-top: 1px solid rgba(255,255,255,0.04);
@@ -810,6 +964,39 @@ def render_stats(stats: dict):
         <div class="result-card">
             <div class="result-card-label">Warnings</div>
             <div class="result-card-value {warn}">{stats["unresolved_warnings"]}</div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+
+def render_intelligence_stats(stats: dict):
+    tm_hits      = stats.get("tm_hits", 0)
+    batch_count  = stats.get("batch_count", 0)
+    avg_batch    = stats.get("avg_batch_size", 0.0)
+    gloss_hits   = stats.get("glossary_hits", 0)
+    api_reduced  = stats.get("api_calls_reduced", 0)
+
+    st.markdown(f"""
+    <div class="kpi-row">
+        <div class="kpi">
+            <div class="kpi-label">TM Cache Hits</div>
+            <div class="kpi-value success">{tm_hits}</div>
+            <div class="kpi-sub">Served from memory</div>
+        </div>
+        <div class="kpi">
+            <div class="kpi-label">API Batches Sent</div>
+            <div class="kpi-value accent">{batch_count}</div>
+            <div class="kpi-sub">~{api_reduced} calls saved</div>
+        </div>
+        <div class="kpi">
+            <div class="kpi-label">Avg Batch Size</div>
+            <div class="kpi-value">{avg_batch}</div>
+            <div class="kpi-sub">cells per request</div>
+        </div>
+        <div class="kpi">
+            <div class="kpi-label">Glossary Matches</div>
+            <div class="kpi-value">{gloss_hits}</div>
+            <div class="kpi-sub">Consistent terms enforced</div>
         </div>
     </div>
     """, unsafe_allow_html=True)
@@ -899,7 +1086,7 @@ def render_sidebar() -> str:
 
         page = st.radio(
             "Navigation",
-            ["Translator", "Translation History", "Analytics"],
+            ["Translator", "Translation History", "Analytics", "Glossary"],
             key="nav_radio",
             label_visibility="collapsed",
         )
@@ -925,7 +1112,7 @@ def render_footer():
     st.markdown("""
     <div class="site-footer">
         <span>Built by <strong style="color:#3a3a52;">Yves Koulle Banga</strong></span>
-        <span style="color:#1a1a2a;">DE→FR Translator · v3.0</span>
+        <span style="color:#1a1a2a;">DE→FR Translator · v4.0</span>
     </div>
     """, unsafe_allow_html=True)
 
@@ -997,63 +1184,154 @@ def get_openai_client():
 # TRANSLATION FUNCTIONS
 # =============================================================================
 
-def translate_text(client, text: str, column_name: str, token_counter: dict | None = None) -> str:
-    if not text or str(text).strip() == "":
-        return text
-    text = str(text).strip()
-
-    if column_name == "name":
-        system_prompt = """You are a professional translator for Home24 France e-commerce.
-Translate the German product name to French following these STRICT rules:
-- Maximum 40 characters total
-- No commas allowed
-- No brackets or parentheses allowed
-- Natural, commercial French product name
-- "Sofa" must become "Canapé"
-- "Sessel" must become "Fauteuil"
-- "Ecksofa" must become "Canapé d'angle"
-- "Sitzer" must become "places" (e.g., "3-Sitzer" = "3 places")
-- Use only French words
-Return ONLY the translated text, nothing else."""
-    elif column_name == "materialDetail":
-        system_prompt = """You are a professional translator for Home24 France e-commerce.
-Translate the German material description to natural French:
-- "Bezug" = "Revêtement"
-- "Webstoff" = "tissu tissé"
-- "Strukturstoff" = "tissu structuré"
-- "Füße" = "Pieds"
-- "Gestell" = "Structure"
-- "Buche" = "hêtre"
-- "Eiche" = "chêne"
-- "lackiert" = "verni"
-- "geölt" = "huilé"
-- Preserve <br> tags exactly as they appear
-Return ONLY the translated text, nothing else."""
-    else:
-        system_prompt = """You are a professional translator for Home24 France e-commerce.
-Translate the German text to natural French:
-- Use natural French, not literal translation
-- Remove all German traces
-- Preserve <br> tags exactly as they appear
-- "Bezug" = "Revêtement" / "Füße" = "Pieds" / "Buche" = "hêtre" / "inkl." = "inclus"
-Return ONLY the translated text, nothing else."""
-
-    try:
-        response = client.chat.completions.create(
-            model=OPENAI_MODEL,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"Translate to French:\n\n{text}"},
-            ],
-            temperature=0.3,
-            max_tokens=500,
+def _build_system_prompt(canonical: str, glossary_block: str) -> str:
+    if canonical == "name":
+        return (
+            "You are a professional translator for Home24 France e-commerce.\n"
+            "Translate the German product name to French following these STRICT rules:\n"
+            "- Maximum 40 characters total\n"
+            "- No commas allowed\n"
+            "- No brackets or parentheses allowed\n"
+            "- Natural, commercial French product name\n"
+            "- \"Sofa\" must become \"Canapé\"\n"
+            "- \"Sessel\" must become \"Fauteuil\"\n"
+            "- \"Ecksofa\" must become \"Canapé d'angle\"\n"
+            "- \"Sitzer\" must become \"places\" (e.g., \"3-Sitzer\" = \"3 places\")\n"
+            "- Use only French words"
+            f"{glossary_block}\n"
+            "Return ONLY the translated text, nothing else."
         )
-        if token_counter is not None and response.usage:
-            token_counter["prompt_tokens"]     += response.usage.prompt_tokens
-            token_counter["completion_tokens"] += response.usage.completion_tokens
-        return response.choices[0].message.content.strip()
-    except Exception:
-        return text
+    elif canonical == "materialDetail":
+        return (
+            "You are a professional translator for Home24 France e-commerce.\n"
+            "Translate the German material description to natural French:\n"
+            "- Preserve <br> tags exactly as they appear"
+            f"{glossary_block}\n"
+            "Return ONLY the translated text, nothing else."
+        )
+    else:
+        return (
+            "You are a professional translator for Home24 France e-commerce.\n"
+            "Translate the German text to natural French:\n"
+            "- Use natural French, not literal translation\n"
+            "- Remove all German traces\n"
+            "- Preserve <br> tags exactly as they appear"
+            f"{glossary_block}\n"
+            "Return ONLY the translated text, nothing else."
+        )
+
+
+def translate_batch(
+    client,
+    texts: list[str],
+    canonical: str,
+    token_counter: dict,
+    glossary: dict,
+    glossary_run_stats: dict,
+) -> list[str]:
+    if not texts:
+        return []
+
+    glossary_block = _glossary_prompt_block(glossary)
+    n = len(texts)
+
+    # Track glossary hits across all source texts in this batch
+    all_hits: dict[str, int] = {}
+    for text in texts:
+        for term, count in count_glossary_hits(text, glossary).items():
+            all_hits[term] = all_hits.get(term, 0) + count
+    if all_hits:
+        glossary_run_stats["total_hits"] = glossary_run_stats.get("total_hits", 0) + sum(all_hits.values())
+        tc = glossary_run_stats.setdefault("term_counts", {})
+        for term, count in all_hits.items():
+            tc[term] = tc.get(term, 0) + count
+
+    if canonical == "name":
+        batch_rules = (
+            "Rules for each product name:\n"
+            "- Maximum 40 characters, no commas, no brackets\n"
+            "- Natural commercial French\n"
+            "- \"Sofa\"→\"Canapé\", \"Sessel\"→\"Fauteuil\", "
+            "\"Ecksofa\"→\"Canapé d'angle\", \"Sitzer\"→\"places\""
+        )
+    elif canonical == "materialDetail":
+        batch_rules = "- Preserve <br> tags exactly\n- Natural French material terminology"
+    else:
+        batch_rules = "- Natural French, not literal\n- Remove all German traces\n- Preserve <br> tags exactly"
+
+    system_prompt = (
+        "You are a professional translator for Home24 France e-commerce.\n"
+        f"Translate each German text to French.\n{batch_rules}{glossary_block}\n\n"
+        f"Return ONLY a valid JSON array of exactly {n} translated strings, "
+        "in the same order as the input. No other text."
+    )
+    user_msg = f"Translate these {n} texts:\n{json.dumps(texts, ensure_ascii=False)}"
+
+    for attempt in range(MAX_BATCH_RETRIES + 1):
+        try:
+            response = client.chat.completions.create(
+                model=OPENAI_MODEL,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user",   "content": user_msg},
+                ],
+                temperature=0.3,
+                max_tokens=min(4000, n * 200),
+                timeout=API_TIMEOUT_SECONDS,
+            )
+            if token_counter is not None and response.usage:
+                token_counter["prompt_tokens"]     += response.usage.prompt_tokens
+                token_counter["completion_tokens"] += response.usage.completion_tokens
+
+            content = response.choices[0].message.content.strip()
+            if not content.startswith("["):
+                m = re.search(r'\[.*\]', content, re.DOTALL)
+                content = m.group() if m else content
+
+            translations = json.loads(content)
+            if isinstance(translations, list) and len(translations) == n:
+                return [str(t).strip() for t in translations]
+
+        except Exception:
+            pass
+
+        if attempt < MAX_BATCH_RETRIES:
+            continue
+        break
+
+    # Fallback: single-cell translation for each item
+    return _fallback_single_translations(client, texts, canonical, token_counter, glossary)
+
+
+def _fallback_single_translations(
+    client,
+    texts: list[str],
+    canonical: str,
+    token_counter: dict,
+    glossary: dict,
+) -> list[str]:
+    glossary_block = _glossary_prompt_block(glossary)
+    system_prompt  = _build_system_prompt(canonical, glossary_block)
+    results        = []
+    for text in texts:
+        try:
+            response = client.chat.completions.create(
+                model=OPENAI_MODEL,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user",   "content": f"Translate to French:\n\n{text}"},
+                ],
+                temperature=0.3,
+                max_tokens=500,
+                timeout=API_TIMEOUT_SECONDS,
+            )
+            if token_counter is not None and response.usage:
+                token_counter["prompt_tokens"]     += response.usage.prompt_tokens
+                token_counter["completion_tokens"] += response.usage.completion_tokens
+            results.append(response.choices[0].message.content.strip())
+        except Exception:
+            results.append(text)
+    return results
 
 
 def fix_german_residue(client, text: str, column_name: str, token_counter: dict | None = None) -> str:
@@ -1084,10 +1362,11 @@ Return ONLY the corrected French text."""
             model=OPENAI_MODEL,
             messages=[
                 {"role": "system", "content": "You remove German words from French texts for Home24 France e-commerce."},
-                {"role": "user", "content": fix_prompt},
+                {"role": "user",   "content": fix_prompt},
             ],
             temperature=0.2,
             max_tokens=500,
+            timeout=API_TIMEOUT_SECONDS,
         )
         if token_counter is not None and response.usage:
             token_counter["prompt_tokens"]     += response.usage.prompt_tokens
@@ -1196,20 +1475,71 @@ def _progress_html(phase: str, sheet: str, col_header: str, row_index: int,
     """
 
 
-def process_excel_with_progress(
-    uploaded_file, progress_bar, progress_container,
-    sheet_name: str, column_classification: dict
-) -> tuple[BytesIO, dict]:
-    client = get_openai_client()
+def _batch_progress_html(phase: str, sheet: str, batch_num: int, batch_size: int,
+                         total_api: int, api_done: int, elapsed: float, eta: float,
+                         tm_hits: int, tm_misses: int, pct: int) -> str:
+    return f"""
+    <div class="prog-shell">
+        <div class="prog-head">
+            <div>
+                <div class="prog-phase">{phase}</div>
+                <div class="prog-sheet">Sheet: {sheet}</div>
+            </div>
+            <span class="prog-badge">
+                <span class="prog-badge-dot"></span>ACTIVE
+            </span>
+        </div>
+        <div class="prog-track">
+            <div class="prog-bar" style="width:{pct}%"></div>
+        </div>
+        <div class="prog-item">
+            <div class="prog-item-dot"></div>
+            <span class="prog-item-col">Batch {batch_num}</span>
+            <span class="prog-item-row">{api_done} / {total_api} cells</span>
+        </div>
+        <div class="prog-stats">
+            <div><span class="prog-stat-val">{batch_num}</span><span class="prog-stat-lbl">Batches</span></div>
+            <div><span class="prog-stat-val">{batch_size}</span><span class="prog-stat-lbl">Batch Size</span></div>
+            <div><span class="prog-stat-val">{tm_hits}</span><span class="prog-stat-lbl">TM Hits</span></div>
+            <div><span class="prog-stat-val">{tm_misses}</span><span class="prog-stat-lbl">API Queue</span></div>
+            <div><span class="prog-stat-val">{format_time(elapsed)}</span><span class="prog-stat-lbl">Elapsed</span></div>
+            <div><span class="prog-stat-val">~{format_time(eta)}</span><span class="prog-stat-lbl">Remaining</span></div>
+            <div><span class="prog-stat-val">{pct}%</span><span class="prog-stat-lbl">Progress</span></div>
+        </div>
+    </div>
+    """
 
-    token_counter = {"prompt_tokens": 0, "completion_tokens": 0}
+
+def process_excel_with_progress(
+    uploaded_file,
+    progress_bar,
+    progress_container,
+    sheet_name: str,
+    column_classification: dict,
+    batch_size: int = DEFAULT_BATCH_SIZE,
+) -> tuple[BytesIO, dict]:
+    client   = get_openai_client()
+    tm       = load_translation_memory()
+    glossary = load_glossary()
+
+    token_counter      = {"prompt_tokens": 0, "completion_tokens": 0}
+    glossary_run_stats: dict = {"total_hits": 0, "term_counts": {}}
+
     stats = {
-        "cells_translated": 0,
-        "cells_skipped": 0,
+        "cells_translated":    0,
+        "cells_skipped":       0,
         "residue_corrections": 0,
         "unresolved_warnings": 0,
-        "warning_details": [],
-        "sheet_name": sheet_name,
+        "warning_details":     [],
+        "sheet_name":          sheet_name,
+        "tm_hits":             0,
+        "tm_misses":           0,
+        "batch_count":         0,
+        "avg_batch_size":      0.0,
+        "glossary_hits":       0,
+        "glossary_top_terms":  {},
+        "api_calls_made":      0,
+        "api_calls_reduced":   0,
     }
 
     with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
@@ -1217,56 +1547,140 @@ def process_excel_with_progress(
         tmp_path = tmp.name
 
     try:
-        workbook  = load_workbook(filename=tmp_path, data_only=False)
-        worksheet = workbook[sheet_name]
+        workbook     = load_workbook(filename=tmp_path, data_only=False)
+        worksheet    = workbook[sheet_name]
         to_translate = column_classification["to_translate"]
 
         if not to_translate:
             raise ValueError("No translatable columns found in the file.")
 
-        total_rows  = worksheet.max_row - 1
-        total_cells = total_rows * len(to_translate)
-        processed   = 0
-        start_time  = time.time()
+        total_rows = worksheet.max_row - 1
+        start_time = time.time()
 
-        # ── Phase 1: Translation ──────────────────────────────────────────────
+        # ── Phase 0: Pre-scan ─────────────────────────────────────────────────
+        progress_bar.progress(0.02)
+        progress_container.markdown(
+            _batch_progress_html(
+                "Scanning", sheet_name, 0, 0, 0, 0, 0.0, 0.0, 0, 0, 2
+            ),
+            unsafe_allow_html=True,
+        )
+
+        cells_queue: list[tuple] = []
         for row_num in range(2, worksheet.max_row + 1):
             for col_header, (col_idx, canonical) in to_translate.items():
-                processed += 1
-                elapsed   = time.time() - start_time
-                progress  = processed / total_cells
-                eta       = (elapsed / processed) * (total_cells - processed) if processed else 0
-                pct       = int(progress * 100)
+                cell = worksheet.cell(row=row_num, column=col_idx)
+                raw  = cell.value
+                if raw is None or str(raw).strip() == "":
+                    stats["cells_skipped"] += 1
+                else:
+                    cells_queue.append((row_num, col_header, col_idx, canonical, str(raw).strip()))
 
-                progress_bar.progress(progress * 0.7)
+        total_to_process = len(cells_queue)
+        if total_to_process == 0:
+            raise ValueError("All translatable cells are empty — nothing to translate.")
+
+        # ── Phase 1: Translation Memory check ────────────────────────────────
+        results: dict[tuple, str] = {}
+        api_queue: list[tuple]    = []
+
+        for row_num, col_header, col_idx, canonical, text in cells_queue:
+            col_type = _tm_col_type(canonical)
+            cached   = tm_get(tm, text, col_type)
+            if cached is not None:
+                results[(row_num, col_idx)] = cached
+                stats["tm_hits"] += 1
+            else:
+                api_queue.append((row_num, col_header, col_idx, canonical, text))
+                stats["tm_misses"] += 1
+
+        # ── Phase 2: Batch translation ────────────────────────────────────────
+        by_col_type: dict[str, list] = {}
+        for item in api_queue:
+            ct = _tm_col_type(item[3])
+            by_col_type.setdefault(ct, []).append(item)
+
+        total_api_cells = len(api_queue)
+        api_done        = 0
+
+        for col_type, items in by_col_type.items():
+            for batch_start in range(0, len(items), batch_size):
+                batch          = items[batch_start : batch_start + batch_size]
+                texts          = [item[4] for item in batch]
+                canonical_used = batch[0][3]
+
+                elapsed = time.time() - start_time
+                pct_api = int((api_done / max(total_api_cells, 1)) * 100)
+                eta     = (elapsed / max(api_done, 1)) * (total_api_cells - api_done) if api_done else 0
+                progress_bar.progress(0.05 + (api_done / max(total_api_cells, 1)) * 0.60)
                 progress_container.markdown(
-                    _progress_html(
-                        "Phase 1 — Translation", sheet_name, col_header,
-                        row_num - 1, total_rows, pct, elapsed, eta,
-                        stats["cells_translated"], stats["cells_skipped"],
-                        stats["residue_corrections"],
+                    _batch_progress_html(
+                        "Phase 1 — Batch Translation", sheet_name,
+                        stats["batch_count"] + 1, len(batch),
+                        total_api_cells, api_done,
+                        elapsed, eta,
+                        stats["tm_hits"], stats["tm_misses"], pct_api,
                     ),
                     unsafe_allow_html=True,
                 )
 
-                cell = worksheet.cell(row=row_num, column=col_idx)
-                if cell.value is None or str(cell.value).strip() == "":
-                    stats["cells_skipped"] += 1
-                    continue
+                translations = translate_batch(
+                    client, texts, canonical_used,
+                    token_counter, glossary, glossary_run_stats,
+                )
 
-                translated = translate_text(client, cell.value, canonical, token_counter)
-                if canonical == "name":
-                    translated = validate_product_name(translated)
-                cell.value = translated
-                stats["cells_translated"] += 1
+                for i, (row_num, col_header, col_idx, canonical, text) in enumerate(batch):
+                    tr = str(translations[i]).strip() if i < len(translations) else text
+                    if canonical == "name":
+                        tr = validate_product_name(tr)
+                    results[(row_num, col_idx)] = tr
+                    tm_put(tm, text, tr, _tm_col_type(canonical))
+                    stats["cells_translated"] += 1
 
-        # ── Phase 2: Residue check ────────────────────────────────────────────
+                stats["batch_count"] += 1
+                api_done += len(batch)
+
+        # Count TM hits as translated
+        stats["cells_translated"] += stats["tm_hits"]
+        stats["avg_batch_size"] = (
+            round(total_api_cells / max(stats["batch_count"], 1), 1)
+            if stats["batch_count"] > 0 else 0.0
+        )
+
+        # Old approach would have sent 1 API call per cell; now we send 1 per batch + 0 for TM hits
+        stats["api_calls_made"]    = stats["batch_count"]
+        stats["api_calls_reduced"] = max(total_to_process - stats["batch_count"] - stats["tm_hits"], 0)
+
+        # Persist TM
+        tm["global_stats"]["total_hits"]            += stats["tm_hits"]
+        tm["global_stats"]["total_misses"]          += stats["tm_misses"]
+        tm["global_stats"]["total_api_calls_saved"] += stats["tm_hits"]
+        save_translation_memory(tm)
+
+        # Persist Glossary stats
+        stats["glossary_hits"]      = glossary_run_stats.get("total_hits", 0)
+        stats["glossary_top_terms"] = dict(
+            sorted(
+                glossary_run_stats.get("term_counts", {}).items(),
+                key=lambda x: -x[1],
+            )[:5]
+        )
+        update_glossary_stats(glossary, glossary_run_stats.get("term_counts", {}))
+        save_glossary(glossary)
+
+        # Write all translations back to worksheet
+        for (row_num, col_idx), translation in results.items():
+            worksheet.cell(row=row_num, column=col_idx).value = translation
+
+        total_cells_for_passes = total_rows * len(to_translate)
+
+        # ── Phase 3: Residue check ────────────────────────────────────────────
         checked = 0
         for row_num in range(2, worksheet.max_row + 1):
             for col_header, (col_idx, canonical) in to_translate.items():
                 checked += 1
                 elapsed  = time.time() - start_time
-                progress = 0.7 + (checked / total_cells) * 0.25
+                progress = 0.65 + (checked / max(total_cells_for_passes, 1)) * 0.25
                 pct      = int(progress * 100)
 
                 progress_bar.progress(progress)
@@ -1296,15 +1710,15 @@ def process_excel_with_progress(
                     if detected:
                         stats["unresolved_warnings"] += 1
                         stats["warning_details"].append({
-                            "row": row_num,
-                            "column": col_header,
-                            "text": text[:50] + "..." if len(text) > 50 else text,
+                            "row":     row_num,
+                            "column":  col_header,
+                            "text":    text[:50] + "..." if len(text) > 50 else text,
                             "residue": detected[:3],
                         })
 
                 cell.value = text
 
-        # ── Phase 3: Final pass ───────────────────────────────────────────────
+        # ── Phase 4: Final pass ───────────────────────────────────────────────
         progress_bar.progress(0.98)
         elapsed = time.time() - start_time
         progress_container.markdown(
@@ -1335,8 +1749,9 @@ def process_excel_with_progress(
                         if not already:
                             stats["unresolved_warnings"] += 1
                             stats["warning_details"].append({
-                                "row": row_num, "column": col_header,
-                                "text": corrected[:50] + "..." if len(corrected) > 50 else corrected,
+                                "row":     row_num,
+                                "column":  col_header,
+                                "text":    corrected[:50] + "..." if len(corrected) > 50 else corrected,
                                 "residue": detect_german_residue(corrected)[:3],
                             })
                     cell.value = corrected
@@ -1473,6 +1888,15 @@ def translator_page():
 
         render_column_report(classification)
 
+        # Advanced settings
+        with st.expander("Advanced settings"):
+            batch_size = st.number_input(
+                "Batch size (cells per API request)",
+                min_value=1, max_value=50,
+                value=DEFAULT_BATCH_SIZE,
+                help="Higher = fewer API calls but larger requests. Default 20 is optimal for most files.",
+            )
+
         st.markdown('<div class="section-label">Translate</div>', unsafe_allow_html=True)
         st.markdown("""
         <div class="alert alert-warn" style="margin-bottom:16px;">
@@ -1495,6 +1919,7 @@ def translator_page():
                 output_bytes, stats = process_excel_with_progress(
                     uploaded_file, progress_bar, progress_container,
                     selected_sheet, classification,
+                    batch_size=int(batch_size),
                 )
                 progress_container.empty()
                 progress_bar.empty()
@@ -1516,11 +1941,33 @@ def translator_page():
                     "estimated_cost_usd":        stats.get("estimated_cost_usd"),
                     "prompt_tokens":             stats.get("prompt_tokens"),
                     "completion_tokens":         stats.get("completion_tokens"),
+                    "tm_hits":                   stats.get("tm_hits", 0),
+                    "tm_misses":                 stats.get("tm_misses", 0),
+                    "batch_count":               stats.get("batch_count", 0),
+                    "avg_batch_size":            stats.get("avg_batch_size", 0.0),
+                    "api_calls_reduced":         stats.get("api_calls_reduced", 0),
+                    "glossary_hits":             stats.get("glossary_hits", 0),
                 })
 
                 # ── Results ──
                 st.markdown('<div class="section-label">Results</div>', unsafe_allow_html=True)
                 render_stats(stats)
+
+                # ── Translation Intelligence ──
+                st.markdown('<div class="section-label">Translation Intelligence</div>', unsafe_allow_html=True)
+                render_intelligence_stats(stats)
+
+                if stats.get("glossary_top_terms"):
+                    top_terms_str = " · ".join(
+                        f"{de} → {DEFAULT_GLOSSARY_TERMS.get(de, '?')}"
+                        for de in list(stats["glossary_top_terms"].keys())[:3]
+                    )
+                    st.markdown(f"""
+                    <div class="alert alert-info" style="margin-top:0;">
+                        <span class="alert-icon">ℹ</span>
+                        <span><strong>Top glossary terms used:</strong> {top_terms_str}</span>
+                    </div>
+                    """, unsafe_allow_html=True)
 
                 # ── Quality gate ──
                 st.markdown('<div class="section-label">Quality Gate</div>', unsafe_allow_html=True)
@@ -1536,6 +1983,10 @@ def translator_page():
                     ("⚠️" if qg.get("possible_missed") else "✅",
                      "Missed columns",
                      ", ".join(qg.get("possible_missed", [])) or "All matched"),
+                    ("✅", "Translation Memory",
+                     f"{stats.get('tm_hits', 0)} hits / {stats.get('tm_misses', 0)} misses"),
+                    ("✅", "Batch processing",
+                     f"{stats.get('batch_count', 0)} batches · avg {stats.get('avg_batch_size', 0)} cells/req"),
                 ]
                 qg_rows_html = "".join(
                     f"""<div class="qg-row">
@@ -1682,7 +2133,8 @@ def history_page():
             "File":            r.get("original_filename", ""),
             "Sheet":           r.get("sheet_name", ""),
             "Translated":      r.get("cells_translated", 0),
-            "Skipped":         r.get("cells_skipped", 0),
+            "TM Hits":         r.get("tm_hits", "—"),
+            "Batches":         r.get("batch_count", "—"),
             "Residue Fixes":   r.get("residue_corrections", 0),
             "Warnings":        r.get("unresolved_warnings", 0),
             "Time":            r.get("processing_time_formatted", ""),
@@ -1810,6 +2262,118 @@ def analytics_page():
     </div>
     """, unsafe_allow_html=True)
 
+    # ── Translation Memory ──
+    tm = load_translation_memory()
+    tm_global      = tm.get("global_stats", {})
+    tm_total_hits  = tm_global.get("total_hits", 0)
+    tm_total_miss  = tm_global.get("total_misses", 0)
+    tm_saved_calls = tm_global.get("total_api_calls_saved", 0)
+    tm_entries     = len(tm.get("entries", {}))
+    # Estimate cost saved: each TM hit avoided ~500 input + 100 output tokens
+    tm_cost_saved  = round(
+        tm_total_hits * (500 * _INPUT_COST_PER_TOKEN + 100 * _OUTPUT_COST_PER_TOKEN), 4
+    )
+    hit_rate = int(tm_total_hits / max(tm_total_hits + tm_total_miss, 1) * 100)
+
+    st.markdown('<div class="section-label">Translation Memory</div>', unsafe_allow_html=True)
+    st.markdown(f"""
+    <div class="kpi-row">
+        <div class="kpi">
+            <div class="kpi-label">Memory Entries</div>
+            <div class="kpi-value accent">{tm_entries:,}</div>
+            <div class="kpi-sub">Unique source phrases</div>
+        </div>
+        <div class="kpi">
+            <div class="kpi-label">Cache Hits</div>
+            <div class="kpi-value success">{tm_total_hits:,}</div>
+            <div class="kpi-sub">{hit_rate}% hit rate</div>
+        </div>
+        <div class="kpi">
+            <div class="kpi-label">API Calls Saved</div>
+            <div class="kpi-value">{tm_saved_calls:,}</div>
+            <div class="kpi-sub">via memory reuse</div>
+        </div>
+        <div class="kpi">
+            <div class="kpi-label">Est. Cost Saved</div>
+            <div class="kpi-value warn">${tm_cost_saved:.4f}</div>
+            <div class="kpi-sub">from TM cache hits</div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # ── Batch Processing ──
+    total_batches      = sum(r.get("batch_count", 0) for r in history)
+    total_api_reduced  = sum(r.get("api_calls_reduced", 0) for r in history)
+    avg_batch_sizes    = [r.get("avg_batch_size", 0) for r in history if r.get("avg_batch_size", 0) > 0]
+    overall_avg_batch  = round(sum(avg_batch_sizes) / max(len(avg_batch_sizes), 1), 1)
+    speed_multiplier   = round(overall_avg_batch, 1) if overall_avg_batch > 0 else 1.0
+
+    st.markdown('<div class="section-label">Batch Processing</div>', unsafe_allow_html=True)
+    st.markdown(f"""
+    <div class="kpi-row-3">
+        <div class="kpi">
+            <div class="kpi-label">Total API Batches</div>
+            <div class="kpi-value accent">{total_batches:,}</div>
+            <div class="kpi-sub">Requests sent to OpenAI</div>
+        </div>
+        <div class="kpi">
+            <div class="kpi-label">Avg Batch Size</div>
+            <div class="kpi-value">{overall_avg_batch}</div>
+            <div class="kpi-sub">cells per request</div>
+        </div>
+        <div class="kpi">
+            <div class="kpi-label">API Calls Reduced</div>
+            <div class="kpi-value success">{total_api_reduced:,}</div>
+            <div class="kpi-sub">~{speed_multiplier}× fewer requests</div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # ── Glossary ──
+    glossary      = load_glossary()
+    gloss_stats   = glossary.get("stats", {})
+    gloss_hits    = gloss_stats.get("total_hits", 0)
+    gloss_tc      = gloss_stats.get("term_counts", {})
+    gloss_terms   = len(glossary.get("terms", {}))
+    top_terms     = sorted(gloss_tc.items(), key=lambda x: -x[1])[:5]
+
+    st.markdown('<div class="section-label">Glossary</div>', unsafe_allow_html=True)
+    st.markdown(f"""
+    <div class="kpi-row-3">
+        <div class="kpi">
+            <div class="kpi-label">Glossary Terms</div>
+            <div class="kpi-value accent">{gloss_terms}</div>
+            <div class="kpi-sub">DE→FR mappings defined</div>
+        </div>
+        <div class="kpi">
+            <div class="kpi-label">Total Glossary Hits</div>
+            <div class="kpi-value success">{gloss_hits:,}</div>
+            <div class="kpi-sub">Consistent terms enforced</div>
+        </div>
+        <div class="kpi">
+            <div class="kpi-label">Top Term</div>
+            <div class="kpi-value" style="font-size:18px;">
+                {top_terms[0][0] if top_terms else "—"}
+            </div>
+            <div class="kpi-sub">
+                {f"{top_terms[0][1]} uses" if top_terms else "No data yet"}
+            </div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    if top_terms:
+        top_html = "".join(
+            f'<span class="chip chip-accent">{de} <span class="chip-arrow">→ {glossary["terms"].get(de,"?")}</span> · {n}×</span>'
+            for de, n in top_terms
+        )
+        st.markdown(f"""
+        <div class="card" style="margin-top:0;">
+            <div class="card-title">Top glossary terms used</div>
+            <div>{top_html}</div>
+        </div>
+        """, unsafe_allow_html=True)
+
     if total_cost is None:
         st.markdown("""
         <div class="alert alert-info" style="margin-top:16px;">
@@ -1820,6 +2384,90 @@ def analytics_page():
             </span>
         </div>
         """, unsafe_allow_html=True)
+
+
+# =============================================================================
+# PAGE: GLOSSARY MANAGEMENT
+# =============================================================================
+
+def glossary_page():
+    render_page_header(
+        "Glossary Management",
+        "DE→FR terminology enforced consistently across all translations",
+    )
+
+    glossary    = load_glossary()
+    terms       = glossary.get("terms", {})
+    gloss_stats = glossary.get("stats", {})
+    term_counts = gloss_stats.get("term_counts", {})
+
+    # ── Stats ──
+    total_hits  = gloss_stats.get("total_hits", 0)
+    total_terms = len(terms)
+    used_terms  = len([t for t in terms if t in term_counts])
+
+    st.markdown(f"""
+    <div class="kpi-row-3">
+        <div class="kpi">
+            <div class="kpi-label">Total Terms</div>
+            <div class="kpi-value accent">{total_terms}</div>
+            <div class="kpi-sub">Defined mappings</div>
+        </div>
+        <div class="kpi">
+            <div class="kpi-label">Terms Used</div>
+            <div class="kpi-value success">{used_terms}</div>
+            <div class="kpi-sub">Matched in source texts</div>
+        </div>
+        <div class="kpi">
+            <div class="kpi-label">Total Hits</div>
+            <div class="kpi-value">{total_hits:,}</div>
+            <div class="kpi-sub">Across all translations</div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # ── Glossary table ──
+    st.markdown('<div class="section-label">Term List</div>', unsafe_allow_html=True)
+
+    rows = []
+    for de, fr in sorted(terms.items()):
+        rows.append({
+            "German":      de,
+            "French":      fr,
+            "Times Used":  term_counts.get(de, 0),
+        })
+
+    st.dataframe(rows, use_container_width=True, hide_index=True)
+
+    # ── Add new term ──
+    st.markdown('<div class="section-label">Add / Update Term</div>', unsafe_allow_html=True)
+
+    with st.form("add_term_form"):
+        col_de, col_fr = st.columns(2)
+        with col_de:
+            new_de = st.text_input("German term", placeholder="e.g. Kopfteil")
+        with col_fr:
+            new_fr = st.text_input("French translation", placeholder="e.g. Tête de lit")
+        add_submitted = st.form_submit_button("Add term →", use_container_width=True)
+
+    if add_submitted:
+        new_de = new_de.strip()
+        new_fr = new_fr.strip()
+        if new_de and new_fr:
+            glossary["terms"][new_de] = new_fr
+            save_glossary(glossary)
+            st.success(f"Added: **{new_de}** → **{new_fr}**")
+            st.rerun()
+        else:
+            st.error("Both fields are required.")
+
+    # ── Reset to defaults ──
+    st.markdown('<div class="section-label">Reset</div>', unsafe_allow_html=True)
+    if st.button("Reset glossary to defaults"):
+        glossary["terms"] = DEFAULT_GLOSSARY_TERMS.copy()
+        save_glossary(glossary)
+        st.success("Glossary reset to defaults.")
+        st.rerun()
 
 
 # =============================================================================
@@ -1853,6 +2501,8 @@ def main():
         history_page()
     elif page == "Analytics":
         analytics_page()
+    elif page == "Glossary":
+        glossary_page()
 
     render_footer()
 

@@ -118,6 +118,13 @@ logs/
 # Local translation history — ephemeral, never commit
 translation_history.json
 
+# Translation Memory — machine-generated cache, never commit
+translation_memory.json
+
+# Glossary — auto-generated from defaults; commit only if you want to share
+# custom terminology with your team (remove this line in that case)
+glossary.json
+
 # =============================================================================
 # TESTING
 # =============================================================================
