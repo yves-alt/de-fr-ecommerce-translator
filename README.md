@@ -2,7 +2,7 @@
 
 > **Project Type:** Portfolio Prototype / Internal Tool Demo
 
-AI-powered product localization platform that translates German Excel product data to French for e-commerce market expansion. Includes Translation Memory, Batch Processing, and a professional Glossary system.
+AI-powered product localization platform that translates German Excel product data to French for e-commerce market expansion. Includes Translation Memory, Batch Processing, a professional Glossary system, Retry System with exponential backoff, advanced Column Intelligence, a Cost Dashboard, and Human Review Mode with Excel highlighting.
 
 ---
 
@@ -16,9 +16,13 @@ This Streamlit web application provides a production-grade translation workflow 
 - Translation Memory: reuse past translations instantly — no API call needed
 - Batch Processing: translate 20 cells per API request instead of 1
 - Glossary System: enforce consistent terminology across every translation
+- Retry System: up to 3 retries with exponential backoff on API errors and rate limits
+- Column Intelligence: 3-tier classifier (exact alias → substring → camelCase word-set)
+- Human Review Mode: quality analysis per cell, flagged rows highlighted yellow in Excel
+- Cost Dashboard: total tokens, prompt vs completion breakdown, avg cost/file and /cell, per-job bar chart
 - Real-time progress tracking with batch and TM stats
 - Translation History dashboard with per-job statistics
-- Analytics dashboard with TM savings, batch efficiency, and glossary usage
+- Analytics dashboard with TM savings, batch efficiency, glossary usage, and cost trends
 - Glossary Management page: view, add, and update DE→FR terms
 - Download the translated French Excel file with preserved formatting
 
@@ -33,11 +37,14 @@ This Streamlit web application provides a production-grade translation workflow 
 | **Translation Memory** | JSON-backed cache: reuses past translations, tracks hits/misses/cost saved |
 | **Batch Processing** | Groups 20 cells per API request — up to 20× fewer API calls |
 | **Glossary System** | 35+ DE→FR e-commerce terms injected into every prompt; editable via UI |
+| **Retry System** | Up to 3 retries with exponential backoff; rate-limit detection; notify on each retry |
+| **Column Intelligence** | 3-tier classifier: T1 exact alias → T2 substring → T3 camelCase word-set (≥2 matches) |
+| **Human Review Mode** | Quality analysis per cell; flags German residue, lost `<br>`, name violations; yellow highlight in Excel |
+| **Cost Dashboard** | Total tokens, prompt vs completion breakdown, avg cost/file and /cell, per-job bar chart |
 | **Real-Time Progress** | Live updates showing batch number, TM hits, cells queued |
 | **Residue Detection** | Up to 3 correction passes to eliminate remaining German words |
-| **Column Detection** | Two-tier fuzzy classifier maps headers to known translation targets |
 | **Quality Gate** | Post-translation report: residue, TM stats, batch info, protected columns |
-| **Analytics** | TM hit rate, cost saved, batch efficiency, top glossary terms |
+| **Analytics** | TM hit rate, cost saved, batch efficiency, top glossary terms, cost trends |
 | **Glossary Management** | Add/update DE→FR terms, view usage counts, reset to defaults |
 | **Translation History** | JSON-backed log of all jobs with TM hits, batch count, and cost |
 
@@ -176,6 +183,75 @@ The app ships with 35+ German→French e-commerce term mappings in `glossary.jso
 - Reset to built-in defaults at any time
 
 `glossary.json` is ignored by Git by default. Remove it from `.gitignore` if you want to commit custom terminology to version control and share it with your team.
+
+---
+
+## Retry System
+
+All OpenAI API calls are wrapped in `_api_call_with_retry()` with exponential backoff.
+
+**How it works:**
+1. Any API call that raises an exception is retried up to `MAX_API_RETRIES` (3) times.
+2. The delay doubles on each retry: 1s → 2s → 4s.
+3. If a rate-limit error (`429`) is detected, the delay is multiplied by 4× instead.
+4. A `notify_fn` callback is fired on each retry — used to increment the session retry counter.
+5. If all attempts fail, the exception is re-raised and the batch falls back to single-cell mode.
+
+**Constants:**
+- `MAX_API_RETRIES = 3` — max retries per API call
+- `RETRY_BASE_DELAY = 1.0` — starting backoff in seconds (doubles each attempt)
+
+---
+
+## Column Intelligence (3-Tier)
+
+Headers are matched to canonical column names through three tiers, in order:
+
+| Tier | Method | Example |
+|------|--------|---------|
+| **T1** | Exact alias match (case-insensitive) | `"farbe"` → `colorDetail` |
+| **T2** | Substring match | `"colorinfo"` → `colorDetail` |
+| **T3** | camelCase word-set match (≥2 words overlap) | `"couleurDetail"` → `colorDetail` |
+
+T3 splits camelCase, PascalCase, and snake_case headers into word tokens before matching against `CANONICAL_WORD_SETS`. At least 2 words must overlap for a match to avoid false positives.
+
+---
+
+## Human Review Mode
+
+After translation, every cell is analysed by `analyze_translation_quality()`.
+
+**Checks performed:**
+| Check | Trigger |
+|-------|---------|
+| German residue | Any German word found in the translation |
+| Identical output | Translation unchanged from source |
+| Too short | Translation < 40% the length of source (min 3 chars) |
+| Lost `<br>` tags | Source had `<br>` tags that are missing in translation |
+| Name too long | `name` column translation > 40 chars |
+| Name has comma | `name` column translation contains a comma |
+
+**Output:**
+- Flagged cells are highlighted **yellow** (`#FFF9C4`) in the downloaded Excel file.
+- A "Review Recommended" expander appears in the Translator page listing every flagged cell with the reason.
+- `review_count` is stored in translation history for future reference.
+
+---
+
+## Cost Dashboard
+
+The Analytics page includes a dedicated Cost Dashboard section.
+
+**Metrics shown:**
+- Total tokens used (prompt + completion) across all jobs
+- Prompt token count with calculated input cost
+- Completion token count with calculated output cost
+- Average cost per file and per cell
+- Per-job cost bar chart (when more than 1 job has cost data)
+
+**GPT-4o-mini pricing used:**
+- Input: $0.15 / 1M tokens
+- Output: $0.60 / 1M tokens
 
 ---
 

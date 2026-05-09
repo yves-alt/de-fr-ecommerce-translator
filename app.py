@@ -19,6 +19,7 @@ from datetime import datetime, timedelta
 
 from dotenv import load_dotenv
 from openpyxl import load_workbook
+from openpyxl.styles import PatternFill
 from openai import OpenAI
 
 load_dotenv()
@@ -47,6 +48,10 @@ MANUAL_SECONDS_PER_CELL = 45
 DEFAULT_BATCH_SIZE  = 20
 MAX_BATCH_RETRIES   = 2
 API_TIMEOUT_SECONDS = 45
+MAX_API_RETRIES     = 3
+RETRY_BASE_DELAY    = 1.0   # seconds; doubles on each retry
+
+REVIEW_FILL = PatternFill(start_color="FFF9C4", end_color="FFF9C4", fill_type="solid")
 
 DEFAULT_GLOSSARY_TERMS = {
     "Bezug":         "Revêtement",
@@ -138,30 +143,80 @@ IMPORTANT_KEYWORDS = [
 ]
 
 TRANSLATE_ALIASES_T1 = {
-    "name":                     ["name", "productname", "product_name"],
-    "colorDetail":              ["colordetail", "colourdetail", "color_detail", "colour_detail"],
-    "deliveryScope":            ["deliveryscope", "delivery_scope", "lieferumfang"],
-    "materialDetail":           ["materialdetail", "materialdetails", "material_detail", "compositionmatiere"],
-    "otherMeasurements":        ["othermeasurements", "other_measurements", "masse", "abmessungen"],
-    "qualityDetail":            ["qualitydetail", "quality_detail"],
+    "name": [
+        "name", "productname", "product_name", "produktname",
+        "artikelname", "artikel_name", "artikelbezeichnung",
+        "produktbezeichnung", "bezeichnung", "titelname",
+    ],
+    "colorDetail": [
+        "colordetail", "colourdetail", "color_detail", "colour_detail",
+        "colordetails", "colourdetails", "farbe", "farbdetail",
+        "farbbezeichnung", "colorname", "colour_name",
+        "detailcouleur", "couleurdetail",
+    ],
+    "deliveryScope": [
+        "deliveryscope", "delivery_scope", "lieferumfang", "delivery_contents",
+        "deliverycontents", "lieferinhalt", "lieferung", "inhaltsangabe",
+        "contenulivraison", "perimètrelivraison",
+    ],
+    "materialDetail": [
+        "materialdetail", "materialdetails", "material_detail", "compositionmatiere",
+        "material_details", "materialinfo", "material_info", "materialbeschreibung",
+        "werkstoffe", "werkstoff", "materiaux", "détailmatière",
+        "detailmatiere",
+    ],
+    "otherMeasurements": [
+        "othermeasurements", "other_measurements", "masse", "abmessungen",
+        "measurements", "dimensions", "abmessung", "maßangaben",
+        "gesamtmasse", "dimensionen", "ausmasse", "produktmasse",
+        "autresmesures", "mesures",
+    ],
+    "qualityDetail": [
+        "qualitydetail", "quality_detail", "qualitätsdetail",
+        "qualitatsdetail", "qualitydetails", "quality_details",
+        "qualite", "detailqualite",
+    ],
     "textileCompositionCover1": [
         "textilecompositioncover1", "textilecompositioncover",
         "textilecomposition",       "textecomposition",
         "compositioncover",         "compositioncover1",
-        "textecompositioncover1",
+        "textecompositioncover1",   "textile_composition",
+        "textile_composition_cover", "textile_composition_cover1",
+        "compositiontextile",       "textilzusammensetzung",
+        "zusammensetzung",          "materialzusammensetzung",
+        "compositionmatiere",       "textilescomposition",
     ],
-    "variantName":              ["variantname", "variant_name", "variantenname"],
+    "variantName": [
+        "variantname", "variant_name", "variantenname",
+        "variantbezeichnung", "variant_bezeichnung",
+        "ausführung", "ausfuehrung", "variantennamen",
+    ],
 }
 
 TRANSLATE_ALIASES_T2 = {
-    "textileCompositionCover1": ["textilecomposition", "textecomposition", "textilcomposition", "textile", "textil", "composition"],
-    "materialDetail":           ["material"],
-    "colorDetail":              ["color", "colour"],
-    "deliveryScope":            ["delivery"],
-    "otherMeasurements":        ["measurement"],
-    "qualityDetail":            ["quality"],
-    "variantName":              ["variant"],
-    "name":                     ["productname"],
+    "textileCompositionCover1": [
+        "textilecomposition", "textecomposition", "textilcomposition",
+        "textile", "textil", "composition", "zusammensetzung",
+    ],
+    "materialDetail":   ["material", "materiaux", "matiere"],
+    "colorDetail":      ["color", "colour", "farbe", "couleur"],
+    "deliveryScope":    ["delivery", "lieferung", "livraison"],
+    "otherMeasurements":["measurement", "dimension", "masse", "mesure"],
+    "qualityDetail":    ["quality", "qualite", "qualität"],
+    "variantName":      ["variant", "ausführung", "ausfuehrung"],
+    "name":             ["productname", "designation", "bezeichnung"],
+}
+
+# T3: word-set matching for camelCase / scrambled headers (≥2 matching words required)
+CANONICAL_WORD_SETS: dict[str, set[str]] = {
+    "name":                     {"name", "product", "produkt", "artikel", "bezeichnung"},
+    "colorDetail":              {"color", "colour", "farbe", "couleur", "detail"},
+    "deliveryScope":            {"delivery", "scope", "lieferumfang", "lieferung", "inhalt", "contenu"},
+    "materialDetail":           {"material", "detail", "matiere", "werkstoff", "werkstoffe"},
+    "otherMeasurements":        {"measurement", "dimension", "masse", "abmessung", "mesure", "groesse"},
+    "qualityDetail":            {"quality", "qualite", "qualitat"},
+    "textileCompositionCover1": {"textile", "composition", "cover", "zusammensetzung", "textil"},
+    "variantName":              {"variant", "ausfuehrung", "ausführung", "variantenname"},
 }
 
 
@@ -328,6 +383,14 @@ def update_glossary_stats(glossary: dict, term_counts: dict) -> None:
     for term, count in term_counts.items():
         tc[term]           = tc.get(term, 0) + count
         s["total_hits"]    = s.get("total_hits", 0) + count
+
+
+def _normalize_header(header: str) -> set[str]:
+    """Split camelCase / PascalCase / snake_case header into lowercase word tokens."""
+    no_under = header.replace("_", " ")
+    spaced   = re.sub(r'(?<=[a-z])(?=[A-Z])', ' ', no_under)
+    spaced   = re.sub(r'(?<=[A-Z])(?=[A-Z][a-z])', ' ', spaced)
+    return {w.lower() for w in spaced.split() if w} | {header.strip().lower()}
 
 
 # =============================================================================
@@ -1112,7 +1175,7 @@ def render_footer():
     st.markdown("""
     <div class="site-footer">
         <span>Built by <strong style="color:#3a3a52;">Yves Koulle Banga</strong></span>
-        <span style="color:#1a1a2a;">DE→FR Translator · v4.0</span>
+        <span style="color:#1a1a2a;">DE→FR Translator · v5.0</span>
     </div>
     """, unsafe_allow_html=True)
 
@@ -1152,6 +1215,47 @@ def detect_german_residue(text: str) -> list[str]:
         if re.compile(r'\b' + re.escape(word_lower) + r'\b', re.IGNORECASE).search(masked):
             detected.append(word)
     return detected
+
+
+def analyze_translation_quality(source: str, translation: str, canonical: str) -> list[dict]:
+    """Return a list of quality issues found in the translation. Empty list means clean."""
+    issues  = []
+    residue = detect_german_residue(translation)
+    if residue:
+        issues.append({"type": "german_residue",  "reason": f"German words: {', '.join(residue[:3])}"})
+    if translation.strip() == source.strip():
+        issues.append({"type": "identical_output", "reason": "Translation matches source text"})
+    if len(source) > 6 and len(translation) < max(3, len(source) * 0.4):
+        issues.append({"type": "too_short",        "reason": f"Very short ({len(translation)} chars vs {len(source)} source)"})
+    src_br = source.count("<br>")
+    if src_br > 0 and translation.count("<br>") < src_br:
+        issues.append({"type": "lost_br_tags",     "reason": f"Lost {src_br - translation.count('<br>')} <br> tag(s)"})
+    if canonical == "name":
+        if len(translation) > 40:
+            issues.append({"type": "name_too_long",  "reason": f"Exceeds 40 chars ({len(translation)})"})
+        if "," in translation:
+            issues.append({"type": "name_has_comma", "reason": "Contains a comma"})
+    return issues
+
+
+def _api_call_with_retry(fn, *, max_retries: int = MAX_API_RETRIES, notify_fn=None):
+    """Call fn() with exponential backoff on failure. Re-raises if all attempts fail."""
+    delay    = RETRY_BASE_DELAY
+    last_exc = None
+    for attempt in range(max_retries + 1):
+        try:
+            return fn()
+        except Exception as exc:
+            last_exc = exc
+            if attempt >= max_retries:
+                break
+            msg  = str(exc).lower()
+            wait = delay * 4 if ("rate limit" in msg or "429" in msg) else delay
+            if notify_fn:
+                notify_fn(f"API error (attempt {attempt + 1}/{max_retries + 1}), retrying in {wait:.0f}s…")
+            time.sleep(wait)
+            delay *= 2
+    raise last_exc
 
 
 # =============================================================================
@@ -1228,6 +1332,7 @@ def translate_batch(
     token_counter: dict,
     glossary: dict,
     glossary_run_stats: dict,
+    notify_fn=None,
 ) -> list[str]:
     if not texts:
         return []
@@ -1269,15 +1374,18 @@ def translate_batch(
 
     for attempt in range(MAX_BATCH_RETRIES + 1):
         try:
-            response = client.chat.completions.create(
-                model=OPENAI_MODEL,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user",   "content": user_msg},
-                ],
-                temperature=0.3,
-                max_tokens=min(4000, n * 200),
-                timeout=API_TIMEOUT_SECONDS,
+            response = _api_call_with_retry(
+                lambda: client.chat.completions.create(
+                    model=OPENAI_MODEL,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user",   "content": user_msg},
+                    ],
+                    temperature=0.3,
+                    max_tokens=min(4000, n * 200),
+                    timeout=API_TIMEOUT_SECONDS,
+                ),
+                notify_fn=notify_fn,
             )
             if token_counter is not None and response.usage:
                 token_counter["prompt_tokens"]     += response.usage.prompt_tokens
@@ -1300,7 +1408,7 @@ def translate_batch(
         break
 
     # Fallback: single-cell translation for each item
-    return _fallback_single_translations(client, texts, canonical, token_counter, glossary)
+    return _fallback_single_translations(client, texts, canonical, token_counter, glossary, notify_fn=notify_fn)
 
 
 def _fallback_single_translations(
@@ -1309,21 +1417,25 @@ def _fallback_single_translations(
     canonical: str,
     token_counter: dict,
     glossary: dict,
+    notify_fn=None,
 ) -> list[str]:
     glossary_block = _glossary_prompt_block(glossary)
     system_prompt  = _build_system_prompt(canonical, glossary_block)
     results        = []
     for text in texts:
         try:
-            response = client.chat.completions.create(
-                model=OPENAI_MODEL,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user",   "content": f"Translate to French:\n\n{text}"},
-                ],
-                temperature=0.3,
-                max_tokens=500,
-                timeout=API_TIMEOUT_SECONDS,
+            response = _api_call_with_retry(
+                lambda t=text: client.chat.completions.create(
+                    model=OPENAI_MODEL,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user",   "content": f"Translate to French:\n\n{t}"},
+                    ],
+                    temperature=0.3,
+                    max_tokens=500,
+                    timeout=API_TIMEOUT_SECONDS,
+                ),
+                notify_fn=notify_fn,
             )
             if token_counter is not None and response.usage:
                 token_counter["prompt_tokens"]     += response.usage.prompt_tokens
@@ -1358,15 +1470,17 @@ Text: {text}
 Return ONLY the corrected French text."""
 
     try:
-        response = client.chat.completions.create(
-            model=OPENAI_MODEL,
-            messages=[
-                {"role": "system", "content": "You remove German words from French texts for Home24 France e-commerce."},
-                {"role": "user",   "content": fix_prompt},
-            ],
-            temperature=0.2,
-            max_tokens=500,
-            timeout=API_TIMEOUT_SECONDS,
+        response = _api_call_with_retry(
+            lambda: client.chat.completions.create(
+                model=OPENAI_MODEL,
+                messages=[
+                    {"role": "system", "content": "You remove German words from French texts for Home24 France e-commerce."},
+                    {"role": "user",   "content": fix_prompt},
+                ],
+                temperature=0.2,
+                max_tokens=500,
+                timeout=API_TIMEOUT_SECONDS,
+            ),
         )
         if token_counter is not None and response.usage:
             token_counter["prompt_tokens"]     += response.usage.prompt_tokens
@@ -1425,6 +1539,18 @@ def classify_columns(all_columns: dict) -> dict:
                 if any(sub in normalized for sub in substrings):
                     canonical = can
                     break
+
+        # T3: word-set matching for camelCase / scrambled / French headers
+        if canonical is None:
+            header_words = _normalize_header(header)
+            best_can     = None
+            best_score   = 0
+            for can, word_set in CANONICAL_WORD_SETS.items():
+                score = len(header_words & word_set)
+                if score >= 2 and score > best_score:
+                    best_can   = can
+                    best_score = score
+            canonical = best_can
 
         if canonical is not None:
             to_translate[header] = (col_idx, canonical)
@@ -1525,6 +1651,11 @@ def process_excel_with_progress(
     token_counter      = {"prompt_tokens": 0, "completion_tokens": 0}
     glossary_run_stats: dict = {"total_hits": 0, "term_counts": {}}
 
+    retry_count = [0]
+
+    def _notify_retry(msg: str) -> None:
+        retry_count[0] += 1
+
     stats = {
         "cells_translated":    0,
         "cells_skipped":       0,
@@ -1540,6 +1671,10 @@ def process_excel_with_progress(
         "glossary_top_terms":  {},
         "api_calls_made":      0,
         "api_calls_reduced":   0,
+        "review_items":        [],
+        "review_count":        0,
+        "retry_count":         0,
+        "failed_cells":        0,
     }
 
     with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
@@ -1627,6 +1762,7 @@ def process_excel_with_progress(
                 translations = translate_batch(
                     client, texts, canonical_used,
                     token_counter, glossary, glossary_run_stats,
+                    notify_fn=_notify_retry,
                 )
 
                 for i, (row_num, col_header, col_idx, canonical, text) in enumerate(batch):
@@ -1668,9 +1804,28 @@ def process_excel_with_progress(
         update_glossary_stats(glossary, glossary_run_stats.get("term_counts", {}))
         save_glossary(glossary)
 
-        # Write all translations back to worksheet
+        # Build source lookup for quality analysis
+        source_lookup: dict[tuple, tuple] = {
+            (row_num, col_idx): (text, canonical)
+            for row_num, col_header, col_idx, canonical, text in cells_queue
+        }
+
+        review_items: list[dict] = []
+
+        # Write all translations back + flag cells needing human review
         for (row_num, col_idx), translation in results.items():
-            worksheet.cell(row=row_num, column=col_idx).value = translation
+            cell       = worksheet.cell(row=row_num, column=col_idx)
+            cell.value = translation
+            src_text, src_canonical = source_lookup.get((row_num, col_idx), (translation, "other"))
+            issues = analyze_translation_quality(src_text, translation, src_canonical)
+            if issues:
+                cell.fill = REVIEW_FILL
+                review_items.append({
+                    "row":         row_num,
+                    "col_idx":     col_idx,
+                    "translation": translation[:60] + "…" if len(translation) > 60 else translation,
+                    "issues":      issues,
+                })
 
         total_cells_for_passes = total_rows * len(to_translate)
 
@@ -1784,6 +1939,10 @@ def process_excel_with_progress(
             "possible_missed":    column_classification["possible_missed"],
             "translated_columns": list(to_translate.keys()),
         }
+
+        stats["review_items"] = review_items
+        stats["review_count"] = len(review_items)
+        stats["retry_count"]  = retry_count[0]
 
         return output, stats
 
@@ -1947,6 +2106,8 @@ def translator_page():
                     "avg_batch_size":            stats.get("avg_batch_size", 0.0),
                     "api_calls_reduced":         stats.get("api_calls_reduced", 0),
                     "glossary_hits":             stats.get("glossary_hits", 0),
+                    "review_count":              stats.get("review_count", 0),
+                    "retry_count":               stats.get("retry_count", 0),
                 })
 
                 # ── Results ──
@@ -1997,6 +2158,27 @@ def translator_page():
                     for icon, label, value in gate_rows
                 )
                 st.markdown(f'<div class="qg">{qg_rows_html}</div>', unsafe_allow_html=True)
+
+                # ── Human Review ──
+                review_items = stats.get("review_items", [])
+                if review_items:
+                    st.markdown('<div class="section-label">Human Review</div>', unsafe_allow_html=True)
+                    with st.expander(
+                        f"Review Recommended — {len(review_items)} cell(s) flagged "
+                        f"(highlighted yellow in downloaded Excel)"
+                    ):
+                        for item in review_items:
+                            issues_str = " · ".join(i["reason"] for i in item["issues"])
+                            st.markdown(f"""
+                            <div class="warn-detail">
+                                <div class="warn-detail-dot"></div>
+                                <div>
+                                    <strong>Row {item["row"]}</strong><br>
+                                    <span style="color:#3a3a52;">{item["translation"]}</span><br>
+                                    <span style="color:#5a4020;">{issues_str}</span>
+                                </div>
+                            </div>
+                            """, unsafe_allow_html=True)
 
                 # ── Completion banner ──
                 cost_str = (
@@ -2241,6 +2423,67 @@ def analytics_page():
         </div>
     </div>
     """, unsafe_allow_html=True)
+
+    # ── Cost Dashboard ──
+    total_prompt     = sum(r.get("prompt_tokens", 0) or 0 for r in history)
+    total_completion = sum(r.get("completion_tokens", 0) or 0 for r in history)
+    total_tokens_all = total_prompt + total_completion
+    avg_cost_file    = round(total_cost / total_files, 4)     if total_cost and total_files > 0     else None
+    avg_cost_cell    = round(total_cost / total_translated, 6) if total_cost and total_translated > 0 else None
+
+    st.markdown('<div class="section-label">Cost Dashboard</div>', unsafe_allow_html=True)
+    st.markdown(f"""
+    <div class="kpi-row">
+        <div class="kpi">
+            <div class="kpi-label">Total Tokens Used</div>
+            <div class="kpi-value accent">{total_tokens_all:,}</div>
+            <div class="kpi-sub">All jobs combined</div>
+        </div>
+        <div class="kpi">
+            <div class="kpi-label">Prompt Tokens</div>
+            <div class="kpi-value">{total_prompt:,}</div>
+            <div class="kpi-sub">${total_prompt * _INPUT_COST_PER_TOKEN:.4f} input cost</div>
+        </div>
+        <div class="kpi">
+            <div class="kpi-label">Completion Tokens</div>
+            <div class="kpi-value">{total_completion:,}</div>
+            <div class="kpi-sub">${total_completion * _OUTPUT_COST_PER_TOKEN:.4f} output cost</div>
+        </div>
+        <div class="kpi">
+            <div class="kpi-label">Avg Cost / File</div>
+            <div class="kpi-value warn">{f"${avg_cost_file:.4f}" if avg_cost_file is not None else "—"}</div>
+            <div class="kpi-sub">Per translation job</div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+    if avg_cost_cell is not None:
+        st.markdown(f"""
+        <div class="kpi-row-3">
+            <div class="kpi">
+                <div class="kpi-label">Avg Cost / Cell</div>
+                <div class="kpi-value warn">${avg_cost_cell:.6f}</div>
+                <div class="kpi-sub">Per translated cell</div>
+            </div>
+            <div class="kpi">
+                <div class="kpi-label">Input Rate</div>
+                <div class="kpi-value" style="font-size:18px;">$0.15 / 1M</div>
+                <div class="kpi-sub">GPT-4o-mini prompt tokens</div>
+            </div>
+            <div class="kpi">
+                <div class="kpi-label">Output Rate</div>
+                <div class="kpi-value" style="font-size:18px;">$0.60 / 1M</div>
+                <div class="kpi-sub">GPT-4o-mini completion tokens</div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+    cost_by_job = {
+        f"#{i + 1}": r.get("estimated_cost_usd") or 0
+        for i, r in enumerate(reversed(history))
+        if r.get("estimated_cost_usd") is not None
+    }
+    if len(cost_by_job) > 1:
+        st.markdown('<div class="section-label">Cost per Job</div>', unsafe_allow_html=True)
+        st.bar_chart(cost_by_job)
 
     # ── Quality ──
     st.markdown('<div class="section-label">Quality</div>', unsafe_allow_html=True)
