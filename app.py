@@ -10,6 +10,7 @@ import os
 import re
 import json
 import uuid
+import copy
 import hmac
 import tempfile
 import time
@@ -1287,14 +1288,37 @@ def detect_german_residue(text: str) -> list[str]:
     return detected
 
 
-def analyze_translation_quality(source: str, translation: str, canonical: str) -> list[dict]:
-    """Return a list of quality issues found in the translation. Empty list means clean."""
+def analyze_translation_quality(
+    source: str, translation: str, canonical: str, glossary: dict | None = None
+) -> list[dict]:
+    """Return a list of quality issues found in the translation. Empty list means clean.
+
+    Three distinct signal types decide cell highlighting in the Excel output:
+      - review_warnings   : issues returned here → REVIEW_FILL applied
+      - original_excel_highlights : source cell fill preserved when no review_warning
+      - glossary_hits     : tracked in analytics only, never affect cell color
+    """
     issues  = []
     residue = detect_german_residue(translation)
     if residue:
         issues.append({"type": "german_residue",  "reason": f"German words: {', '.join(residue[:3])}"})
     if translation.strip() == source.strip():
-        issues.append({"type": "identical_output", "reason": "Translation matches source text"})
+        # Identical output is only a real issue when the source text genuinely
+        # needed translation.  Skip this flag for:
+        #   1. Known French loanwords that are correctly unchanged (FRENCH_ACCEPTABLE_WORDS)
+        #   2. Glossary entries where the German key maps to the same string as the source
+        #      (e.g. a custom glossary entry "taupe" → "taupe").
+        src_lower = source.strip().lower()
+        glossary_terms = (glossary or {}).get("terms", {})
+        is_expected_unchanged = (
+            src_lower in {w.lower() for w in FRENCH_ACCEPTABLE_WORDS}
+            or any(
+                src_lower == de.lower() and translation.strip().lower() == fr.lower()
+                for de, fr in glossary_terms.items()
+            )
+        )
+        if not is_expected_unchanged:
+            issues.append({"type": "identical_output", "reason": "Translation matches source text"})
     if len(source) > 6 and len(translation) < max(3, len(source) * 0.4):
         issues.append({"type": "too_short",        "reason": f"Very short ({len(translation)} chars vs {len(source)} source)"})
     src_br = source.count("<br>")
@@ -1880,15 +1904,35 @@ def process_excel_with_progress(
             for row_num, col_header, col_idx, canonical, text in cells_queue
         }
 
+        # ── Capture original Excel highlights before writing any translations ───
+        # These are the source cell fills from the uploaded German file.
+        # original_excel_highlights are preserved for clean cells and take no
+        # part in the review_warning decision — they are a separate signal.
+        original_excel_highlights: dict[tuple, object] = {}
+        for (rn, ci) in results:
+            src_cell = worksheet.cell(row=rn, column=ci)
+            if src_cell.fill and getattr(src_cell.fill, "fill_type", None) not in (None, "none"):
+                try:
+                    original_excel_highlights[(rn, ci)] = copy.copy(src_cell.fill)
+                except Exception:
+                    pass
+
         review_items: list[dict] = []
 
-        # Write all translations back + flag cells needing human review
+        # Write all translations back and apply fill based on signal type:
+        #   review_warning         → REVIEW_FILL (yellow)
+        #   original_excel_highlight only → restore source fill
+        #   glossary_hit (no warning)     → no fill change (tracked in analytics only)
         for (row_num, col_idx), translation in results.items():
             cell       = worksheet.cell(row=row_num, column=col_idx)
             cell.value = translation
             src_text, src_canonical = source_lookup.get((row_num, col_idx), (translation, "other"))
-            issues = analyze_translation_quality(src_text, translation, src_canonical)
+
+            # Glossary hits are already counted in glossary_run_stats; they do NOT
+            # influence the quality check or cell color here.
+            issues = analyze_translation_quality(src_text, translation, src_canonical, glossary)
             if issues:
+                # review_warning: real quality problem → yellow highlight for human review
                 cell.fill = REVIEW_FILL
                 review_items.append({
                     "row":         row_num,
@@ -1896,6 +1940,10 @@ def process_excel_with_progress(
                     "translation": translation[:60] + "…" if len(translation) > 60 else translation,
                     "issues":      issues,
                 })
+            elif (row_num, col_idx) in original_excel_highlights:
+                # original_excel_highlight: no quality issue — restore source formatting
+                cell.fill = original_excel_highlights[(row_num, col_idx)]
+            # else: clean cell, no original highlight → leave fill as default
 
         total_cells_for_passes = total_rows * len(to_translate)
 
