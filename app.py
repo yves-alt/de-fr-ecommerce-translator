@@ -16,6 +16,7 @@ import hmac
 import tempfile
 import threading
 import time
+import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from io import BytesIO, StringIO
 from pathlib import Path
@@ -165,90 +166,140 @@ FRENCH_ACCEPTABLE_WORDS = [
     "beige", "taupe", "polyester", "set", "bouclé", "boucle",
 ]
 
-PROTECTED_KEYWORDS = [
-    "articlenumber", "article_number", "sku", "productid", "product_id",
+# Protected column detection — two tiers to avoid false positives on short words
+PROTECTED_SUBSTRINGS = [
+    "articlenumber", "article_number", "articlenr", "artnummer", "artnr",
+    "artikelnummer", "artikelnr", "sku", "productid", "product_id",
+    "produktid", "gtin", "barcode", "ean13", "ean8",
 ]
+PROTECTED_EXACT = {
+    "id", "ean", "article", "artikel", "ref", "reference", "reference id",
+}
+# Keep old name for backward compat with any callers
+PROTECTED_KEYWORDS = PROTECTED_SUBSTRINGS
 
 IMPORTANT_KEYWORDS = [
     "name", "color", "colour", "delivery", "measurement",
     "quality", "textile", "composition", "material", "variant",
+    "farbe", "liefer", "masse", "qualitat", "beschreibung",
 ]
 
+# Keywords used to score candidate header rows
+HEADER_SCORE_KEYWORDS = {
+    "article", "artikelnummer", "sku", "product", "name", "color", "colour",
+    "farbe", "material", "composition", "textile", "textil", "delivery",
+    "lieferumfang", "scope", "quality", "detail", "measurement", "masse",
+    "dimensions", "variant", "beschreibung", "nummer", "id", "ean", "gtin",
+}
+
+# T1: exact match against _normalize_col_header() output (spaces-collapsed form also tried)
 TRANSLATE_ALIASES_T1 = {
     "name": [
-        "name", "productname", "product_name", "produktname",
-        "artikelname", "artikel_name", "artikelbezeichnung",
-        "produktbezeichnung", "bezeichnung", "titelname",
+        "name", "productname", "product name", "produktname", "produkt name",
+        "artikelname", "artikel name", "artikelbezeichnung", "artikel bezeichnung",
+        "produktbezeichnung", "produkt bezeichnung", "bezeichnung", "titelname",
+        "title", "product title", "producttitle",
     ],
     "colorDetail": [
-        "colordetail", "colourdetail", "color_detail", "colour_detail",
-        "colordetails", "colourdetails", "farbe", "farbdetail",
-        "farbbezeichnung", "colorname", "colour_name",
-        "detailcouleur", "couleurdetail",
+        "colordetail", "color detail", "colourdetail", "colour detail",
+        "farbe", "farbdetail", "farb detail", "farbbezeichnung",
+        "colorname", "color name", "colourname", "colour name",
+        "variantcolor", "variant color", "couleur", "detailcouleur",
+        "detail couleur", "couleurdetail", "couleur detail",
+        "colorangabe", "color angabe", "couleurduproduit",
     ],
     "deliveryScope": [
-        "deliveryscope", "delivery_scope", "lieferumfang", "delivery_contents",
-        "deliverycontents", "lieferinhalt", "lieferung", "inhaltsangabe",
-        "contenulivraison", "perimètrelivraison",
+        "deliveryscope", "delivery scope", "delivery_scope", "lieferumfang",
+        "delivery contents", "deliverycontents", "lieferinhalt",
+        "lieferung", "inhaltsangabe", "contenulivraison", "contenu livraison",
+        "perimetre livraison", "perimetre de livraison", "scope de livraison",
+        "leveringsomvang", "leveromfang",
     ],
     "materialDetail": [
-        "materialdetail", "materialdetails", "material_detail", "compositionmatiere",
-        "material_details", "materialinfo", "material_info", "materialbeschreibung",
-        "werkstoffe", "werkstoff", "materiaux", "détailmatière",
-        "detailmatiere",
+        "materialdetail", "material detail", "materialdetails", "material details",
+        "materialinfo", "material info", "materialbeschreibung", "material beschreibung",
+        "materialangaben", "material angaben", "werkstoffe", "werkstoff",
+        "materiaux", "detail matiere", "detailmatiere", "compositionmatiere",
+        "composition matiere", "matiere",
     ],
     "otherMeasurements": [
-        "othermeasurements", "other_measurements", "masse", "abmessungen",
-        "measurements", "dimensions", "abmessung", "maßangaben",
-        "gesamtmasse", "dimensionen", "ausmasse", "produktmasse",
-        "autresmesures", "mesures",
+        "othermeasurements", "other measurements", "other measurement",
+        "masse", "abmessungen", "abmessung", "measurements", "measurement",
+        "dimensions", "dimension", "maßangaben", "maß angaben",
+        "gesamtmasse", "gesamt masse", "produktmasse", "produkt masse",
+        "dimensionen", "ausmasse", "aus masse", "autresmesures", "autres mesures",
+        "mesures", "groesse", "breite hohe tiefe",
     ],
     "qualityDetail": [
-        "qualitydetail", "quality_detail", "qualitätsdetail",
-        "qualitatsdetail", "qualitydetails", "quality_details",
-        "qualite", "detailqualite",
+        "qualitydetail", "quality detail", "qualitydetails", "quality details",
+        "qualitatsdetail", "qualitats detail", "qualite", "detail qualite",
+        "detailqualite", "qualitaet", "pflegehinweise", "pflege hinweise",
+        "eigenschaften", "produkteigenschaften",
     ],
     "textileCompositionCover1": [
-        "textilecompositioncover1", "textilecompositioncover",
-        "textilecomposition",       "textecomposition",
-        "compositioncover",         "compositioncover1",
-        "textecompositioncover1",   "textile_composition",
-        "textile_composition_cover", "textile_composition_cover1",
-        "compositiontextile",       "textilzusammensetzung",
-        "zusammensetzung",          "materialzusammensetzung",
-        "compositionmatiere",       "textilescomposition",
+        "textilecompositioncover1", "textile composition cover 1",
+        "textilecompositioncover",  "textile composition cover",
+        "textilecomposition",       "textile composition",
+        "textecomposition",         "texte composition",
+        "compositioncover",         "composition cover",
+        "compositioncover1",        "composition cover 1",
+        "textecompositioncover1",   "texte composition cover 1",
+        "compositiontextile",       "composition textile",
+        "textilzusammensetzung",    "textil zusammensetzung",
+        "zusammensetzung",
+        "materialzusammensetzung",  "material zusammensetzung",
+        "textilescomposition",      "textiles composition",
+        "bezugzusammensetzung",     "bezug zusammensetzung",
     ],
     "variantName": [
-        "variantname", "variant_name", "variantenname",
-        "variantbezeichnung", "variant_bezeichnung",
-        "ausführung", "ausfuehrung", "variantennamen",
+        "variantname", "variant name", "variantenname", "varianten name",
+        "variantbezeichnung", "variant bezeichnung",
+        "ausfuhrung", "ausfuehrung", "ausführung", "variante",
+        "variantennamen", "varianten namen",
     ],
 }
 
+# T2: substring match against normalized header (word-boundary safe substrings)
 TRANSLATE_ALIASES_T2 = {
     "textileCompositionCover1": [
-        "textilecomposition", "textecomposition", "textilcomposition",
-        "textile", "textil", "composition", "zusammensetzung",
+        "textile", "textil", "composition", "zusammensetzung", "compositiontextile",
     ],
-    "materialDetail":   ["material", "materiaux", "matiere"],
-    "colorDetail":      ["color", "colour", "farbe", "couleur"],
-    "deliveryScope":    ["delivery", "lieferung", "livraison"],
-    "otherMeasurements":["measurement", "dimension", "masse", "mesure"],
-    "qualityDetail":    ["quality", "qualite", "qualität"],
-    "variantName":      ["variant", "ausführung", "ausfuehrung"],
-    "name":             ["productname", "designation", "bezeichnung"],
+    "materialDetail":    ["material", "matiere", "werkstoff", "materiaux"],
+    "colorDetail":       ["color", "colour", "farbe", "couleur"],
+    "deliveryScope":     ["delivery", "lieferumfang", "livraison", "lieferinhalt"],
+    "otherMeasurements": ["measurement", "dimension", "abmessung", "mesure"],
+    "qualityDetail":     ["quality", "qualite", "qualitat", "qualitaet", "pflege"],
+    "variantName":       ["variante", "ausfuhrung"],
+    "name":              ["designation", "bezeichnung"],
 }
 
-# T3: word-set matching for camelCase / scrambled headers (≥2 matching words required)
+# T3: word-set matching for compound/scrambled headers (≥2 matching words required)
 CANONICAL_WORD_SETS: dict[str, set[str]] = {
-    "name":                     {"name", "product", "produkt", "artikel", "bezeichnung"},
-    "colorDetail":              {"color", "colour", "farbe", "couleur", "detail"},
-    "deliveryScope":            {"delivery", "scope", "lieferumfang", "lieferung", "inhalt", "contenu"},
-    "materialDetail":           {"material", "detail", "matiere", "werkstoff", "werkstoffe"},
-    "otherMeasurements":        {"measurement", "dimension", "masse", "abmessung", "mesure", "groesse"},
-    "qualityDetail":            {"quality", "qualite", "qualitat"},
-    "textileCompositionCover1": {"textile", "composition", "cover", "zusammensetzung", "textil"},
-    "variantName":              {"variant", "ausfuehrung", "ausführung", "variantenname"},
+    "name": {
+        "name", "product", "produkt", "artikel", "bezeichnung", "title",
+    },
+    "colorDetail": {
+        "color", "colour", "farbe", "couleur", "detail", "variant",
+    },
+    "deliveryScope": {
+        "delivery", "scope", "lieferumfang", "lieferung", "inhalt", "contenu", "livraison",
+    },
+    "materialDetail": {
+        "material", "detail", "matiere", "werkstoff", "werkstoffe", "materiaux",
+    },
+    "otherMeasurements": {
+        "measurement", "dimension", "masse", "abmessung", "mesure", "groesse",
+        "breite", "hohe", "tiefe", "laenge",
+    },
+    "qualityDetail": {
+        "quality", "qualite", "qualitat", "detail", "pflege", "eigenschaften",
+    },
+    "textileCompositionCover1": {
+        "textile", "composition", "cover", "zusammensetzung", "textil", "bezug",
+    },
+    "variantName": {
+        "variant", "ausfuhrung", "ausfuehrung", "variante", "ausführung",
+    },
 }
 
 
@@ -494,6 +545,36 @@ def _normalize_header(header: str) -> set[str]:
     spaced   = re.sub(r'(?<=[a-z])(?=[A-Z])', ' ', no_under)
     spaced   = re.sub(r'(?<=[A-Z])(?=[A-Z][a-z])', ' ', spaced)
     return {w.lower() for w in spaced.split() if w} | {header.strip().lower()}
+
+
+def _normalize_col_header(raw) -> str:
+    """
+    Full normalization of a raw Excel header for alias matching.
+    Handles: camelCase, snake_case, line-breaks, invisible chars, accents.
+    Returns a lowercase space-separated string.
+    """
+    text = str(raw)
+    # Replace line breaks, tabs, non-breaking spaces, zero-width chars
+    text = re.sub(r'[\n\r\t\xa0​‌‍﻿]', ' ', text)
+    # Remove remaining control/format characters (keep spaces)
+    text = ''.join(
+        c for c in text
+        if unicodedata.category(c) not in ('Cc', 'Cf') or c == ' '
+    )
+    # Expand camelCase / PascalCase: insert space before uppercase run
+    text = re.sub(r'([a-z])([A-Z])', r'\1 \2', text)
+    text = re.sub(r'([A-Z]+)([A-Z][a-z])', r'\1 \2', text)
+    # Insert space between letter and digit (e.g. Cover1 → Cover 1)
+    text = re.sub(r'([a-zA-Z])(\d)', r'\1 \2', text)
+    text = re.sub(r'(\d)([a-zA-Z])', r'\1 \2', text)
+    # Replace underscores, hyphens, dots with spaces
+    text = re.sub(r'[_\-\.]', ' ', text)
+    # Normalize unicode — NFKD decomposes characters; then drop combining marks
+    # so ä→a, ö→o, ü→u, é→e, etc. (good for cross-language matching)
+    text = unicodedata.normalize('NFKD', text)
+    text = ''.join(c for c in text if unicodedata.category(c) != 'Mn')
+    # Collapse whitespace, lowercase
+    return ' '.join(text.split()).lower()
 
 
 # =============================================================================
@@ -1299,6 +1380,8 @@ def render_column_report(classification: dict):
     protected       = classification["protected"]
     ignored         = classification["ignored"]
     possible_missed = classification["possible_missed"]
+    normalized_map  = classification.get("normalized_map", {})
+    header_row      = classification.get("header_row", 1)
 
     if to_translate:
         chips = ""
@@ -1319,7 +1402,7 @@ def render_column_report(classification: dict):
         will_translate_html = """
         <div class="alert alert-warn">
             <span class="alert-icon">⚠</span>
-            <span>No translatable columns detected in this sheet.</span>
+            <span>No translatable columns detected automatically — see debug info below.</span>
         </div>"""
 
     prot_html = ""
@@ -1346,9 +1429,11 @@ def render_column_report(classification: dict):
             </div>
         </div>"""
 
+    row_note = f' <span style="font-size:11px;color:#686880;">(headers detected in row {header_row})</span>' if header_row != 1 else ""
+
     st.markdown(f"""
     <div class="card">
-        <div class="card-title">Column detection</div>
+        <div class="card-title">Column detection{row_note}</div>
         {will_translate_html}
         {prot_html}
         {missed_html}
@@ -1358,6 +1443,28 @@ def render_column_report(classification: dict):
     if ignored:
         with st.expander(f"Ignored columns ({len(ignored)})"):
             st.markdown(", ".join(f"`{h}`" for h in ignored))
+
+    # Debug panel — shown only when automatic detection found nothing
+    if not to_translate:
+        with st.expander("🔍 Detection debug report", expanded=True):
+            st.caption(f"Header row detected: **row {header_row}**")
+
+            all_raw = list(normalized_map.keys())
+            if all_raw:
+                rows = [
+                    {
+                        "Raw header":        h,
+                        "Normalized":        normalized_map.get(h, ""),
+                        "Status":            (
+                            "Protected" if h in protected
+                            else "Ignored"
+                        ),
+                    }
+                    for h in all_raw
+                ]
+                st.dataframe(rows, use_container_width=True, hide_index=True)
+            else:
+                st.warning("No headers found in the detected header row. The sheet may be empty or the header row was not detected correctly.")
 
 
 def render_sidebar() -> str:
@@ -1876,57 +1983,131 @@ def detect_target_sheet(sheet_names: list) -> str | None:
     return None
 
 
+def detect_header_row(worksheet, max_rows: int = 10) -> tuple[int, dict]:
+    """
+    Scan the first max_rows rows to find the most likely header row.
+    Returns (row_number, {raw_header_text: col_index}).
+    Falls back to row 1 if nothing scores well.
+    """
+    best_row     = 1
+    best_score   = -1
+    best_headers: dict[str, int] = {}
+
+    scan_limit = min(max_rows, worksheet.max_row or 1)
+
+    for row_num in range(1, scan_limit + 1):
+        score   = 0
+        headers: dict[str, int] = {}
+
+        for cell in worksheet[row_num]:
+            if cell.value is None:
+                continue
+            raw  = str(cell.value)
+            text = raw.strip()
+            if not text:
+                continue
+
+            # Penalty: looks like a pure number (data row, not header row)
+            try:
+                float(raw)
+                score -= 3
+                continue
+            except (ValueError, TypeError):
+                pass
+
+            headers[text] = cell.column
+            score += 1  # each non-empty string cell
+
+            # Bonus: contains known header keywords
+            norm = _normalize_col_header(text)
+            if any(kw in norm for kw in HEADER_SCORE_KEYWORDS):
+                score += 3
+
+        if score > best_score:
+            best_score   = score
+            best_row     = row_num
+            best_headers = headers
+
+    return best_row, best_headers
+
+
 def detect_columns(worksheet) -> dict:
-    columns = {}
-    for row in worksheet.iter_rows(min_row=1, max_row=1):
-        for cell in row:
-            if cell.value is not None:
-                columns[str(cell.value).strip()] = cell.column
-    return columns
+    """Backward-compatible wrapper — returns {raw_header: col_idx} from detected header row."""
+    _, headers = detect_header_row(worksheet)
+    return headers
+
+
+def _is_protected(norm: str, raw: str) -> bool:
+    """Return True if this column should never be translated."""
+    # Exact match on fully-normalized, space-collapsed form
+    norm_c = norm.replace(' ', '')
+    if norm_c in PROTECTED_EXACT or norm in PROTECTED_EXACT:
+        return True
+    # Substring match for longer protected patterns
+    if any(pk in norm_c for pk in PROTECTED_SUBSTRINGS):
+        return True
+    return False
+
+
+def _classify_header(header: str) -> tuple[str | None, str, str]:
+    """
+    Classify a raw header into a canonical translation target.
+    Returns (canonical_or_None, normalized_form, match_tier).
+    """
+    norm   = _normalize_col_header(header)
+    norm_c = norm.replace(' ', '')          # collapsed form
+
+    # T1 — exact match (try both spaced and collapsed)
+    for can, aliases in TRANSLATE_ALIASES_T1.items():
+        if norm in aliases or norm_c in aliases:
+            return can, norm, "T1-exact"
+
+    # T2 — substring of normalized header
+    for can, substrings in TRANSLATE_ALIASES_T2.items():
+        if any(sub in norm for sub in substrings):
+            return can, norm, "T2-substring"
+
+    # T3 — word-set overlap (≥2 words must match)
+    header_words = set(norm.split())
+    best_can, best_score = None, 0
+    for can, word_set in CANONICAL_WORD_SETS.items():
+        score = len(header_words & word_set)
+        if score >= 2 and score > best_score:
+            best_can, best_score = can, score
+    if best_can:
+        return best_can, norm, f"T3-wordset({best_score})"
+
+    return None, norm, "no-match"
 
 
 def classify_columns(all_columns: dict) -> dict:
-    to_translate    = {}
-    protected       = {}
-    ignored         = {}
-    possible_missed = []
+    """
+    Classify raw {header: col_idx} into translatable / protected / ignored.
+    Returns a dict with debug metadata for the column report.
+    """
+    to_translate:    dict[str, tuple] = {}
+    protected:       dict[str, int]   = {}
+    ignored:         dict[str, int]   = {}
+    possible_missed: list[str]        = []
+    normalized_map:  dict[str, str]   = {}
+    ignored_reasons: dict[str, str]   = {}
 
     for header, col_idx in all_columns.items():
-        normalized = header.strip().lower()
+        norm = _normalize_col_header(header)
+        normalized_map[header] = norm
 
-        if any(pk in normalized for pk in PROTECTED_KEYWORDS):
+        if _is_protected(norm, header):
             protected[header] = col_idx
             continue
 
-        canonical = None
-        for can, aliases in TRANSLATE_ALIASES_T1.items():
-            if normalized in aliases:
-                canonical = can
-                break
-
-        if canonical is None:
-            for can, substrings in TRANSLATE_ALIASES_T2.items():
-                if any(sub in normalized for sub in substrings):
-                    canonical = can
-                    break
-
-        # T3: word-set matching for camelCase / scrambled / French headers
-        if canonical is None:
-            header_words = _normalize_header(header)
-            best_can     = None
-            best_score   = 0
-            for can, word_set in CANONICAL_WORD_SETS.items():
-                score = len(header_words & word_set)
-                if score >= 2 and score > best_score:
-                    best_can   = can
-                    best_score = score
-            canonical = best_can
+        canonical, _, tier = _classify_header(header)
 
         if canonical is not None:
             to_translate[header] = (col_idx, canonical)
         else:
             ignored[header] = col_idx
-            if any(ik in normalized for ik in IMPORTANT_KEYWORDS):
+            ignored_reasons[header] = "No alias / keyword match"
+            if any(ik in norm for ik in IMPORTANT_KEYWORDS):
                 possible_missed.append(header)
 
     return {
@@ -1934,6 +2115,8 @@ def classify_columns(all_columns: dict) -> dict:
         "protected":       protected,
         "ignored":         ignored,
         "possible_missed": possible_missed,
+        "normalized_map":  normalized_map,
+        "ignored_reasons": ignored_reasons,
     }
 
 
@@ -2059,6 +2242,7 @@ def process_excel_with_progress(
     batch_size: int = DEFAULT_BATCH_SIZE,
     highlight_review_warnings: bool = False,
     max_concurrent_batches: int = DEFAULT_MAX_CONCURRENT,
+    header_row: int = 1,
 ) -> tuple[BytesIO, dict]:
     client   = get_openai_client()
     tm       = load_translation_memory()
@@ -2110,8 +2294,9 @@ def process_excel_with_progress(
         if not to_translate:
             raise ValueError("No translatable columns found in the file.")
 
-        total_rows = worksheet.max_row - 1
-        start_time = time.time()
+        data_start_row = header_row + 1     # first row with actual data
+        total_rows     = max(0, worksheet.max_row - header_row)
+        start_time     = time.time()
 
         # ── Phase 0: Pre-scan ─────────────────────────────────────────────────
         progress_bar.progress(0.02)
@@ -2123,7 +2308,7 @@ def process_excel_with_progress(
         )
 
         cells_queue: list[tuple] = []
-        for row_num in range(2, worksheet.max_row + 1):
+        for row_num in range(data_start_row, worksheet.max_row + 1):
             for col_header, (col_idx, canonical) in to_translate.items():
                 cell = worksheet.cell(row=row_num, column=col_idx)
                 raw  = cell.value
@@ -2347,7 +2532,7 @@ def process_excel_with_progress(
 
         # ── Phase 3: Residue check ────────────────────────────────────────────
         checked = 0
-        for row_num in range(2, worksheet.max_row + 1):
+        for row_num in range(data_start_row, worksheet.max_row + 1):
             for col_header, (col_idx, canonical) in to_translate.items():
                 checked += 1
                 elapsed  = time.time() - start_time
@@ -2402,7 +2587,7 @@ def process_excel_with_progress(
             unsafe_allow_html=True,
         )
 
-        for row_num in range(2, worksheet.max_row + 1):
+        for row_num in range(data_start_row, worksheet.max_row + 1):
             for col_header, (col_idx, canonical) in to_translate.items():
                 cell = worksheet.cell(row=row_num, column=col_idx)
                 if cell.value is None or str(cell.value).strip() == "":
@@ -2726,11 +2911,45 @@ def translator_page():
                 key="sheet_selector",
             )
 
-        peek_headers   = detect_columns(wb_peek[selected_sheet])
+        header_row, peek_headers = detect_header_row(wb_peek[selected_sheet])
         wb_peek.close()
         classification = classify_columns(peek_headers)
+        classification["header_row"] = header_row
 
         render_column_report(classification)
+
+        # Manual fallback when automatic detection found nothing
+        if not classification["to_translate"] and peek_headers:
+            st.markdown("""
+            <div class="alert alert-warn" style="margin-top:0;">
+                <span class="alert-icon">⚠</span>
+                <div>
+                    <strong>Automatic detection failed.</strong>
+                    Please select the columns you want to translate below.
+                    Protected columns (articleNumber, SKU, ID) will never be translated.
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            # Offer all non-protected headers as candidates
+            protected_keys = set(classification["protected"].keys())
+            candidates = [h for h in peek_headers if h not in protected_keys]
+
+            manual_cols = st.multiselect(
+                "Select columns to translate:",
+                options=candidates,
+                key="manual_col_select",
+                help="Choose each column header that contains German text to translate.",
+            )
+
+            if manual_cols:
+                manual_to_translate = {}
+                for h in manual_cols:
+                    col_idx = peek_headers[h]
+                    # Best-effort canonical type; fallback to "other"
+                    canonical, _, _ = _classify_header(h)
+                    manual_to_translate[h] = (col_idx, canonical or "other")
+                classification["to_translate"] = manual_to_translate
 
         # Advanced settings
         with st.expander("Advanced settings"):
@@ -2789,6 +3008,7 @@ def translator_page():
                     batch_size=int(batch_size),
                     highlight_review_warnings=highlight_warnings_in_excel,
                     max_concurrent_batches=int(max_concurrent_batches),
+                    header_row=header_row,
                 )
                 progress_container.empty()
                 progress_bar.empty()
