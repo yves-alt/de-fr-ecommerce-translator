@@ -130,24 +130,35 @@ The database is ignored by Git and persists across app restarts. On Streamlit Cl
 
 ---
 
-## Batch Processing
+## Batch Processing & Parallel Translation
 
-Instead of sending one API request per cell, the app groups cells into batches.
+Instead of sending one API request per cell, the app groups cells into batches and sends multiple batches concurrently.
 
-**Default batch size:** 20 cells per request (configurable per translation via Advanced Settings).
+**Default settings:** batch size 15 cells · 3 concurrent batches (configurable via Advanced Settings).
 
 **How it works:**
 1. All non-empty cells are pre-scanned.
-2. Cells found in Translation Memory are served instantly.
-3. Remaining cells are grouped by column type and sent in batches of up to 20.
-4. The model returns a JSON array of exactly N translated strings.
-5. If the count mismatches (retry up to 2×), falls back to single-cell translation for that batch.
+2. Cells found in Translation Memory are served instantly — zero API calls.
+3. Remaining cells are grouped by column type and split into batches.
+4. Up to N batches are submitted to OpenAI in parallel via `ThreadPoolExecutor`.
+5. Each batch worker returns its translations, token counts, and glossary hits.
+6. The main thread accumulates all results and applies them to the Excel workbook sequentially — no concurrent writes.
+7. The model returns a JSON array of exactly N strings; if the count mismatches (retry up to 2×), falls back to single-cell translation for that batch only.
+
+**Concurrency settings (Advanced Settings):**
+| Setting | Range | Default | Effect |
+|---------|-------|---------|--------|
+| Batch size | 5–30 | 15 | Cells per API request |
+| Max concurrent batches | 1–5 | 3 | Parallel API calls; set to 1 for sequential mode |
 
 **Safety guarantees:**
-- A batch failure never fails the whole file — only affected cells fall back.
+- Excel workbook is only written from the main thread — never concurrently.
+- SQLite (TM, history, glossary) is only updated from the main thread after all batches complete.
+- A batch failure never fails the whole file — only affected cells fall back to source text.
 - Row numbers, column structure, `<br>` tags, and Excel formatting are fully preserved.
 - Row 1 (headers) is never touched.
 - Protected columns (`articleNumber`, `sku`, `productId`) are never translated.
+- Set max concurrent batches to 1 to reproduce the old sequential behaviour exactly.
 
 ---
 

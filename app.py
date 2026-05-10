@@ -14,7 +14,9 @@ import uuid
 import copy
 import hmac
 import tempfile
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from io import BytesIO, StringIO
 from pathlib import Path
 from datetime import datetime, timedelta
@@ -59,8 +61,9 @@ _INPUT_COST_PER_TOKEN  = 0.15 / 1_000_000
 _OUTPUT_COST_PER_TOKEN = 0.60 / 1_000_000
 MANUAL_SECONDS_PER_CELL = 45
 
-DEFAULT_BATCH_SIZE  = 20
-MAX_BATCH_RETRIES   = 2
+DEFAULT_BATCH_SIZE      = 15
+DEFAULT_MAX_CONCURRENT  = 3
+MAX_BATCH_RETRIES       = 2
 API_TIMEOUT_SECONDS = 45
 MAX_API_RETRIES     = 3
 RETRY_BASE_DELAY    = 1.0   # seconds; doubles on each retry
@@ -1232,6 +1235,12 @@ def render_intelligence_stats(stats: dict):
     avg_batch    = stats.get("avg_batch_size", 0.0)
     gloss_hits   = stats.get("glossary_hits", 0)
     api_reduced  = stats.get("api_calls_reduced", 0)
+    concurrency  = stats.get("max_concurrent_used", 1)
+    avg_dur      = stats.get("avg_batch_duration", 0.0)
+    failed_b     = stats.get("failed_batches", 0)
+
+    conc_sub = f"{concurrency}× parallel" if concurrency > 1 else "sequential mode"
+    dur_sub  = f"{avg_dur}s avg/batch" if avg_dur > 0 else "–"
 
     st.markdown(f"""
     <div class="kpi-row">
@@ -1254,6 +1263,28 @@ def render_intelligence_stats(stats: dict):
             <div class="kpi-label">Glossary Matches</div>
             <div class="kpi-value">{gloss_hits}</div>
             <div class="kpi-sub">Consistent terms enforced</div>
+        </div>
+    </div>
+    <div class="kpi-row" style="margin-top:8px;">
+        <div class="kpi">
+            <div class="kpi-label">Concurrency</div>
+            <div class="kpi-value accent">{concurrency}</div>
+            <div class="kpi-sub">{conc_sub}</div>
+        </div>
+        <div class="kpi">
+            <div class="kpi-label">Avg Batch Time</div>
+            <div class="kpi-value">{avg_dur}s</div>
+            <div class="kpi-sub">{dur_sub}</div>
+        </div>
+        <div class="kpi">
+            <div class="kpi-label">Failed Batches</div>
+            <div class="kpi-value {'warn' if failed_b else 'success'}">{failed_b}</div>
+            <div class="kpi-sub">{'Fell back to single-cell' if failed_b else 'All batches succeeded'}</div>
+        </div>
+        <div class="kpi">
+            <div class="kpi-label">Retries</div>
+            <div class="kpi-value">{stats.get("retry_count", 0)}</div>
+            <div class="kpi-sub">API retry events</div>
         </div>
     </div>
     """, unsafe_allow_html=True)
@@ -1742,6 +1773,49 @@ def _fallback_single_translations(
     return results
 
 
+def _run_batch_task(
+    client,
+    batch_id: int,
+    batch_items: list,
+    canonical: str,
+    glossary: dict,
+    retry_counter: list,
+    retry_lock: threading.Lock,
+) -> dict:
+    """Worker: runs one translation batch in a thread. No shared-state mutations."""
+    local_tokens  = {"prompt_tokens": 0, "completion_tokens": 0}
+    local_glossary = {"total_hits": 0, "term_counts": {}}
+    texts  = [item[4] for item in batch_items]
+    failed = False
+    start  = time.time()
+
+    def _notify(_msg: str) -> None:
+        with retry_lock:
+            retry_counter[0] += 1
+
+    try:
+        translations = translate_batch(
+            client, texts, canonical,
+            local_tokens, glossary, local_glossary,
+            notify_fn=_notify,
+        )
+    except Exception:
+        failed       = True
+        translations = list(texts)
+
+    return {
+        "batch_id":          batch_id,
+        "batch_items":       batch_items,
+        "translations":      translations,
+        "prompt_tokens":     local_tokens["prompt_tokens"],
+        "completion_tokens": local_tokens["completion_tokens"],
+        "glossary_hits":     local_glossary.get("total_hits", 0),
+        "glossary_terms":    local_glossary.get("term_counts", {}),
+        "failed":            failed,
+        "duration":          time.time() - start,
+    }
+
+
 def fix_german_residue(client, text: str, column_name: str, token_counter: dict | None = None) -> str:
     if not text:
         return text
@@ -1932,6 +2006,50 @@ def _batch_progress_html(phase: str, sheet: str, batch_num: int, batch_size: int
     """
 
 
+def _parallel_progress_html(
+    sheet: str,
+    total_batches: int,
+    completed: int,
+    running: int,
+    failed: int,
+    cells_done: int,
+    total_cells: int,
+    tm_hits: int,
+    elapsed: float,
+    eta: float,
+    pct: int,
+) -> str:
+    fail_str = f" · <span style='color:#ef4444;'>{failed} failed</span>" if failed else ""
+    return f"""
+    <div class="prog-shell">
+        <div class="prog-head">
+            <div>
+                <div class="prog-phase">Parallel Batch Translation</div>
+                <div class="prog-sheet">Sheet: {sheet} · {running} batch(es) running concurrently{fail_str}</div>
+            </div>
+            <span class="prog-badge"><span class="prog-badge-dot"></span>ACTIVE</span>
+        </div>
+        <div class="prog-track">
+            <div class="prog-bar" style="width:{pct}%"></div>
+        </div>
+        <div class="prog-item">
+            <div class="prog-item-dot"></div>
+            <span class="prog-item-col">Processing {running} batch(es) in parallel</span>
+            <span class="prog-item-row">{cells_done} / {total_cells} cells</span>
+        </div>
+        <div class="prog-stats">
+            <div><span class="prog-stat-val">{completed}/{total_batches}</span><span class="prog-stat-lbl">Batches done</span></div>
+            <div><span class="prog-stat-val">{running}</span><span class="prog-stat-lbl">Running</span></div>
+            <div><span class="prog-stat-val">{tm_hits}</span><span class="prog-stat-lbl">TM Hits</span></div>
+            <div><span class="prog-stat-val">{failed}</span><span class="prog-stat-lbl">Failed</span></div>
+            <div><span class="prog-stat-val">{format_time(elapsed)}</span><span class="prog-stat-lbl">Elapsed</span></div>
+            <div><span class="prog-stat-val">~{format_time(eta)}</span><span class="prog-stat-lbl">Remaining</span></div>
+            <div><span class="prog-stat-val">{pct}%</span><span class="prog-stat-lbl">Progress</span></div>
+        </div>
+    </div>
+    """
+
+
 def process_excel_with_progress(
     uploaded_file,
     progress_bar,
@@ -1940,6 +2058,7 @@ def process_excel_with_progress(
     column_classification: dict,
     batch_size: int = DEFAULT_BATCH_SIZE,
     highlight_review_warnings: bool = False,
+    max_concurrent_batches: int = DEFAULT_MAX_CONCURRENT,
 ) -> tuple[BytesIO, dict]:
     client   = get_openai_client()
     tm       = load_translation_memory()
@@ -1947,11 +2066,6 @@ def process_excel_with_progress(
 
     token_counter      = {"prompt_tokens": 0, "completion_tokens": 0}
     glossary_run_stats: dict = {"total_hits": 0, "term_counts": {}}
-
-    retry_count = [0]
-
-    def _notify_retry(msg: str) -> None:
-        retry_count[0] += 1
 
     stats = {
         "cells_translated":    0,
@@ -1973,6 +2087,9 @@ def process_excel_with_progress(
         "review_count":        0,
         "retry_count":         0,
         "failed_cells":        0,
+        "failed_batches":      0,
+        "avg_batch_duration":  0.0,
+        "max_concurrent_used": max_concurrent_batches,
         "critical_warnings":   0,
         "high_warnings":       0,
         "medium_warnings":     0,
@@ -2033,63 +2150,100 @@ def process_excel_with_progress(
                 api_queue.append((row_num, col_header, col_idx, canonical, text))
                 stats["tm_misses"] += 1
 
-        # ── Phase 2: Batch translation ────────────────────────────────────────
+        # ── Phase 2: Parallel batch translation ──────────────────────────────
         by_col_type: dict[str, list] = {}
         for item in api_queue:
             ct = _tm_col_type(item[3])
             by_col_type.setdefault(ct, []).append(item)
 
         total_api_cells = len(api_queue)
-        api_done        = 0
 
+        # Build a flat, ordered batch list across all col_types
+        batch_list: list[tuple] = []
         for col_type, items in by_col_type.items():
             for batch_start in range(0, len(items), batch_size):
-                batch          = items[batch_start : batch_start + batch_size]
-                texts          = [item[4] for item in batch]
-                canonical_used = batch[0][3]
+                batch_items    = items[batch_start : batch_start + batch_size]
+                canonical_used = batch_items[0][3]
+                batch_list.append((batch_items, canonical_used))
 
+        total_batches  = len(batch_list)
+        retry_counter  = [0]
+        retry_lock     = threading.Lock()
+        batch_results  = []
+        completed_batches = 0
+        failed_batches    = 0
+        api_cells_done    = 0
+        batch_durations   = []
+
+        with ThreadPoolExecutor(max_workers=max(1, max_concurrent_batches)) as executor:
+            future_map = {
+                executor.submit(
+                    _run_batch_task,
+                    client, bid, batch_items, canonical, glossary, retry_counter, retry_lock,
+                ): bid
+                for bid, (batch_items, canonical) in enumerate(batch_list)
+            }
+
+            for future in as_completed(future_map):
+                result = future.result()
+                batch_results.append(result)
+                completed_batches += 1
+                api_cells_done    += len(result["batch_items"])
+                if result["failed"]:
+                    failed_batches += 1
+                batch_durations.append(result["duration"])
+
+                # Accumulate counters on main thread (thread-safe)
+                token_counter["prompt_tokens"]     += result["prompt_tokens"]
+                token_counter["completion_tokens"] += result["completion_tokens"]
+                glossary_run_stats["total_hits"]   += result["glossary_hits"]
+                for term, cnt in result["glossary_terms"].items():
+                    glossary_run_stats["term_counts"][term] = (
+                        glossary_run_stats["term_counts"].get(term, 0) + cnt
+                    )
+
+                # Progress update (main thread only)
+                pct_api = int((api_cells_done / max(total_api_cells, 1)) * 100)
                 elapsed = time.time() - start_time
-                pct_api = int((api_done / max(total_api_cells, 1)) * 100)
-                eta     = (elapsed / max(api_done, 1)) * (total_api_cells - api_done) if api_done else 0
-                progress_bar.progress(0.05 + (api_done / max(total_api_cells, 1)) * 0.60)
+                rate    = api_cells_done / max(elapsed, 0.1)
+                eta     = (total_api_cells - api_cells_done) / max(rate, 0.1)
+                in_flight = max(0, min(max_concurrent_batches, total_batches - completed_batches))
+                progress_bar.progress(0.05 + (api_cells_done / max(total_api_cells, 1)) * 0.60)
                 progress_container.markdown(
-                    _batch_progress_html(
-                        "Phase 1 — Batch Translation", sheet_name,
-                        stats["batch_count"] + 1, len(batch),
-                        total_api_cells, api_done,
-                        elapsed, eta,
-                        stats["tm_hits"], stats["tm_misses"], pct_api,
+                    _parallel_progress_html(
+                        sheet_name, total_batches, completed_batches, in_flight,
+                        failed_batches, api_cells_done, total_api_cells,
+                        stats["tm_hits"], elapsed, eta, pct_api,
                     ),
                     unsafe_allow_html=True,
                 )
 
-                translations = translate_batch(
-                    client, texts, canonical_used,
-                    token_counter, glossary, glossary_run_stats,
-                    notify_fn=_notify_retry,
-                )
-
-                for i, (row_num, col_header, col_idx, canonical, text) in enumerate(batch):
-                    tr = str(translations[i]).strip() if i < len(translations) else text
-                    if canonical == "name":
-                        tr = validate_product_name(tr)
-                    results[(row_num, col_idx)] = tr
-                    tm_put(tm, text, tr, _tm_col_type(canonical))
-                    stats["cells_translated"] += 1
-
-                stats["batch_count"] += 1
-                api_done += len(batch)
+        # Apply results sequentially (main thread — no concurrent Excel writes)
+        for result in sorted(batch_results, key=lambda r: r["batch_id"]):
+            for i, (row_num, col_header, col_idx, canonical, text) in enumerate(result["batch_items"]):
+                tr = str(result["translations"][i]).strip() if i < len(result["translations"]) else text
+                if canonical == "name":
+                    tr = validate_product_name(tr)
+                results[(row_num, col_idx)] = tr
+                tm_put(tm, text, tr, _tm_col_type(canonical))
+                stats["cells_translated"] += 1
 
         # Count TM hits as translated
         stats["cells_translated"] += stats["tm_hits"]
+        stats["batch_count"]       = total_batches
+        stats["failed_batches"]    = failed_batches
+        stats["avg_batch_duration"] = round(
+            sum(batch_durations) / max(len(batch_durations), 1), 2
+        )
+        stats["max_concurrent_used"] = max_concurrent_batches
         stats["avg_batch_size"] = (
-            round(total_api_cells / max(stats["batch_count"], 1), 1)
-            if stats["batch_count"] > 0 else 0.0
+            round(total_api_cells / max(total_batches, 1), 1)
+            if total_batches > 0 else 0.0
         )
 
-        # Old approach would have sent 1 API call per cell; now we send 1 per batch + 0 for TM hits
-        stats["api_calls_made"]    = stats["batch_count"]
-        stats["api_calls_reduced"] = max(total_to_process - stats["batch_count"] - stats["tm_hits"], 0)
+        # 1 API call per cell without batching + TM; now 1 per batch + 0 for TM hits
+        stats["api_calls_made"]    = total_batches
+        stats["api_calls_reduced"] = max(total_to_process - total_batches - stats["tm_hits"], 0)
 
         # Persist TM
         tm["global_stats"]["total_hits"]            += stats["tm_hits"]
@@ -2334,7 +2488,7 @@ def process_excel_with_progress(
         }
 
         stats["review_items"] = review_items  # per-cell legacy list
-        stats["retry_count"]  = retry_count[0]
+        stats["retry_count"]  = retry_counter[0]
 
         # Audit counters for the export highlighting report
         stats["original_highlights_preserved"] = cells_original_highlight
@@ -2580,12 +2734,24 @@ def translator_page():
 
         # Advanced settings
         with st.expander("Advanced settings"):
-            batch_size = st.number_input(
-                "Batch size (cells per API request)",
-                min_value=1, max_value=50,
-                value=DEFAULT_BATCH_SIZE,
-                help="Higher = fewer API calls but larger requests. Default 20 is optimal for most files.",
-            )
+            col_bs, col_cc = st.columns(2)
+            with col_bs:
+                batch_size = st.slider(
+                    "Batch size (cells per request)",
+                    min_value=5, max_value=30,
+                    value=DEFAULT_BATCH_SIZE,
+                    help="Cells grouped into one API request. Larger = fewer calls, bigger payloads.",
+                )
+            with col_cc:
+                max_concurrent_batches = st.slider(
+                    "Max concurrent batches",
+                    min_value=1, max_value=5,
+                    value=DEFAULT_MAX_CONCURRENT,
+                    help=(
+                        "How many batches are sent to OpenAI in parallel. "
+                        "3 is a safe default; set to 1 for sequential (same as before)."
+                    ),
+                )
             st.markdown("---")
             highlight_warnings_in_excel = st.checkbox(
                 "Highlight review warnings in exported Excel",
@@ -2622,6 +2788,7 @@ def translator_page():
                     selected_sheet, classification,
                     batch_size=int(batch_size),
                     highlight_review_warnings=highlight_warnings_in_excel,
+                    max_concurrent_batches=int(max_concurrent_batches),
                 )
                 progress_container.empty()
                 progress_bar.empty()
