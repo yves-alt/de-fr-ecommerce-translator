@@ -8,13 +8,14 @@ Author: Yves Koulle Banga
 import streamlit as st
 import os
 import re
+import csv
 import json
 import uuid
 import copy
 import hmac
 import tempfile
 import time
-from io import BytesIO
+from io import BytesIO, StringIO
 from pathlib import Path
 from datetime import datetime, timedelta
 
@@ -53,6 +54,21 @@ MAX_API_RETRIES     = 3
 RETRY_BASE_DELAY    = 1.0   # seconds; doubles on each retry
 
 REVIEW_FILL = PatternFill(start_color="FFF9C4", end_color="FFF9C4", fill_type="solid")
+
+# Warning severity levels
+SEVERITY_CRITICAL = "Critical"
+SEVERITY_HIGH     = "High"
+SEVERITY_MEDIUM   = "Medium"
+SEVERITY_LOW      = "Low"
+
+SEVERITY_DEDUCTION = {
+    SEVERITY_CRITICAL: 10,
+    SEVERITY_HIGH:      5,
+    SEVERITY_MEDIUM:    2,
+    SEVERITY_LOW:       1,
+}
+
+SEVERITY_ORDER = [SEVERITY_CRITICAL, SEVERITY_HIGH, SEVERITY_MEDIUM, SEVERITY_LOW]
 
 DEFAULT_GLOSSARY_TERMS = {
     "Bezug":         "Revêtement",
@@ -384,6 +400,117 @@ def update_glossary_stats(glossary: dict, term_counts: dict) -> None:
     for term, count in term_counts.items():
         tc[term]           = tc.get(term, 0) + count
         s["total_hits"]    = s.get("total_hits", 0) + count
+
+
+def _issue_meta(issue_type: str, source: str, translation: str) -> dict:
+    """Return severity, category, suggested_fix for a given issue type."""
+    if issue_type == "german_residue":
+        return {
+            "severity":      SEVERITY_CRITICAL,
+            "category":      "German residue",
+            "suggested_fix": "Retranslate manually or apply glossary corrections",
+        }
+    if issue_type == "identical_output":
+        return {
+            "severity":      SEVERITY_CRITICAL,
+            "category":      "Missing translation",
+            "suggested_fix": "Output is identical to source — retranslate this cell manually",
+        }
+    if issue_type == "api_failure":
+        return {
+            "severity":      SEVERITY_CRITICAL,
+            "category":      "API failure",
+            "suggested_fix": "API failed for this cell — retranslate manually",
+        }
+    if issue_type == "batch_mismatch":
+        return {
+            "severity":      SEVERITY_CRITICAL,
+            "category":      "Batch output mismatch",
+            "suggested_fix": "Batch returned wrong count — retranslate this cell manually",
+        }
+    if issue_type == "lost_br_tags":
+        missing = source.count("<br>") - translation.count("<br>")
+        return {
+            "severity":      SEVERITY_HIGH,
+            "category":      "Formatting issue",
+            "suggested_fix": f"Reinsert {missing} missing <br> tag(s) at the correct position(s)",
+        }
+    if issue_type == "name_too_long":
+        return {
+            "severity":      SEVERITY_HIGH,
+            "category":      "Product name rule violation",
+            "suggested_fix": f"Shorten to ≤40 chars (currently {len(translation)}); remove adjectives if needed",
+        }
+    if issue_type == "name_has_comma":
+        return {
+            "severity":      SEVERITY_HIGH,
+            "category":      "Product name rule violation",
+            "suggested_fix": "Remove the comma from the product name",
+        }
+    if issue_type == "glossary_inconsistency":
+        return {
+            "severity":      SEVERITY_HIGH,
+            "category":      "Glossary inconsistency",
+            "suggested_fix": "Apply the standard glossary term listed in the reason field",
+        }
+    if issue_type == "too_short":
+        return {
+            "severity":      SEVERITY_MEDIUM,
+            "category":      "Suspicious translation length",
+            "suggested_fix": "Verify the translation is complete; re-run if truncated",
+        }
+    if issue_type == "too_long":
+        return {
+            "severity":      SEVERITY_MEDIUM,
+            "category":      "Suspicious translation length",
+            "suggested_fix": "Check for duplicated or hallucinated content; translation should not exceed ~2.5× source length",
+        }
+    if issue_type == "possible_hallucination":
+        return {
+            "severity":      SEVERITY_MEDIUM,
+            "category":      "Possible hallucination",
+            "suggested_fix": "Review carefully — unexpected content may have been generated",
+        }
+    return {
+        "severity":      SEVERITY_LOW,
+        "category":      "Manual review recommended",
+        "suggested_fix": "Review this cell manually",
+    }
+
+
+def _check_glossary_inconsistency(source: str, translation: str, glossary: dict) -> list[str]:
+    """Check first 25 glossary terms (those in the model prompt) for missed applications."""
+    terms = glossary.get("terms", {})
+    prompt_terms = dict(list(terms.items())[:25])
+    src_lower = source.lower()
+    tr_lower  = translation.lower()
+    violations = []
+    for de, fr in prompt_terms.items():
+        if len(de) <= 5:
+            continue
+        if re.search(r'\b' + re.escape(de.lower()) + r'\b', src_lower):
+            if fr.lower() not in tr_lower:
+                violations.append(f"{de} → {fr}")
+    return violations[:2]
+
+
+def compute_quality_score(warnings: list) -> int:
+    """Score 0–100: start at 100, deduct per warning severity, floor at 0."""
+    score = 100
+    for w in warnings:
+        score -= SEVERITY_DEDUCTION.get(w.get("severity", SEVERITY_LOW), 1)
+    return max(0, score)
+
+
+def quality_verdict(score: int) -> tuple[str, str]:
+    """Return (verdict_text, color_token) for the score."""
+    if score >= 95:
+        return "Excellent — ready to use", "#10b981"
+    if score >= 85:
+        return "Good — minor review recommended", "#7c5cfc"
+    if score >= 70:
+        return "Needs review before use", "#f59e0b"
+    return "Do not publish without manual review", "#ef4444"
 
 
 def _normalize_header(header: str) -> set[str]:
@@ -1034,6 +1161,39 @@ def inject_custom_css(theme: str = "Dark"):
         animation: fadeUp 0.4s ease;
     }}
 
+    /* ── Severity badges ─────────────────────────────────── */
+    .sev-badge {{
+        display: inline-flex; align-items: center;
+        padding: 2px 8px; border-radius: 4px;
+        font-size: 11px; font-weight: 700;
+        letter-spacing: 0.04em; text-transform: uppercase;
+    }}
+    .sev-critical {{
+        background: rgba(239,68,68,0.12);
+        border: 1px solid rgba(239,68,68,0.22);
+        color: #ef4444;
+    }}
+    .sev-high {{
+        background: rgba(245,158,11,0.12);
+        border: 1px solid rgba(245,158,11,0.22);
+        color: #f59e0b;
+    }}
+    .sev-medium {{
+        background: rgba(250,204,21,0.10);
+        border: 1px solid rgba(250,204,21,0.20);
+        color: #ca8a04;
+    }}
+    .sev-low {{
+        background: rgba(129,140,248,0.10);
+        border: 1px solid rgba(129,140,248,0.20);
+        color: #818cf8;
+    }}
+    .alert-success {{
+        background: rgba(16,185,129,0.07);
+        border: 1px solid rgba(16,185,129,0.14);
+        color: #4fcba4;
+    }}
+
     @media (max-width: 780px) {{
         .kpi-row, .result-grid {{ grid-template-columns: repeat(2,1fr) !important; }}
         .hero-kpi-value {{ font-size: 52px !important; }}
@@ -1291,44 +1451,100 @@ def detect_german_residue(text: str) -> list[str]:
 def analyze_translation_quality(
     source: str, translation: str, canonical: str, glossary: dict | None = None
 ) -> list[dict]:
-    """Return a list of quality issues found in the translation. Empty list means clean.
+    """Return enriched quality issues. Each dict has: type, reason, severity, category, suggested_fix.
 
-    Three distinct signal types decide cell highlighting in the Excel output:
-      - review_warnings   : issues returned here → REVIEW_FILL applied
-      - original_excel_highlights : source cell fill preserved when no review_warning
-      - glossary_hits     : tracked in analytics only, never affect cell color
+    Excel highlighting signals:
+      - Critical/High issues → REVIEW_FILL only when checkbox enabled
+      - original_excel_highlights → always preserved
+      - glossary_hits → analytics only, never affect cell color
     """
-    issues  = []
-    residue = detect_german_residue(translation)
-    if residue:
-        issues.append({"type": "german_residue",  "reason": f"German words: {', '.join(residue[:3])}"})
+    issues   = []
+    _glossary = glossary or {}
+
+    # Identical output (Critical) — check before residue so we don't double-flag
     if translation.strip() == source.strip():
-        # Identical output is only a real issue when the source text genuinely
-        # needed translation.  Skip this flag for:
-        #   1. Known French loanwords that are correctly unchanged (FRENCH_ACCEPTABLE_WORDS)
-        #   2. Glossary entries where the German key maps to the same string as the source
-        #      (e.g. a custom glossary entry "taupe" → "taupe").
-        src_lower = source.strip().lower()
-        glossary_terms = (glossary or {}).get("terms", {})
-        is_expected_unchanged = (
+        src_lower      = source.strip().lower()
+        glossary_terms = _glossary.get("terms", {})
+        is_expected    = (
             src_lower in {w.lower() for w in FRENCH_ACCEPTABLE_WORDS}
             or any(
                 src_lower == de.lower() and translation.strip().lower() == fr.lower()
                 for de, fr in glossary_terms.items()
             )
         )
-        if not is_expected_unchanged:
-            issues.append({"type": "identical_output", "reason": "Translation matches source text"})
+        if not is_expected:
+            meta = _issue_meta("identical_output", source, translation)
+            issues.append({
+                "type":   "identical_output",
+                "reason": "Translation matches source text — likely untranslated",
+                **meta,
+            })
+
+    # German residue (recorded here; final verdict via warning_details after all fix passes)
+    residue = detect_german_residue(translation)
+    if residue:
+        meta = _issue_meta("german_residue", source, translation)
+        issues.append({
+            "type":   "german_residue",
+            "reason": f"German words detected: {', '.join(residue[:3])}",
+            **meta,
+        })
+
+    # Too short (Medium)
     if len(source) > 6 and len(translation) < max(3, len(source) * 0.4):
-        issues.append({"type": "too_short",        "reason": f"Very short ({len(translation)} chars vs {len(source)} source)"})
+        meta = _issue_meta("too_short", source, translation)
+        issues.append({
+            "type":   "too_short",
+            "reason": f"Very short ({len(translation)} chars vs {len(source)} source)",
+            **meta,
+        })
+
+    # Too long (Medium)
+    if len(source) > 20 and len(translation) > len(source) * 2.5:
+        meta = _issue_meta("too_long", source, translation)
+        issues.append({
+            "type":   "too_long",
+            "reason": f"Unusually long ({len(translation)} chars vs {len(source)} source)",
+            **meta,
+        })
+
+    # Lost <br> tags (High)
     src_br = source.count("<br>")
     if src_br > 0 and translation.count("<br>") < src_br:
-        issues.append({"type": "lost_br_tags",     "reason": f"Lost {src_br - translation.count('<br>')} <br> tag(s)"})
+        meta = _issue_meta("lost_br_tags", source, translation)
+        issues.append({
+            "type":   "lost_br_tags",
+            "reason": f"Lost {src_br - translation.count('<br>')} <br> tag(s)",
+            **meta,
+        })
+
+    # Product name rules (High)
     if canonical == "name":
         if len(translation) > 40:
-            issues.append({"type": "name_too_long",  "reason": f"Exceeds 40 chars ({len(translation)})"})
+            meta = _issue_meta("name_too_long", source, translation)
+            issues.append({
+                "type":   "name_too_long",
+                "reason": f"Exceeds 40 chars ({len(translation)})",
+                **meta,
+            })
         if "," in translation:
-            issues.append({"type": "name_has_comma", "reason": "Contains a comma"})
+            meta = _issue_meta("name_has_comma", source, translation)
+            issues.append({
+                "type":   "name_has_comma",
+                "reason": "Contains a comma",
+                **meta,
+            })
+
+    # Glossary inconsistency (High) — only prompt-block terms, long ones only
+    violations = _check_glossary_inconsistency(source, translation, _glossary)
+    if violations:
+        meta = _issue_meta("glossary_inconsistency", source, translation)
+        issues.append({
+            "type":   "glossary_inconsistency",
+            "reason": f"Glossary term(s) not applied: {' | '.join(violations)}",
+            **meta,
+        })
+
     return issues
 
 
@@ -1767,9 +1983,16 @@ def process_excel_with_progress(
         "api_calls_made":      0,
         "api_calls_reduced":   0,
         "review_items":        [],
+        "all_warnings":        [],
         "review_count":        0,
         "retry_count":         0,
         "failed_cells":        0,
+        "critical_warnings":   0,
+        "high_warnings":       0,
+        "medium_warnings":     0,
+        "low_warnings":        0,
+        "quality_score":       100,
+        "warning_categories":  {},
     }
 
     with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
@@ -1922,42 +2145,63 @@ def process_excel_with_progress(
                 except Exception:
                     pass
 
+        all_warnings: list[dict] = []
         review_items: list[dict] = []
-        cells_original_highlight = 0   # audit: source fills restored
-        cells_review_highlighted  = 0  # audit: cells highlighted due to review warning
+        cells_original_highlight = 0
+        cells_review_highlighted  = 0
+
+        col_header_map = {ci: h for h, (ci, _) in to_translate.items()}
 
         for (row_num, col_idx), translation in results.items():
             cell       = worksheet.cell(row=row_num, column=col_idx)
             cell.value = translation
             src_text, src_canonical = source_lookup.get((row_num, col_idx), (translation, "other"))
             has_original = (row_num, col_idx) in original_excel_highlights
+            col_header   = col_header_map.get(col_idx, str(col_idx))
 
-            # Quality analysis — glossary_hits are already in glossary_run_stats and
-            # have no path to cell.fill regardless of the outcome here.
+            # Quality analysis — glossary_hits tracked separately, never affect cell color.
             issues = analyze_translation_quality(src_text, translation, src_canonical, glossary)
 
+            ts = datetime.now().isoformat(timespec="seconds")
+            has_critical_or_high = False
+
+            for issue in issues:
+                if issue["type"] == "german_residue":
+                    continue  # deferred to post-fix warning_details for accuracy
+                sev = issue.get("severity", SEVERITY_LOW)
+                if sev in (SEVERITY_CRITICAL, SEVERITY_HIGH):
+                    has_critical_or_high = True
+                src_snippet = src_text[:120] + "…" if len(src_text) > 120 else src_text
+                tr_snippet  = translation[:120] + "…" if len(translation) > 120 else translation
+                all_warnings.append({
+                    "severity":        sev,
+                    "category":        issue.get("category", "Manual review recommended"),
+                    "row":             row_num,
+                    "column":          col_header,
+                    "original_text":   src_snippet,
+                    "translated_text": tr_snippet,
+                    "reason":          issue.get("reason", ""),
+                    "suggested_fix":   issue.get("suggested_fix", ""),
+                    "timestamp":       ts,
+                })
+
             if issues:
-                # review_warning detected — record for dashboard display.
                 review_items.append({
                     "row":         row_num,
                     "col_idx":     col_idx,
                     "translation": translation[:60] + "…" if len(translation) > 60 else translation,
                     "issues":      issues,
                 })
-                if highlight_review_warnings:
-                    # User opted in via checkbox → apply yellow review fill.
+                # Highlight only Critical/High when checkbox is enabled
+                if highlight_review_warnings and has_critical_or_high:
                     cell.fill = REVIEW_FILL
                     cells_review_highlighted += 1
                 elif has_original:
-                    # Opt-in is off; still restore the original source highlight.
                     cell.fill = original_excel_highlights[(row_num, col_idx)]
                     cells_original_highlight += 1
-                # else: no fill — warning shown in dashboard only (default behavior)
             elif has_original:
-                # Clean translation with original source highlight → preserve it.
                 cell.fill = original_excel_highlights[(row_num, col_idx)]
                 cells_original_highlight += 1
-            # else: clean cell, no original highlight → no color applied
 
         total_cells_for_passes = total_rows * len(to_translate)
 
@@ -2043,6 +2287,37 @@ def process_excel_with_progress(
                             })
                     cell.value = corrected
 
+        # ── Merge confirmed unresolved residue into all_warnings ─────────────────
+        ts_fin = datetime.now().isoformat(timespec="seconds")
+        for wd in stats["warning_details"]:
+            all_warnings.append({
+                "severity":        SEVERITY_CRITICAL,
+                "category":        "German residue",
+                "row":             wd["row"],
+                "column":          wd["column"],
+                "original_text":   "",
+                "translated_text": wd["text"],
+                "reason":          f"Unresolved German words after 3 fix attempts: {', '.join(wd.get('residue', []))}",
+                "suggested_fix":   "Retranslate manually — automated residue fixing failed",
+                "timestamp":       ts_fin,
+            })
+
+        _crit = sum(1 for w in all_warnings if w["severity"] == SEVERITY_CRITICAL)
+        _high = sum(1 for w in all_warnings if w["severity"] == SEVERITY_HIGH)
+        _med  = sum(1 for w in all_warnings if w["severity"] == SEVERITY_MEDIUM)
+        _low  = sum(1 for w in all_warnings if w["severity"] == SEVERITY_LOW)
+        from collections import Counter
+        _cat_counts = Counter(w["category"] for w in all_warnings)
+
+        stats["all_warnings"]       = all_warnings
+        stats["critical_warnings"]  = _crit
+        stats["high_warnings"]      = _high
+        stats["medium_warnings"]    = _med
+        stats["low_warnings"]       = _low
+        stats["quality_score"]      = compute_quality_score(all_warnings)
+        stats["warning_categories"] = dict(_cat_counts)
+        stats["review_count"]       = len(all_warnings)
+
         progress_bar.progress(1.0)
 
         output = BytesIO()
@@ -2072,8 +2347,7 @@ def process_excel_with_progress(
             "translated_columns": list(to_translate.keys()),
         }
 
-        stats["review_items"] = review_items
-        stats["review_count"] = len(review_items)
+        stats["review_items"] = review_items  # per-cell legacy list
         stats["retry_count"]  = retry_count[0]
 
         # Audit counters for the export highlighting report
@@ -2085,6 +2359,144 @@ def process_excel_with_progress(
 
     finally:
         os.unlink(tmp_path)
+
+
+# =============================================================================
+# REVIEW DASHBOARD
+# =============================================================================
+
+def render_review_dashboard(all_warnings: list, stats: dict, highlight_in_excel: bool):
+    score               = stats.get("quality_score", 100)
+    verdict_text, score_color = quality_verdict(score)
+    critical = stats.get("critical_warnings", 0)
+    high     = stats.get("high_warnings", 0)
+    medium   = stats.get("medium_warnings", 0)
+    low_     = stats.get("low_warnings", 0)
+
+    st.markdown(f"""
+    <div class="card" style="text-align:center;padding:28px 24px;">
+        <div style="font-size:10px;font-weight:700;text-transform:uppercase;
+                    letter-spacing:0.1em;color:#686880;margin-bottom:10px;">
+            Translation Quality Score
+        </div>
+        <div style="font-size:62px;font-weight:800;letter-spacing:-0.04em;
+                    color:{score_color};line-height:1;">
+            {score}<span style="font-size:24px;color:#686880;">/100</span>
+        </div>
+        <div style="font-size:13px;color:#686880;margin-top:10px;">{verdict_text}</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    st.markdown(f"""
+    <div class="kpi-row">
+        <div class="kpi">
+            <div class="kpi-label" style="color:#ef4444;">Critical</div>
+            <div class="kpi-value" style="color:#ef4444;">{critical}</div>
+            <div class="kpi-sub">−10 pts each</div>
+        </div>
+        <div class="kpi">
+            <div class="kpi-label" style="color:#f59e0b;">High</div>
+            <div class="kpi-value" style="color:#f59e0b;">{high}</div>
+            <div class="kpi-sub">−5 pts each</div>
+        </div>
+        <div class="kpi">
+            <div class="kpi-label" style="color:#ca8a04;">Medium</div>
+            <div class="kpi-value" style="color:#ca8a04;">{medium}</div>
+            <div class="kpi-sub">−2 pts each</div>
+        </div>
+        <div class="kpi">
+            <div class="kpi-label" style="color:#818cf8;">Low</div>
+            <div class="kpi-value" style="color:#818cf8;">{low_}</div>
+            <div class="kpi-sub">−1 pt each</div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    if not all_warnings:
+        st.markdown("""
+        <div class="alert alert-success">
+            <span class="alert-icon">✓</span>
+            <span><strong>No warnings detected.</strong> Translation passed all quality checks.</span>
+        </div>
+        """, unsafe_allow_html=True)
+        return
+
+    excel_note = (
+        "Critical and High warnings are highlighted yellow in the downloaded Excel."
+        if highlight_in_excel
+        else "Warnings shown here only — Excel highlighting is off (checkbox unchecked)."
+    )
+    st.markdown(f"""
+    <div class="alert alert-info">
+        <span class="alert-icon">ℹ</span>
+        <span>{excel_note} Glossary hits never create highlights.</span>
+    </div>
+    """, unsafe_allow_html=True)
+
+    with st.expander(f"Warning details — {len(all_warnings)} warning(s)", expanded=True):
+        c1, c2, c3, c4 = st.columns([1.4, 1.4, 2, 2])
+        with c1:
+            sev_filter = st.selectbox(
+                "Severity", ["All"] + SEVERITY_ORDER, key="wd_sev"
+            )
+        with c2:
+            col_opts   = ["All"] + sorted(set(w["column"] for w in all_warnings))
+            col_filter = st.selectbox("Column", col_opts, key="wd_col")
+        with c3:
+            cat_opts   = ["All"] + sorted(set(w["category"] for w in all_warnings))
+            cat_filter = st.selectbox("Category", cat_opts, key="wd_cat")
+        with c4:
+            search = st.text_input("Search in reason / text", placeholder="e.g. Bezug", key="wd_search")
+
+        filtered = all_warnings
+        if sev_filter != "All":
+            filtered = [w for w in filtered if w["severity"] == sev_filter]
+        if col_filter != "All":
+            filtered = [w for w in filtered if w["column"] == col_filter]
+        if cat_filter != "All":
+            filtered = [w for w in filtered if w["category"] == cat_filter]
+        if search:
+            sl = search.lower()
+            filtered = [
+                w for w in filtered
+                if sl in w.get("reason", "").lower()
+                or sl in w.get("original_text", "").lower()
+                or sl in w.get("translated_text", "").lower()
+            ]
+
+        st.caption(f"{len(filtered)} of {len(all_warnings)} warning(s) shown")
+
+        if filtered:
+            rows = [
+                {
+                    "Severity":    w["severity"],
+                    "Category":    w["category"],
+                    "Row":         w["row"],
+                    "Column":      w["column"],
+                    "Reason":      w["reason"],
+                    "Original":    w.get("original_text", "")[:70],
+                    "Translation": w.get("translated_text", "")[:70],
+                    "Suggested Fix": w.get("suggested_fix", ""),
+                }
+                for w in filtered
+            ]
+            st.dataframe(rows, use_container_width=True, hide_index=True)
+
+            csv_buf = StringIO()
+            writer  = csv.DictWriter(csv_buf, fieldnames=[
+                "severity", "category", "row", "column",
+                "original_text", "translated_text", "reason", "suggested_fix",
+            ])
+            writer.writeheader()
+            for w in filtered:
+                writer.writerow({k: w.get(k, "") for k in writer.fieldnames})
+            st.download_button(
+                label="↓ Download warnings as CSV",
+                data=csv_buf.getvalue().encode("utf-8"),
+                file_name="translation_warnings.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
 
 
 # =============================================================================
@@ -2253,6 +2665,13 @@ def translator_page():
                     "glossary_hits":             stats.get("glossary_hits", 0),
                     "review_count":              stats.get("review_count", 0),
                     "retry_count":               stats.get("retry_count", 0),
+                    "critical_warnings":         stats.get("critical_warnings", 0),
+                    "high_warnings":             stats.get("high_warnings", 0),
+                    "medium_warnings":           stats.get("medium_warnings", 0),
+                    "low_warnings":              stats.get("low_warnings", 0),
+                    "total_warnings":            len(stats.get("all_warnings", [])),
+                    "quality_score":             stats.get("quality_score", 100),
+                    "warning_categories":        stats.get("warning_categories", {}),
                 })
 
                 # ── Results ──
@@ -2304,40 +2723,23 @@ def translator_page():
                 )
                 st.markdown(f'<div class="qg">{qg_rows_html}</div>', unsafe_allow_html=True)
 
-                # ── Human Review ──
-                review_items = stats.get("review_items", [])
-                if review_items:
-                    st.markdown('<div class="section-label">Human Review</div>', unsafe_allow_html=True)
-                    excel_note = (
-                        "highlighted yellow in downloaded Excel"
-                        if highlight_warnings_in_excel
-                        else "shown in this report only — no Excel color added"
-                    )
-                    with st.expander(
-                        f"Review Recommended — {len(review_items)} cell(s) flagged "
-                        f"({excel_note})"
-                    ):
-                        for item in review_items:
-                            issues_str = " · ".join(i["reason"] for i in item["issues"])
-                            st.markdown(f"""
-                            <div class="warn-detail">
-                                <div class="warn-detail-dot"></div>
-                                <div>
-                                    <strong>Row {item["row"]}</strong><br>
-                                    <span style="color:#3a3a52;">{item["translation"]}</span><br>
-                                    <span style="color:#5a4020;">{issues_str}</span>
-                                </div>
-                            </div>
-                            """, unsafe_allow_html=True)
+                # ── Review Dashboard ──
+                st.markdown('<div class="section-label">Review Dashboard</div>', unsafe_allow_html=True)
+                render_review_dashboard(
+                    stats.get("all_warnings", []),
+                    stats,
+                    highlight_warnings_in_excel,
+                )
 
                 # ── Export Audit ──
                 n_orig  = stats.get("original_highlights_preserved", 0)
                 n_rev   = stats.get("review_highlights_applied", 0)
                 n_gloss = stats.get("glossary_hits", 0)
+                n_total_warn = len(stats.get("all_warnings", []))
                 rev_label = (
-                    f"{n_rev} cell(s) highlighted (checkbox enabled)"
+                    f"{n_rev} cell(s) highlighted (Critical + High only)"
                     if highlight_warnings_in_excel
-                    else f"0 — checkbox off, {len(review_items)} warning(s) in dashboard only"
+                    else f"0 — checkbox off, {n_total_warn} warning(s) in dashboard only"
                 )
                 orig_label = f"{n_orig} cell(s) — source formatting preserved" if n_orig else "None in this file"
                 audit_rows = [
@@ -2364,15 +2766,17 @@ def translator_page():
                     else "cost N/A"
                 )
                 processed_sheet = stats.get("sheet_name", "")
+                qs = stats.get("quality_score", 100)
+                vt, _ = quality_verdict(qs)
 
-                if stats["unresolved_warnings"] == 0:
+                if not stats.get("all_warnings"):
                     st.markdown(f"""
                     <div class="success-banner">
                         <div class="success-banner-icon">✓</div>
                         <div>
-                            <div class="success-banner-title">Translation complete</div>
+                            <div class="success-banner-title">Translation complete — Score {qs}/100</div>
                             <div class="success-banner-sub">
-                                Sheet: {processed_sheet} · {stats["cells_translated"]} cells ·
+                                {vt} · Sheet: {processed_sheet} · {stats["cells_translated"]} cells ·
                                 {stats["total_time"]} · {cost_str}
                             </div>
                         </div>
@@ -2382,28 +2786,13 @@ def translator_page():
                     st.markdown(f"""
                     <div class="warn-banner">
                         <div class="warn-banner-title">
-                            Translation complete — {stats["unresolved_warnings"]} warning(s)
+                            Translation complete — Score {qs}/100 · {n_total_warn} warning(s)
                         </div>
                         <div class="warn-banner-sub">
-                            Sheet: {processed_sheet} · {stats["total_time"]} · {cost_str} ·
-                            Some cells need manual review
+                            {vt} · Sheet: {processed_sheet} · {stats["total_time"]} · {cost_str}
                         </div>
                     </div>
                     """, unsafe_allow_html=True)
-
-                    with st.expander(f"Warning details ({stats['unresolved_warnings']})"):
-                        for w in stats["warning_details"]:
-                            residue_str = ", ".join(w["residue"])
-                            st.markdown(f"""
-                            <div class="warn-detail">
-                                <div class="warn-detail-dot"></div>
-                                <div>
-                                    <strong>Row {w["row"]}</strong> · <code>{w["column"]}</code><br>
-                                    <span style="color:#3a3a52;">{w["text"]}</span><br>
-                                    <span style="color:#5a4020;">Residue: <code>{residue_str}</code></span>
-                                </div>
-                            </div>
-                            """, unsafe_allow_html=True)
 
                 # ── Download ──
                 st.markdown("<br>", unsafe_allow_html=True)
@@ -2487,15 +2876,17 @@ def history_page():
     for r in history:
         dt  = r.get("datetime", "")[:16].replace("T", " ")
         c   = r.get("estimated_cost_usd")
+        qs  = r.get("quality_score")
         rows.append({
             "Date / Time":     dt,
             "File":            r.get("original_filename", ""),
             "Sheet":           r.get("sheet_name", ""),
             "Translated":      r.get("cells_translated", 0),
-            "TM Hits":         r.get("tm_hits", "—"),
-            "Batches":         r.get("batch_count", "—"),
+            "Score":           f"{qs}/100" if qs is not None else "—",
+            "Critical":        r.get("critical_warnings", "—"),
+            "High":            r.get("high_warnings", "—"),
+            "Warnings (total)": r.get("total_warnings", r.get("unresolved_warnings", 0)),
             "Residue Fixes":   r.get("residue_corrections", 0),
-            "Warnings":        r.get("unresolved_warnings", 0),
             "Time":            r.get("processing_time_formatted", ""),
             "Est. Cost (USD)": f"${c:.4f}" if c is not None else "—",
         })
@@ -2681,6 +3072,62 @@ def analytics_page():
         </div>
     </div>
     """, unsafe_allow_html=True)
+
+    # ── Quality Score Analytics ──
+    scored_records = [r for r in history if r.get("quality_score") is not None]
+    if scored_records:
+        avg_score      = round(sum(r["quality_score"] for r in scored_records) / len(scored_records), 1)
+        total_critical = sum(r.get("critical_warnings", 0) for r in history)
+        total_high     = sum(r.get("high_warnings", 0) for r in history)
+        total_medium   = sum(r.get("medium_warnings", 0) for r in history)
+        total_low      = sum(r.get("low_warnings", 0) for r in history)
+        files_critical = sum(1 for r in history if r.get("critical_warnings", 0) > 0)
+
+        score_color = "#10b981" if avg_score >= 85 else ("#f59e0b" if avg_score >= 70 else "#ef4444")
+        st.markdown('<div class="section-label">Quality Score</div>', unsafe_allow_html=True)
+        st.markdown(f"""
+        <div class="kpi-row">
+            <div class="kpi">
+                <div class="kpi-label">Avg Quality Score</div>
+                <div class="kpi-value" style="color:{score_color};">{avg_score}/100</div>
+                <div class="kpi-sub">Across {len(scored_records)} job(s)</div>
+            </div>
+            <div class="kpi">
+                <div class="kpi-label" style="color:#ef4444;">Critical Warnings</div>
+                <div class="kpi-value" style="color:#ef4444;">{total_critical}</div>
+                <div class="kpi-sub">{files_critical} file(s) affected</div>
+            </div>
+            <div class="kpi">
+                <div class="kpi-label" style="color:#f59e0b;">High Warnings</div>
+                <div class="kpi-value" style="color:#f59e0b;">{total_high}</div>
+                <div class="kpi-sub">−5 pts each</div>
+            </div>
+            <div class="kpi">
+                <div class="kpi-label" style="color:#ca8a04;">Medium / Low</div>
+                <div class="kpi-value" style="color:#ca8a04;">{total_medium + total_low}</div>
+                <div class="kpi-sub">Medium {total_medium} · Low {total_low}</div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        # Most common warning categories across all jobs
+        from collections import Counter
+        all_cats: Counter = Counter()
+        for r in history:
+            for cat, cnt in r.get("warning_categories", {}).items():
+                all_cats[cat] += cnt
+        if all_cats:
+            top_cats = all_cats.most_common(5)
+            chips = "".join(
+                f'<span class="chip chip-muted">{cat} <span class="chip-arrow">· {n}×</span></span>'
+                for cat, n in top_cats
+            )
+            st.markdown(f"""
+            <div class="card" style="margin-top:0;">
+                <div class="card-title">Most common warning categories</div>
+                <div>{chips}</div>
+            </div>
+            """, unsafe_allow_html=True)
 
     # ── Translation Memory ──
     tm = load_translation_memory()
