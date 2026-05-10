@@ -2,7 +2,7 @@
 
 > **Project Type:** Portfolio Prototype / Internal Tool Demo
 
-AI-powered product localization platform that translates German Excel product data to French for e-commerce market expansion. Includes Translation Memory, Batch Processing, a professional Glossary system, Retry System with exponential backoff, advanced Column Intelligence, a Cost Dashboard, and Human Review Mode with Excel highlighting.
+AI-powered product localization platform that translates German Excel product data to French for e-commerce market expansion. Includes Translation Memory, Batch Processing, a professional Glossary system, Retry System with exponential backoff, advanced Column Intelligence, a Cost Dashboard, Human Review Mode with Excel highlighting, and a Premium AI Refinement layer for natural French e-commerce copy.
 
 ---
 
@@ -14,10 +14,11 @@ This Streamlit web application provides a production-grade translation workflow 
 - Secure login before accessing the translator
 - Upload German `.xlsx` files and translate product data to French using AI
 - Translation Memory: reuse past translations instantly — no API call needed
-- Batch Processing: translate 20 cells per API request instead of 1
+- Batch Processing: translate 15 cells per API request instead of 1
 - Glossary System: enforce consistent terminology across every translation
 - Retry System: up to 3 retries with exponential backoff on API errors and rate limits
 - Column Intelligence: 3-tier classifier (exact alias → substring → camelCase word-set)
+- **Premium AI Refinement**: optional second AI pass to produce natural, premium French e-commerce copy
 - Human Review Mode: quality analysis per cell, flagged rows highlighted yellow in Excel
 - Cost Dashboard: total tokens, prompt vs completion breakdown, avg cost/file and /cell, per-job bar chart
 - Real-time progress tracking with batch and TM stats
@@ -39,6 +40,7 @@ This Streamlit web application provides a production-grade translation workflow 
 | **Glossary System** | 35+ DE→FR e-commerce terms injected into every prompt; editable via UI |
 | **Retry System** | Up to 3 retries with exponential backoff; rate-limit detection; notify on each retry |
 | **Column Intelligence** | 3-tier classifier: T1 exact alias → T2 substring → T3 camelCase word-set (≥2 matches) |
+| **Premium AI Refinement** | Optional second AI pass on name, materialDetail, qualityDetail, deliveryScope, variantName — produces natural, premium French copy; skips short texts, colors, and dimensions automatically |
 | **Human Review Mode** | Quality analysis per cell; flags German residue, lost `<br>`, name violations; yellow highlight in Excel |
 | **Cost Dashboard** | Total tokens, prompt vs completion breakdown, avg cost/file and /cell, per-job bar chart |
 | **Real-Time Progress** | Live updates showing batch number, TM hits, cells queued |
@@ -214,6 +216,45 @@ All OpenAI API calls are wrapped in `_api_call_with_retry()` with exponential ba
 
 ---
 
+## Premium AI Refinement
+
+After initial batch translation, an optional second AI pass elevates selected columns from "technically correct" to "natural premium French e-commerce copy".
+
+**Why it exists:**
+Some outputs from a single translation pass are correct but still sound slightly literal or German in style. For example:
+
+| German | First pass | After refinement |
+|--------|-----------|-----------------|
+| `Spanplatte, foliert` | `Panneau de particules, décoré` | `Panneau de particules revêtu` |
+| `Gestell aus Metall, pulverbeschichtet` | `Structure en métal, laquée par poudrage` | `Structure en métal laquée par poudrage` |
+
+**Target columns:**
+- `name` — product names
+- `materialDetail` — material descriptions
+- `qualityDetail` — quality information
+- `deliveryScope` — delivery scope
+- `variantName` — product variant names
+
+**Cells automatically skipped (no refinement cost):**
+- Short texts under 20 characters
+- Single-word outputs (clean glossary hits)
+- Pure color values
+- Dimensions, measurements, and percentages
+- All other columns (articleNumber, colorDetail, etc.)
+
+**Safety rules enforced per cell:**
+- `<br>` tag count must be identical in the refined output — any mismatch discards the refinement
+- `name` column: refinement is discarded if the result is longer than the original
+- Empty results are always discarded
+
+**How to use:**
+The refinement is enabled by default. Toggle it off in **Advanced settings → Premium French Refinement Enabled** to skip it and reduce API cost.
+
+**Cost impact:**
+Roughly 5–15% extra tokens compared to translation-only mode, depending on how many long-text cells are present. Refinement tokens are included in the Cost Dashboard totals.
+
+---
+
 ## Column Intelligence (3-Tier)
 
 Headers are matched to canonical column names through three tiers, in order:
@@ -364,11 +405,13 @@ de-fr-ecommerce-translator/
 1. **Login** — Enter your email and password
 2. **Upload** — Select your German Excel file (.xlsx)
 3. **Review** — Check the Column Detection Report
-4. **Translate** — Click "Run Translation →" and watch live batch progress
-5. **Review results** — See TM hits, batch stats, glossary matches
-6. **Download** — Get your translated `FR-filename.xlsx`
-7. **Analytics** — Track TM savings, batch efficiency, and glossary usage
-8. **Glossary** — View and extend your terminology library
+4. **Configure** — Adjust batch size, concurrency, and refinement in Advanced settings
+5. **Translate** — Click "Run Translation →" and watch live batch progress
+6. **Refine** — Premium AI Refinement runs automatically on eligible columns (Phase 2.5)
+7. **Review results** — See TM hits, batch stats, refined cell count, glossary matches
+8. **Download** — Get your translated `FR-filename.xlsx`
+9. **Analytics** — Track TM savings, batch efficiency, and glossary usage
+10. **Glossary** — View and extend your terminology library
 
 ---
 
