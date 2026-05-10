@@ -69,6 +69,11 @@ API_TIMEOUT_SECONDS = 45
 MAX_API_RETRIES     = 3
 RETRY_BASE_DELAY    = 1.0   # seconds; doubles on each retry
 
+# Premium AI Refinement
+REFINEMENT_COLUMNS   = {"name", "materialDetail", "qualityDetail", "deliveryScope", "variantName"}
+REFINEMENT_MIN_CHARS = 20   # skip very short/obvious texts
+REFINEMENT_BATCH_SIZE = 10  # smaller batches — refinement prompts are longer
+
 REVIEW_FILL = PatternFill(start_color="FFF9C4", end_color="FFF9C4", fill_type="solid")
 
 # Warning severity levels
@@ -1319,9 +1324,12 @@ def render_intelligence_stats(stats: dict):
     concurrency  = stats.get("max_concurrent_used", 1)
     avg_dur      = stats.get("avg_batch_duration", 0.0)
     failed_b     = stats.get("failed_batches", 0)
+    refined      = stats.get("cells_refined", 0)
+    refine_calls = stats.get("refinement_api_calls", 0)
+    refine_on    = stats.get("refinement_enabled", False)
 
-    conc_sub = f"{concurrency}× parallel" if concurrency > 1 else "sequential mode"
-    dur_sub  = f"{avg_dur}s avg/batch" if avg_dur > 0 else "–"
+    conc_sub    = f"{concurrency}× parallel" if concurrency > 1 else "sequential mode"
+    refine_sub  = f"{refine_calls} refinement batch(es)" if refine_on and refine_calls else ("disabled" if not refine_on else "—")
 
     st.markdown(f"""
     <div class="kpi-row">
@@ -1353,14 +1361,14 @@ def render_intelligence_stats(stats: dict):
             <div class="kpi-sub">{conc_sub}</div>
         </div>
         <div class="kpi">
-            <div class="kpi-label">Avg Batch Time</div>
-            <div class="kpi-value">{avg_dur}s</div>
-            <div class="kpi-sub">{dur_sub}</div>
-        </div>
-        <div class="kpi">
             <div class="kpi-label">Failed Batches</div>
             <div class="kpi-value {'warn' if failed_b else 'success'}">{failed_b}</div>
             <div class="kpi-sub">{'Fell back to single-cell' if failed_b else 'All batches succeeded'}</div>
+        </div>
+        <div class="kpi">
+            <div class="kpi-label">Premium Refinement</div>
+            <div class="kpi-value {'accent' if refined else 'muted'}">{refined}</div>
+            <div class="kpi-sub">{refine_sub}</div>
         </div>
         <div class="kpi">
             <div class="kpi-label">Retries</div>
@@ -1979,6 +1987,124 @@ Return ONLY the corrected French text."""
 
 
 # =============================================================================
+# PREMIUM AI REFINEMENT
+# =============================================================================
+
+# Pattern: pure dimensions / percentages / numbers — never refine these
+_REFINE_SKIP_PATTERN = re.compile(
+    r'^[\d\s.,×xX%cm/mmkgcl×²³\-\+]+$'
+)
+
+
+def _should_refine(text: str, canonical: str) -> bool:
+    """Return True if this translated cell is a good candidate for AI refinement."""
+    if canonical not in REFINEMENT_COLUMNS:
+        return False
+    text = text.strip()
+    if len(text) < REFINEMENT_MIN_CHARS:
+        return False
+    if _REFINE_SKIP_PATTERN.match(text):
+        return False
+    # Single word — likely a direct glossary match already correct
+    if " " not in text:
+        return False
+    return True
+
+
+def refine_batch(
+    client,
+    items: list[tuple[str, str]],
+    token_counter: dict,
+) -> list[str]:
+    """
+    items: list of (translated_text, canonical_column_type)
+    Sends a premium refinement pass to the AI.
+    Returns refined texts in the same order; falls back to originals on failure.
+    """
+    if not items:
+        return []
+
+    n     = len(items)
+    texts = [t for t, _ in items]
+
+    system_prompt = (
+        "You are a premium French copywriter for Home24 France furniture e-commerce.\n"
+        "Improve the naturalness and professional tone of these French product texts.\n\n"
+        "Rules — follow every one:\n"
+        "- Preserve the exact meaning — do NOT invent or remove product information\n"
+        "- Improve French fluency and furniture vocabulary\n"
+        "- Avoid awkward literal translations from German patterns\n"
+        "  Examples: 'décoré' → 'revêtu', 'revêtu d\\'un film décoratif' → 'revêtu de film mélaminé'\n"
+        "- Use established French furniture/e-commerce terminology\n"
+        "- Preserve ALL <br> tags exactly — do not add, remove, or move them\n"
+        "- Do NOT modify numbers, dimensions, or percentages\n"
+        "- Keep product names concise — do NOT make them longer\n"
+        "- Do not exaggerate marketing claims\n"
+        "- If the text is already natural and correct, return it unchanged\n\n"
+        f"Return ONLY a valid JSON array of exactly {n} strings, in input order. No other text."
+    )
+    user_msg = f"Refine these {n} French texts:\n{json.dumps(texts, ensure_ascii=False)}"
+
+    try:
+        response = _api_call_with_retry(
+            lambda: client.chat.completions.create(
+                model=OPENAI_MODEL,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user",   "content": user_msg},
+                ],
+                temperature=0.35,
+                max_tokens=min(4000, n * 220),
+                timeout=API_TIMEOUT_SECONDS,
+            )
+        )
+        if token_counter is not None and response.usage:
+            token_counter["prompt_tokens"]     += response.usage.prompt_tokens
+            token_counter["completion_tokens"] += response.usage.completion_tokens
+
+        content = response.choices[0].message.content.strip()
+        if not content.startswith("["):
+            m = re.search(r'\[.*\]', content, re.DOTALL)
+            content = m.group() if m else content
+
+        refined = json.loads(content)
+        if isinstance(refined, list) and len(refined) == n:
+            return [str(r).strip() for r in refined]
+    except Exception:
+        pass
+
+    return texts  # fallback — return originals unchanged
+
+
+def _refinement_progress_html(sheet: str, done: int, total: int) -> str:
+    pct = int((done / max(total, 1)) * 100)
+    return f"""
+    <div class="prog-shell">
+        <div class="prog-head">
+            <div>
+                <div class="prog-phase">Phase 2.5 — Premium French Refinement</div>
+                <div class="prog-sheet">Sheet: {sheet} · Elevating translation quality</div>
+            </div>
+            <span class="prog-badge"><span class="prog-badge-dot"></span>REFINING</span>
+        </div>
+        <div class="prog-track">
+            <div class="prog-bar" style="width:{pct}%"></div>
+        </div>
+        <div class="prog-item">
+            <div class="prog-item-dot"></div>
+            <span class="prog-item-col">AI refinement pass</span>
+            <span class="prog-item-row">{done} / {total} cells refined</span>
+        </div>
+        <div class="prog-stats">
+            <div><span class="prog-stat-val">{done}</span><span class="prog-stat-lbl">Done</span></div>
+            <div><span class="prog-stat-val">{total - done}</span><span class="prog-stat-lbl">Remaining</span></div>
+            <div><span class="prog-stat-val">{pct}%</span><span class="prog-stat-lbl">Progress</span></div>
+        </div>
+    </div>
+    """
+
+
+# =============================================================================
 # EXCEL PROCESSING
 # =============================================================================
 
@@ -2259,6 +2385,7 @@ def process_excel_with_progress(
     highlight_review_warnings: bool = False,
     max_concurrent_batches: int = DEFAULT_MAX_CONCURRENT,
     header_row: int = 1,
+    enable_refinement: bool = True,
 ) -> tuple[BytesIO, dict]:
     client   = get_openai_client()
     tm       = load_translation_memory()
@@ -2290,12 +2417,17 @@ def process_excel_with_progress(
         "failed_batches":      0,
         "avg_batch_duration":  0.0,
         "max_concurrent_used": max_concurrent_batches,
-        "critical_warnings":   0,
-        "high_warnings":       0,
-        "medium_warnings":     0,
-        "low_warnings":        0,
-        "quality_score":       100,
-        "warning_categories":  {},
+        "critical_warnings":      0,
+        "high_warnings":          0,
+        "medium_warnings":        0,
+        "low_warnings":           0,
+        "quality_score":          100,
+        "warning_categories":     {},
+        "refinement_enabled":     enable_refinement,
+        "cells_refined":          0,
+        "refinement_api_calls":   0,
+        "refinement_prompt_tokens": 0,
+        "refinement_completion_tokens": 0,
     }
 
     with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
@@ -2468,6 +2600,70 @@ def process_excel_with_progress(
             (row_num, col_idx): (text, canonical)
             for row_num, col_header, col_idx, canonical, text in cells_queue
         }
+
+        # ── Phase 2.5: Premium AI Refinement ─────────────────────────────────
+        refine_token_c: dict = {"prompt_tokens": 0, "completion_tokens": 0}
+        cells_refined  = 0
+        refine_api_calls = 0
+
+        if enable_refinement:
+            refine_queue: list[tuple] = []
+            for key, translation in results.items():
+                _, src_canonical = source_lookup.get(key, ("", "other"))
+                if _should_refine(translation, src_canonical):
+                    refine_queue.append((key, translation, src_canonical))
+
+            total_refine = len(refine_queue)
+            if refine_queue:
+                progress_bar.progress(0.65)
+                progress_container.markdown(
+                    _refinement_progress_html(sheet_name, 0, total_refine),
+                    unsafe_allow_html=True,
+                )
+
+                for batch_start in range(0, total_refine, REFINEMENT_BATCH_SIZE):
+                    batch = refine_queue[batch_start : batch_start + REFINEMENT_BATCH_SIZE]
+                    items = [(text, canonical) for _, text, canonical in batch]
+                    refined_texts = refine_batch(client, items, refine_token_c)
+                    refine_api_calls += 1
+
+                    for i, (key, orig_text, canonical) in enumerate(batch):
+                        if i >= len(refined_texts):
+                            continue
+                        new_text = refined_texts[i].strip()
+                        if not new_text or new_text == orig_text:
+                            continue
+
+                        # Safety: <br> count must be exactly preserved
+                        if orig_text.count("<br>") != new_text.count("<br>"):
+                            continue
+
+                        # Safety: name column — never allow refinement to lengthen it
+                        if canonical == "name":
+                            new_text = validate_product_name(new_text)
+                            if len(new_text) > max(len(orig_text), 40):
+                                continue
+
+                        results[key] = new_text
+                        cells_refined += 1
+
+                    done_refine = min(batch_start + len(batch), total_refine)
+                    progress_bar.progress(
+                        0.65 + (done_refine / max(total_refine, 1)) * 0.02
+                    )
+                    progress_container.markdown(
+                        _refinement_progress_html(sheet_name, done_refine, total_refine),
+                        unsafe_allow_html=True,
+                    )
+
+            # Merge refinement tokens into main counter
+            token_counter["prompt_tokens"]     += refine_token_c["prompt_tokens"]
+            token_counter["completion_tokens"] += refine_token_c["completion_tokens"]
+
+        stats["cells_refined"]                  = cells_refined
+        stats["refinement_api_calls"]           = refine_api_calls
+        stats["refinement_prompt_tokens"]       = refine_token_c["prompt_tokens"]
+        stats["refinement_completion_tokens"]   = refine_token_c["completion_tokens"]
 
         # ── Signal separation ─────────────────────────────────────────────────
         # Three independent signals — only the first two may affect Excel color:
@@ -2995,6 +3191,17 @@ def translator_page():
                     ),
                 )
             st.markdown("---")
+            enable_refinement = st.checkbox(
+                "Premium French Refinement Enabled",
+                value=True,
+                key="enable_refinement",
+                help=(
+                    "Runs a second AI pass on materialDetail, qualityDetail, name, deliveryScope, "
+                    "and variantName to produce more natural, premium French e-commerce copy. "
+                    "Short texts, pure colors, and dimensions are skipped automatically. "
+                    "Adds a small cost (~5–15% extra API tokens)."
+                ),
+            )
             highlight_warnings_in_excel = st.checkbox(
                 "Highlight review warnings in exported Excel",
                 value=False,
@@ -3032,6 +3239,7 @@ def translator_page():
                     highlight_review_warnings=highlight_warnings_in_excel,
                     max_concurrent_batches=int(max_concurrent_batches),
                     header_row=header_row,
+                    enable_refinement=enable_refinement,
                 )
                 progress_container.empty()
                 progress_bar.empty()
@@ -3110,6 +3318,16 @@ def translator_page():
                      f"{stats.get('tm_hits', 0)} hits / {stats.get('tm_misses', 0)} misses"),
                     ("✅", "Batch processing",
                      f"{stats.get('batch_count', 0)} batches · avg {stats.get('avg_batch_size', 0)} cells/req"),
+                    (
+                        "✅" if stats.get("refinement_enabled") else "ℹ️",
+                        "Premium French Refinement",
+                        (
+                            f"{stats.get('cells_refined', 0)} cells improved "
+                            f"({stats.get('refinement_api_calls', 0)} refinement batch(es))"
+                            if stats.get("refinement_enabled")
+                            else "Disabled"
+                        ),
+                    ),
                 ]
                 qg_rows_html = "".join(
                     f"""<div class="qg-row">
