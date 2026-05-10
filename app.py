@@ -24,6 +24,18 @@ from openpyxl import load_workbook
 from openpyxl.styles import PatternFill
 from openai import OpenAI
 
+from database import (
+    init_db,
+    db_load_history,
+    db_save_history_record,
+    db_save_warnings,
+    db_load_translation_memory,
+    db_save_translation_memory,
+    db_load_glossary,
+    db_save_glossary,
+    db_get_status,
+)
+
 load_dotenv()
 
 
@@ -266,23 +278,11 @@ def verify_credentials(input_email: str, input_password: str) -> bool:
 # =============================================================================
 
 def load_history() -> list:
-    if HISTORY_FILE.exists():
-        try:
-            with open(HISTORY_FILE, encoding="utf-8") as f:
-                return json.load(f)
-        except (json.JSONDecodeError, OSError):
-            return []
-    return []
+    return db_load_history()
 
 
 def save_history_record(record: dict) -> None:
-    history = load_history()
-    history.insert(0, record)
-    try:
-        with open(HISTORY_FILE, "w", encoding="utf-8") as f:
-            json.dump(history, f, indent=2, ensure_ascii=False)
-    except OSError:
-        pass
+    db_save_history_record(record)
 
 
 # =============================================================================
@@ -302,30 +302,11 @@ def _tm_key(text: str, col_type: str) -> str:
 
 
 def load_translation_memory() -> dict:
-    if TM_FILE.exists():
-        try:
-            with open(TM_FILE, encoding="utf-8") as f:
-                data = json.load(f)
-            if "entries" in data and "global_stats" in data:
-                return data
-        except (json.JSONDecodeError, OSError):
-            pass
-    return {
-        "entries": {},
-        "global_stats": {
-            "total_hits":            0,
-            "total_misses":          0,
-            "total_api_calls_saved": 0,
-        },
-    }
+    return db_load_translation_memory()
 
 
 def save_translation_memory(tm: dict) -> None:
-    try:
-        with open(TM_FILE, "w", encoding="utf-8") as f:
-            json.dump(tm, f, indent=2, ensure_ascii=False)
-    except OSError:
-        pass
+    db_save_translation_memory(tm)
 
 
 def tm_get(tm: dict, text: str, col_type: str) -> str | None:
@@ -353,14 +334,9 @@ def tm_put(tm: dict, source: str, translation: str, col_type: str) -> None:
 # =============================================================================
 
 def load_glossary() -> dict:
-    if GLOSSARY_FILE.exists():
-        try:
-            with open(GLOSSARY_FILE, encoding="utf-8") as f:
-                data = json.load(f)
-            if "terms" in data:
-                return data
-        except (json.JSONDecodeError, OSError):
-            pass
+    data = db_load_glossary()
+    if data is not None:
+        return data
     return {
         "terms": DEFAULT_GLOSSARY_TERMS.copy(),
         "stats": {"total_hits": 0, "term_counts": {}},
@@ -368,11 +344,7 @@ def load_glossary() -> dict:
 
 
 def save_glossary(glossary: dict) -> None:
-    try:
-        with open(GLOSSARY_FILE, "w", encoding="utf-8") as f:
-            json.dump(glossary, f, indent=2, ensure_ascii=False)
-    except OSError:
-        pass
+    db_save_glossary(glossary)
 
 
 def _glossary_prompt_block(glossary: dict) -> str:
@@ -1397,6 +1369,20 @@ def render_sidebar() -> str:
             ["Dark", "Light"],
             key="theme",
             label_visibility="collapsed",
+        )
+
+        st.markdown("---")
+        db_status = db_get_status()
+        dot   = "🟢" if db_status["connected"] else "🔴"
+        label = "SQLite · connected" if db_status["connected"] else "SQLite · error"
+        st.markdown(
+            f'<div style="font-size:0.72rem;color:#9ca3af;margin-top:2px;">'
+            f'{dot} <strong style="color:#e5e7eb;">{label}</strong><br>'
+            f'Jobs: {db_status["jobs"]} &nbsp;·&nbsp; '
+            f'TM: {db_status["tm_entries"]} &nbsp;·&nbsp; '
+            f'Glossary: {db_status["glossary_terms"]}'
+            f"</div>",
+            unsafe_allow_html=True,
         )
 
     return page
@@ -2640,8 +2626,9 @@ def translator_page():
                 progress_container.empty()
                 progress_bar.empty()
 
+                job_id = str(uuid.uuid4())
                 save_history_record({
-                    "id":                        str(uuid.uuid4()),
+                    "id":                        job_id,
                     "datetime":                  datetime.now().isoformat(timespec="seconds"),
                     "original_filename":         uploaded_file.name,
                     "output_filename":           output_filename,
@@ -2673,6 +2660,7 @@ def translator_page():
                     "quality_score":             stats.get("quality_score", 100),
                     "warning_categories":        stats.get("warning_categories", {}),
                 })
+                db_save_warnings(job_id, stats.get("all_warnings", []))
 
                 # ── Results ──
                 st.markdown('<div class="section-label">Results</div>', unsafe_allow_html=True)
@@ -3355,6 +3343,9 @@ def main():
         st.session_state["authenticated"] = False
     if "theme" not in st.session_state:
         st.session_state["theme"] = "Dark"
+    if "db_initialized" not in st.session_state:
+        init_db(default_glossary=DEFAULT_GLOSSARY_TERMS)
+        st.session_state["db_initialized"] = True
 
     inject_custom_css(st.session_state["theme"])
 

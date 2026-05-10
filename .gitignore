@@ -121,6 +121,16 @@ translation_history.json
 # Translation Memory — machine-generated cache, never commit
 translation_memory.json
 
+# =============================================================================
+# DATABASE
+# =============================================================================
+
+# SQLite database — ephemeral, never commit
+localization_platform.db
+*.db
+*.sqlite
+*.sqlite3
+
 
 # =============================================================================
 # TESTING

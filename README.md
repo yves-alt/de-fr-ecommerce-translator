@@ -34,7 +34,7 @@ This Streamlit web application provides a production-grade translation workflow 
 |---------|-------------|
 | **Authentication** | Secure login — credentials stored in secrets, never in code |
 | **AI Translation** | OpenAI GPT-4o-mini for context-aware product translations |
-| **Translation Memory** | JSON-backed cache: reuses past translations, tracks hits/misses/cost saved |
+| **Translation Memory** | SQLite-backed cache: reuses past translations, tracks hits/misses/cost saved |
 | **Batch Processing** | Groups 20 cells per API request — up to 20× fewer API calls |
 | **Glossary System** | 35+ DE→FR e-commerce terms injected into every prompt; editable via UI |
 | **Retry System** | Up to 3 retries with exponential backoff; rate-limit detection; notify on each retry |
@@ -46,7 +46,7 @@ This Streamlit web application provides a production-grade translation workflow 
 | **Quality Gate** | Post-translation report: residue, TM stats, batch info, protected columns |
 | **Analytics** | TM hit rate, cost saved, batch efficiency, top glossary terms, cost trends |
 | **Glossary Management** | Add/update DE→FR terms, view usage counts, reset to defaults |
-| **Translation History** | JSON-backed log of all jobs with TM hits, batch count, and cost |
+| **Translation History** | SQLite-backed log of all jobs with TM hits, batch count, cost, and quality scores |
 
 ---
 
@@ -110,7 +110,7 @@ App opens at **http://localhost:8501** — you will see the login page first.
 
 ## Translation Memory
 
-The app maintains a local `translation_memory.json` file that grows with every translation.
+The app maintains a local SQLite database (`localization_platform.db`) that stores the translation memory, history, and glossary.
 
 **How it works:**
 1. Before sending a cell to OpenAI, the app checks whether the same German text (trimmed, space-normalized) already exists in memory for the same column type.
@@ -126,7 +126,7 @@ Column types are: `name`, `materialDetail`, `other` — ensuring translations ar
 - Total memory misses (API calls made)
 - Estimated cost saved
 
-`translation_memory.json` is ignored by Git and persists across app restarts and multiple files.
+The database is ignored by Git and persists across app restarts. On Streamlit Cloud the filesystem is ephemeral, so the database resets on each deployment — this is the same behaviour as the previous JSON files.
 
 ---
 
@@ -153,7 +153,7 @@ Instead of sending one API request per cell, the app groups cells into batches.
 
 ## Glossary System
 
-The app ships with 35+ German→French e-commerce term mappings in `glossary.json`.
+The app ships with 166 German→French e-commerce and furniture term mappings stored in the SQLite database.
 
 **Default terms include:**
 
@@ -182,7 +182,7 @@ The app ships with 35+ German→French e-commerce term mappings in `glossary.jso
 - Add or update terms via a simple form
 - Reset to built-in defaults at any time
 
-`glossary.json` is ignored by Git by default. Remove it from `.gitignore` if you want to commit custom terminology to version control and share it with your team.
+Glossary terms are stored in the SQLite database and seeded automatically from `DEFAULT_GLOSSARY_TERMS` on first run. On Streamlit Cloud the database resets on deployment, so the glossary is re-seeded from code each time.
 
 ---
 
@@ -262,7 +262,7 @@ The Analytics page includes a dedicated Cost Dashboard section.
 1. Push your code to GitHub.
    - Confirm `.env` is **not** committed (check `.gitignore`)
    - Confirm no real Excel files are committed
-   - Confirm `translation_history.json`, `translation_memory.json` are **not** committed
+   - Confirm `localization_platform.db` is **not** committed (excluded by `.gitignore`)
 
 2. Go to [share.streamlit.io](https://share.streamlit.io) → **New app**
 
@@ -281,9 +281,9 @@ APP_USER_PASSWORD = "your-secure-password"
 
 ### Note on persistence (Streamlit Cloud)
 
-Translation history, Translation Memory, and the Glossary are stored in local JSON files on the app server.
-These files **reset on each redeployment** — this is expected behaviour for this version.
-A future version could use a persistent store (e.g. Supabase, Firebase) for cross-deployment persistence.
+Translation history, Translation Memory, and the Glossary are stored in a local SQLite database (`localization_platform.db`) on the app server. The database is initialised automatically on startup and the glossary is seeded from code if empty.
+
+The database **resets on each redeployment** because Streamlit Cloud uses an ephemeral filesystem — this is expected behaviour. A future version could use a persistent store (e.g. Supabase, Firebase) for cross-deployment persistence.
 
 ---
 
@@ -296,8 +296,7 @@ A future version could use a persistent store (e.g. Supabase, Firebase) for cros
 | Login password in source code | Never |
 | Real Excel/product files on GitHub | Never |
 | `secrets.toml` committed | Never (gitignored) |
-| `translation_history.json` committed | Never (gitignored) |
-| `translation_memory.json` committed | Never (gitignored) |
+| `localization_platform.db` committed | Never (gitignored) |
 | `.env.example` contains real values | Never (placeholders only) |
 
 ---
@@ -339,14 +338,13 @@ de-fr-ecommerce-translator/
 ├── .env.example                     # Local config template (no real values)
 ├── .streamlit/
 │   └── secrets.toml.example         # Streamlit Cloud secrets template
-├── .gitignore                       # Excludes .env, *.xlsx, JSON data files
+├── database.py                      # SQLite backend (history, TM, glossary)
+├── .gitignore                       # Excludes .env, *.xlsx, *.db
 └── README.md                        # This file
 ```
 
 **Runtime files (not committed):**
-- `translation_history.json` — job log
-- `translation_memory.json` — TM cache
-- `glossary.json` — terminology (optional to commit)
+- `localization_platform.db` — SQLite database (history, TM, glossary)
 
 ---
 
