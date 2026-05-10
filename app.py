@@ -1447,18 +1447,26 @@ def render_column_report(classification: dict):
     # Debug panel — shown only when automatic detection found nothing
     if not to_translate:
         with st.expander("🔍 Detection debug report", expanded=True):
-            st.caption(f"Header row detected: **row {header_row}**")
+            ws_info = classification.get("ws_info", {})
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Header row", header_row)
+            col2.metric("Columns found", ws_info.get("columns_found", len(normalized_map)))
+            col3.metric("Sheet rows", ws_info.get("max_row", "—"))
 
             all_raw = list(normalized_map.keys())
             if all_raw:
+                # Build a raw→col_idx lookup from all classification buckets
+                all_col_idx = {}
+                all_col_idx.update(protected)
+                all_col_idx.update(ignored)
                 rows = [
                     {
-                        "Raw header":        h,
-                        "Normalized":        normalized_map.get(h, ""),
-                        "Status":            (
-                            "Protected" if h in protected
-                            else "Ignored"
-                        ),
+                        "Col #":        all_col_idx.get(h, ""),
+                        "Raw header":   h,
+                        "Normalized":   normalized_map.get(h, ""),
+                        "Status":       "Protected" if h in protected else "Ignored",
+                        "Reason":       "Protected column" if h in protected
+                                        else classification.get("ignored_reasons", {}).get(h, ""),
                     }
                     for h in all_raw
                 ]
@@ -1988,18 +1996,25 @@ def detect_header_row(worksheet, max_rows: int = 10) -> tuple[int, dict]:
     Scan the first max_rows rows to find the most likely header row.
     Returns (row_number, {raw_header_text: col_index}).
     Falls back to row 1 if nothing scores well.
+
+    Uses iter_rows() exclusively — safe for both read-only and normal workbooks.
+    worksheet[row_num] is broken in read_only=True mode (openpyxl streaming reader).
     """
     best_row     = 1
     best_score   = -1
     best_headers: dict[str, int] = {}
 
-    scan_limit = min(max_rows, worksheet.max_row or 1)
+    max_row    = worksheet.max_row or max_rows
+    scan_limit = min(max_rows, max_row)
 
-    for row_num in range(1, scan_limit + 1):
+    for row_tuple in worksheet.iter_rows(min_row=1, max_row=scan_limit):
+        if not row_tuple:
+            continue
+        row_num = row_tuple[0].row
         score   = 0
         headers: dict[str, int] = {}
 
-        for cell in worksheet[row_num]:
+        for cell in row_tuple:
             if cell.value is None:
                 continue
             raw  = str(cell.value)
@@ -2015,7 +2030,8 @@ def detect_header_row(worksheet, max_rows: int = 10) -> tuple[int, dict]:
             except (ValueError, TypeError):
                 pass
 
-            headers[text] = cell.column
+            col_idx = cell.column if cell.column is not None else (len(headers) + 1)
+            headers[text] = col_idx
             score += 1  # each non-empty string cell
 
             # Bonus: contains known header keywords
@@ -2911,10 +2927,17 @@ def translator_page():
                 key="sheet_selector",
             )
 
-        header_row, peek_headers = detect_header_row(wb_peek[selected_sheet])
+        _peek_ws = wb_peek[selected_sheet]
+        header_row, peek_headers = detect_header_row(_peek_ws)
+        _ws_info = {
+            "max_row":       _peek_ws.max_row,
+            "max_column":    _peek_ws.max_column,
+            "columns_found": len(peek_headers),
+        }
         wb_peek.close()
         classification = classify_columns(peek_headers)
         classification["header_row"] = header_row
+        classification["ws_info"]    = _ws_info
 
         render_column_report(classification)
 
