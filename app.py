@@ -30,6 +30,7 @@ from openai import OpenAI
 from database import (
     init_db,
     db_load_history,
+    db_load_history_for_user,
     db_save_history_record,
     db_save_warnings,
     db_load_translation_memory,
@@ -37,6 +38,9 @@ from database import (
     db_load_glossary,
     db_save_glossary,
     db_get_status,
+    db_log_login,
+    db_get_login_activity,
+    db_get_admin_stats,
 )
 
 load_dotenv()
@@ -136,6 +140,64 @@ DEFAULT_GLOSSARY_TERMS = {
     "inkl.":         "inclus",
 }
 
+DEFAULT_NL_GLOSSARY_TERMS = {
+    "Bezug":         "bekleding",
+    "Gestell":       "onderstel",
+    "Füße":          "poten",
+    "Bettwäsche":    "beddengoed",
+    "Webstoff":      "geweven stof",
+    "Strukturstoff": "structuurstof",
+    "Samtstoff":     "fluwelen stof",
+    "Velours":       "velours",
+    "Eiche":         "eiken",
+    "Buche":         "beuk",
+    "Kiefer":        "grenen",
+    "Nussbaum":      "notelaar",
+    "Ahorn":         "esdoorn",
+    "Birke":         "berk",
+    "Massiv":        "massief",
+    "Furnier":       "fineer",
+    "lackiert":      "gelakt",
+    "geölt":         "geolieerd",
+    "gebeizt":       "gebeitst",
+    "dunkelgrau":    "donkergrijs",
+    "hellgrau":      "lichtgrijs",
+    "dunkelbraun":   "donkerbruin",
+    "hellbraun":     "lichtbruin",
+    "dunkelblau":    "donkerblauw",
+    "hellblau":      "lichtblauw",
+    "dunkelgrün":    "donkergroen",
+    "hellgrün":      "lichtgroen",
+    "Anthrazit":     "antraciet",
+    "Sandbeige":     "zandbeige",
+    "Baumwolle":     "katoen",
+    "Leinen":        "linnen",
+    "Wolle":         "wol",
+    "Sofa":          "bank",
+    "Sessel":        "fauteuil",
+    "Ecksofa":       "hoekbank",
+    "Schlafsofa":    "slaapbank",
+    "Tisch":         "tafel",
+    "Stuhl":         "stoel",
+    "Schrank":       "kast",
+    "Kommode":       "ladekast",
+    "Regal":         "boekenrek",
+    "inkl.":         "incl.",
+    "Schublade":     "lade",
+    "Türen":         "deuren",
+    "Korpus":        "romp",
+    "Maße":          "afmetingen",
+    "Breite":        "breedte",
+    "Höhe":          "hoogte",
+    "Tiefe":         "diepte",
+    "Länge":         "lengte",
+    "Lieferumfang":  "leveringsomvang",
+    "Lieferung":     "levering",
+    "Holzwerkstoff": "houtmateriaal",
+    "Spanplatte":    "spaanplaat",
+    "Massivholz":    "massief hout",
+}
+
 GERMAN_RESIDUE_WORDS = [
     "mit", "ohne", "und", "oder", "für", "aus", "inkl", "inklusive",
     "bei", "zur", "zum", "vom", "von", "samt", "sowie",
@@ -169,6 +231,12 @@ GERMAN_RESIDUE_WORDS = [
 
 FRENCH_ACCEPTABLE_WORDS = [
     "beige", "taupe", "polyester", "set", "bouclé", "boucle",
+]
+
+# Dutch words that overlap with GERMAN_RESIDUE_WORDS — suppress false positives
+DUTCH_ACCEPTABLE_WORDS = [
+    "beige", "taupe", "polyester", "set", "velours", "glas",
+    "creme", "bouclé", "boucle", "klein",
 ]
 
 # Protected column detection — two tiers to avoid false positives on short words
@@ -337,8 +405,19 @@ def _get_guest_credentials() -> tuple[str, str]:
     return os.environ.get("GUEST_EMAIL", ""), os.environ.get("GUEST_PASSWORD", "")
 
 
+def _get_justus_credentials() -> tuple[str, str]:
+    try:
+        email    = st.secrets.get("JUSTUS_EMAIL", "")
+        password = st.secrets.get("JUSTUS_PASSWORD", "")
+        if email and password:
+            return str(email), str(password)
+    except Exception:
+        pass
+    return os.environ.get("JUSTUS_EMAIL", ""), os.environ.get("JUSTUS_PASSWORD", "")
+
+
 def verify_credentials(input_email: str, input_password: str) -> str | None:
-    # Returns "admin", "guest", or None on failure
+    # Returns "admin", "standard_user", "guest", or None on failure
     email = input_email.strip().lower()
 
     admin_email, admin_password = _get_admin_credentials()
@@ -346,6 +425,12 @@ def verify_credentials(input_email: str, input_password: str) -> str | None:
         if (hmac.compare_digest(email, admin_email.strip().lower()) and
                 hmac.compare_digest(input_password, admin_password)):
             return "admin"
+
+    justus_email, justus_password = _get_justus_credentials()
+    if justus_email and justus_password:
+        if (hmac.compare_digest(email, justus_email.strip().lower()) and
+                hmac.compare_digest(input_password, justus_password)):
+            return "standard_user"
 
     guest_email, guest_password = _get_guest_credentials()
     if guest_email and guest_password:
@@ -380,8 +465,9 @@ def _tm_col_type(canonical: str) -> str:
     return "other"
 
 
-def _tm_key(text: str, col_type: str) -> str:
-    return f"{col_type}:{' '.join(text.strip().split())}"
+def _tm_key(text: str, col_type: str, target_language: str = "French") -> str:
+    lang = "nl" if target_language == "Dutch" else "fr"
+    return f"{lang}:{col_type}:{' '.join(text.strip().split())}"
 
 
 def load_translation_memory() -> dict:
@@ -392,8 +478,8 @@ def save_translation_memory(tm: dict) -> None:
     db_save_translation_memory(tm)
 
 
-def tm_get(tm: dict, text: str, col_type: str) -> str | None:
-    key   = _tm_key(text, col_type)
+def tm_get(tm: dict, text: str, col_type: str, target_language: str = "French") -> str | None:
+    key   = _tm_key(text, col_type, target_language)
     entry = tm["entries"].get(key)
     if entry is not None:
         entry["hit_count"] = entry.get("hit_count", 0) + 1
@@ -401,8 +487,8 @@ def tm_get(tm: dict, text: str, col_type: str) -> str | None:
     return None
 
 
-def tm_put(tm: dict, source: str, translation: str, col_type: str) -> None:
-    key = _tm_key(source, col_type)
+def tm_put(tm: dict, source: str, translation: str, col_type: str, target_language: str = "French") -> None:
+    key = _tm_key(source, col_type, target_language)
     if key not in tm["entries"]:
         tm["entries"][key] = {
             "translation": translation,
@@ -416,18 +502,20 @@ def tm_put(tm: dict, source: str, translation: str, col_type: str) -> None:
 # GLOSSARY SYSTEM
 # =============================================================================
 
-def load_glossary() -> dict:
-    data = db_load_glossary()
+def load_glossary(target_language: str = "French") -> dict:
+    data = db_load_glossary(target_language)
     if data is not None:
         return data
+    default = DEFAULT_NL_GLOSSARY_TERMS if target_language == "Dutch" else DEFAULT_GLOSSARY_TERMS
     return {
-        "terms": DEFAULT_GLOSSARY_TERMS.copy(),
-        "stats": {"total_hits": 0, "term_counts": {}},
+        "terms":           default.copy(),
+        "target_language": target_language,
+        "stats":           {"total_hits": 0, "term_counts": {}},
     }
 
 
-def save_glossary(glossary: dict) -> None:
-    db_save_glossary(glossary)
+def save_glossary(glossary: dict, target_language: str = "French") -> None:
+    db_save_glossary(glossary, target_language)
 
 
 def _glossary_prompt_block(glossary: dict) -> str:
@@ -1515,19 +1603,46 @@ def render_column_report(classification: dict):
 
 def render_sidebar() -> str:
     with st.sidebar:
-        st.markdown("""
+        target_language = st.session_state.get("target_language", "French")
+        lang_code       = "NL" if target_language == "Dutch" else "FR"
+        lang_flag       = "🇳🇱" if target_language == "Dutch" else "🇫🇷"
+
+        st.markdown(f"""
         <div class="sb-brand">
-            <div class="sb-wordmark"><div class="sb-dot"></div>DE→FR Translator</div>
+            <div class="sb-wordmark"><div class="sb-dot"></div>DE→{lang_code} Localization</div>
             <div class="sb-org">Home24 Internal</div>
         </div>
         """, unsafe_allow_html=True)
 
+        # Target language badge
+        badge_color = "#e8523a" if target_language == "Dutch" else "#7c5cfc"
+        st.markdown(
+            f'<div style="display:inline-flex;align-items:center;gap:6px;'
+            f'padding:4px 10px;border-radius:6px;background:rgba({("232,82,58" if target_language=="Dutch" else "124,92,252")},0.1);'
+            f'border:1px solid rgba({("232,82,58" if target_language=="Dutch" else "124,92,252")},0.22);'
+            f'font-size:11px;font-weight:700;color:{badge_color};margin-bottom:8px;">'
+            f'{lang_flag} Target: {target_language} ({lang_code})'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+
+        if st.button("Switch language", key="switch_lang_btn", use_container_width=True):
+            st.session_state["language_selected"] = False
+            st.session_state.pop("target_language", None)
+            st.session_state.pop("_tr_result", None)
+            st.rerun()
+
         st.markdown("---")
         st.markdown('<span class="sb-nav-label">Navigation</span>', unsafe_allow_html=True)
 
+        role = st.session_state.get("user_role", "")
+        nav_options = ["Translator", "Translation History", "Analytics", "Glossary", "Translation Memory"]
+        if role == "admin":
+            nav_options.append("Admin Dashboard")
+
         page = st.radio(
             "Navigation",
-            ["Translator", "Translation History", "Analytics", "Glossary", "Translation Memory"],
+            nav_options,
             key="nav_radio",
             label_visibility="collapsed",
         )
@@ -1535,8 +1650,15 @@ def render_sidebar() -> str:
         st.markdown("---")
 
         email = st.session_state.get("user_email", "")
-        role  = st.session_state.get("user_role", "")
-        role_label = "Guest Demo Access" if role == "guest" else ""
+        if role == "guest":
+            role_label = "Guest Demo"
+        elif role == "admin":
+            role_label = "Administrator"
+        elif role == "standard_user":
+            role_label = "Standard User"
+        else:
+            role_label = ""
+
         st.markdown(f"""
         <div class="sb-user">
             <span class="sb-user-label">Signed in as</span>
@@ -1546,9 +1668,10 @@ def render_sidebar() -> str:
         """, unsafe_allow_html=True)
 
         if st.button("Sign out", key="logout_btn", use_container_width=True):
+            for key in ["authenticated", "user_role", "user_email", "language_selected",
+                        "target_language", "session_id", "_tr_result", "_tr_result_file"]:
+                st.session_state.pop(key, None)
             st.session_state["authenticated"] = False
-            st.session_state.pop("user_role", None)
-            st.session_state.pop("user_email", None)
             st.rerun()
 
         st.markdown("---")
@@ -1572,7 +1695,7 @@ def render_footer():
     st.markdown("""
     <div class="site-footer">
         <span>Built by <strong class="footer-author">Yves Koulle Banga</strong></span>
-        <span class="footer-version">DE→FR Translator · v5.0</span>
+        <span class="footer-version">DE Multilingual Translator · v6.0</span>
     </div>
     """, unsafe_allow_html=True)
 
@@ -1598,16 +1721,17 @@ def validate_product_name(name: str) -> str:
     return name.strip()
 
 
-def detect_german_residue(text: str) -> list[str]:
+def detect_german_residue(text: str, target_language: str = "French") -> list[str]:
     if not text:
         return []
+    acceptable = DUTCH_ACCEPTABLE_WORDS if target_language == "Dutch" else FRENCH_ACCEPTABLE_WORDS
     detected = []
     masked = text.lower()
-    for acceptable in FRENCH_ACCEPTABLE_WORDS:
-        masked = masked.replace(acceptable.lower(), "X" * len(acceptable))
+    for word in acceptable:
+        masked = masked.replace(word.lower(), "X" * len(word))
     for word in GERMAN_RESIDUE_WORDS:
         word_lower = word.lower()
-        if word_lower in [w.lower() for w in FRENCH_ACCEPTABLE_WORDS]:
+        if word_lower in [w.lower() for w in acceptable]:
             continue
         if re.compile(r'\b' + re.escape(word_lower) + r'\b', re.IGNORECASE).search(masked):
             detected.append(word)
@@ -1764,7 +1888,10 @@ def get_openai_client():
 # TRANSLATION FUNCTIONS
 # =============================================================================
 
-def _build_system_prompt(canonical: str, glossary_block: str) -> str:
+def _build_system_prompt(canonical: str, glossary_block: str, target_language: str = "French") -> str:
+    if target_language == "Dutch":
+        return _build_nl_system_prompt(canonical, glossary_block)
+    # French prompts
     if canonical == "name":
         return (
             "You are a professional translator for Home24 France e-commerce.\n"
@@ -1803,6 +1930,123 @@ def _build_system_prompt(canonical: str, glossary_block: str) -> str:
         )
 
 
+def _build_nl_system_prompt(canonical: str, glossary_block: str) -> str:
+    """Dutch-specific system prompts for each column type."""
+    if canonical == "name":
+        return (
+            "You are a professional Dutch translator for Home24 Netherlands e-commerce.\n"
+            "Translate the German product name to Dutch following these STRICT rules:\n"
+            "- Maximum 40 characters total\n"
+            "- No commas allowed\n"
+            "- No brackets or parentheses allowed\n"
+            "- Natural, commercial Dutch product name for furniture e-commerce\n"
+            "- \"Sofa\" → \"bank\"\n"
+            "- \"Sessel\" → \"fauteuil\"\n"
+            "- \"Ecksofa\" → \"hoekbank\"\n"
+            "- \"Schlafsofa\" → \"slaapbank\"\n"
+            "- \"Sitzer\" → \"zits\" (e.g., \"3-Sitzer\" = \"3-zits\")\n"
+            "- Preserve model/collection names: Arin, Bocca, Level36, Sonoma\n"
+            "- Use natural Dutch furniture terminology, not literal German"
+            f"{glossary_block}\n"
+            "Return ONLY the translated text, nothing else."
+        )
+    elif canonical == "colorDetail":
+        return (
+            "You are a professional Dutch translator for Home24 Netherlands e-commerce.\n"
+            "Translate German color descriptions to natural Dutch:\n"
+            "- dunkelgrau → donkergrijs, hellgrau → lichtgrijs\n"
+            "- dunkelbraun → donkerbruin, hellbraun → lichtbruin\n"
+            "- schwarz → zwart, weiß → wit, grau → grijs\n"
+            "- blau → blauw, grün → groen, braun → bruin\n"
+            "- sand/Sandbeige → zandkleurig/zandbeige\n"
+            "- Anthrazit → antraciet\n"
+            "- Preserve color codes and numbers exactly"
+            f"{glossary_block}\n"
+            "Return ONLY the translated text, nothing else."
+        )
+    elif canonical == "materialDetail":
+        return (
+            "You are a professional Dutch translator for Home24 Netherlands e-commerce.\n"
+            "Translate the German material description to natural Dutch:\n"
+            "- Bezug → bekleding, Gestell → onderstel, Füße → poten\n"
+            "- Korpus → romp, Schublade → lade, Türen → deuren\n"
+            "- Holzwerkstoff → houtmateriaal, Spanplatte → spaanplaat\n"
+            "- Massivholz → massief hout, Holz → hout\n"
+            "- Eiche → eiken, Buche → beuk, Kiefer → grenen\n"
+            "- Preserve <br> tags exactly — NEVER replace them with semicolons\n"
+            "- NEVER use semicolons (;) as property separators\n"
+            "- Natural Dutch furniture/material terminology"
+            f"{glossary_block}\n"
+            "Return ONLY the translated text, nothing else."
+        )
+    elif canonical == "textileCompositionCover1":
+        return (
+            "You are a professional Dutch translator for Home24 Netherlands e-commerce.\n"
+            "Translate the German textile composition to Dutch:\n"
+            "- Baumwolle → katoen, Polyester → polyester\n"
+            "- Wolle → wol, Leinen → linnen, Viskose → viscose\n"
+            "- Seide → zijde, Acryl → acryl, Elasthan → elastaan\n"
+            "- Preserve all percentage numbers exactly (e.g. 80% katoen)\n"
+            "- Use lowercase for fiber names after percentages"
+            f"{glossary_block}\n"
+            "Return ONLY the translated text, nothing else."
+        )
+    elif canonical == "deliveryScope":
+        return (
+            "You are a professional Dutch translator for Home24 Netherlands e-commerce.\n"
+            "Translate German delivery scope to natural Dutch:\n"
+            "- Lieferumfang → leveringsomvang\n"
+            "- Lieferung → levering\n"
+            "- inklusive/inkl. → inclusief/incl.\n"
+            "- Natural Dutch e-commerce language"
+            f"{glossary_block}\n"
+            "Return ONLY the translated text, nothing else."
+        )
+    elif canonical == "otherMeasurements":
+        return (
+            "You are a professional Dutch translator for Home24 Netherlands e-commerce.\n"
+            "Translate German measurements/dimensions to Dutch:\n"
+            "- Maße/Abmessungen → afmetingen\n"
+            "- Breite → breedte, Höhe → hoogte, Tiefe → diepte, Länge → lengte\n"
+            "- Preserve ALL numbers, units, and symbols exactly\n"
+            "- Do not invent or change any dimension values"
+            f"{glossary_block}\n"
+            "Return ONLY the translated text, nothing else."
+        )
+    elif canonical == "qualityDetail":
+        return (
+            "You are a professional Dutch translator for Home24 Netherlands e-commerce.\n"
+            "Translate German quality details to natural Dutch:\n"
+            "- Professional Dutch furniture e-commerce language\n"
+            "- Fluent and commercial but not exaggerated\n"
+            "- Preserve <br> tags exactly as they appear\n"
+            "- Do not invent product information"
+            f"{glossary_block}\n"
+            "Return ONLY the translated text, nothing else."
+        )
+    elif canonical == "variantName":
+        return (
+            "You are a professional Dutch translator for Home24 Netherlands e-commerce.\n"
+            "Translate German variant names to Dutch:\n"
+            "- Natural Dutch\n"
+            "- Preserve model numbers and collection names\n"
+            "- Short and commercial"
+            f"{glossary_block}\n"
+            "Return ONLY the translated text, nothing else."
+        )
+    else:
+        return (
+            "You are a professional Dutch translator for Home24 Netherlands e-commerce.\n"
+            "Translate the German text to natural Dutch:\n"
+            "- Use natural Dutch, not literal German translation\n"
+            "- Remove all German traces\n"
+            "- Preserve <br> tags exactly as they appear\n"
+            "- Preserve numbers, percentages and dimensions exactly"
+            f"{glossary_block}\n"
+            "Return ONLY the translated text, nothing else."
+        )
+
+
 def translate_batch(
     client,
     texts: list[str],
@@ -1811,6 +2055,7 @@ def translate_batch(
     glossary: dict,
     glossary_run_stats: dict,
     notify_fn=None,
+    target_language: str = "French",
 ) -> list[str]:
     if not texts:
         return []
@@ -1829,22 +2074,50 @@ def translate_batch(
         for term, count in all_hits.items():
             tc[term] = tc.get(term, 0) + count
 
-    if canonical == "name":
-        batch_rules = (
-            "Rules for each product name:\n"
-            "- Maximum 40 characters, no commas, no brackets\n"
-            "- Natural commercial French\n"
-            "- \"Sofa\"→\"Canapé\", \"Sessel\"→\"Fauteuil\", "
-            "\"Ecksofa\"→\"Canapé d'angle\", \"Sitzer\"→\"places\""
-        )
-    elif canonical == "materialDetail":
-        batch_rules = "- Preserve <br> tags exactly — NEVER replace with semicolons\n- NEVER use semicolons (;) as property separators\n- Natural French material terminology"
+    if target_language == "Dutch":
+        if canonical == "name":
+            batch_rules = (
+                "Rules for each product name:\n"
+                "- Maximum 40 characters, no commas, no brackets\n"
+                "- Natural commercial Dutch furniture e-commerce\n"
+                "- \"Sofa\"→\"bank\", \"Sessel\"→\"fauteuil\", "
+                "\"Ecksofa\"→\"hoekbank\", \"Schlafsofa\"→\"slaapbank\", \"Sitzer\"→\"zits\""
+            )
+        elif canonical == "materialDetail":
+            batch_rules = (
+                "- Preserve <br> tags exactly — NEVER replace with semicolons\n"
+                "- NEVER use semicolons (;) as property separators\n"
+                "- Natural Dutch furniture/material terminology\n"
+                "- Bezug→bekleding, Gestell→onderstel, Füße→poten"
+            )
+        else:
+            batch_rules = (
+                "- Natural Dutch, not literal German\n"
+                "- Remove all German traces\n"
+                "- Preserve <br> tags exactly\n"
+                "- Preserve numbers, percentages and dimensions"
+            )
+        store_label = "Home24 Netherlands"
+        target_label = "Dutch"
     else:
-        batch_rules = "- Natural French, not literal\n- Remove all German traces\n- Preserve <br> tags exactly"
+        if canonical == "name":
+            batch_rules = (
+                "Rules for each product name:\n"
+                "- Maximum 40 characters, no commas, no brackets\n"
+                "- Natural commercial French\n"
+                "- \"Sofa\"→\"Canapé\", \"Sessel\"→\"Fauteuil\", "
+                "\"Ecksofa\"→\"Canapé d'angle\", \"Sitzer\"→\"places\""
+            )
+        elif canonical == "materialDetail":
+            batch_rules = "- Preserve <br> tags exactly — NEVER replace with semicolons\n- NEVER use semicolons (;) as property separators\n- Natural French material terminology"
+        else:
+            batch_rules = "- Natural French, not literal\n- Remove all German traces\n- Preserve <br> tags exactly"
+        store_label = "Home24 France"
+        target_label = "French"
 
     system_prompt = (
-        "You are a professional translator for Home24 France e-commerce.\n"
-        f"Translate each German text to French.\n{batch_rules}{glossary_block}\n\n"
+        f"You are a professional translator for {store_label} e-commerce.\n"
+        f"Translate each German text to {target_label}.\n{batch_rules}{glossary_block}\n\n"
         f"Return ONLY a valid JSON array of exactly {n} translated strings, "
         "in the same order as the input. No other text."
     )
@@ -1886,7 +2159,7 @@ def translate_batch(
         break
 
     # Fallback: single-cell translation for each item
-    return _fallback_single_translations(client, texts, canonical, token_counter, glossary, notify_fn=notify_fn)
+    return _fallback_single_translations(client, texts, canonical, token_counter, glossary, notify_fn=notify_fn, target_language=target_language)
 
 
 def _fallback_single_translations(
@@ -1896,9 +2169,11 @@ def _fallback_single_translations(
     token_counter: dict,
     glossary: dict,
     notify_fn=None,
+    target_language: str = "French",
 ) -> list[str]:
     glossary_block = _glossary_prompt_block(glossary)
-    system_prompt  = _build_system_prompt(canonical, glossary_block)
+    system_prompt  = _build_system_prompt(canonical, glossary_block, target_language)
+    target_label   = "Dutch" if target_language == "Dutch" else "French"
     results        = []
     for text in texts:
         try:
@@ -1907,7 +2182,7 @@ def _fallback_single_translations(
                     model=OPENAI_MODEL,
                     messages=[
                         {"role": "system", "content": system_prompt},
-                        {"role": "user",   "content": f"Translate to French:\n\n{t}"},
+                        {"role": "user",   "content": f"Translate to {target_label}:\n\n{t}"},
                     ],
                     temperature=0.3,
                     max_tokens=500,
@@ -1932,6 +2207,7 @@ def _run_batch_task(
     glossary: dict,
     retry_counter: list,
     retry_lock: threading.Lock,
+    target_language: str = "French",
 ) -> dict:
     """Worker: runs one translation batch in a thread. No shared-state mutations."""
     local_tokens  = {"prompt_tokens": 0, "completion_tokens": 0}
@@ -1949,6 +2225,7 @@ def _run_batch_task(
             client, texts, canonical,
             local_tokens, glossary, local_glossary,
             notify_fn=_notify,
+            target_language=target_language,
         )
     except Exception:
         failed       = True
@@ -1967,36 +2244,67 @@ def _run_batch_task(
     }
 
 
-def fix_german_residue(client, text: str, column_name: str, token_counter: dict | None = None) -> str:
+def fix_german_residue(
+    client,
+    text: str,
+    column_name: str,
+    token_counter: dict | None = None,
+    target_language: str = "French",
+) -> str:
     if not text:
         return text
 
-    extra_rules = ""
-    if column_name == "name":
-        extra_rules = """
-- Maximum 40 characters, no commas or brackets
-- "Sofa" → "Canapé" / "Sessel" → "Fauteuil" / "Sitzer" → "places\""""
-    elif column_name == "materialDetail":
-        extra_rules = """
-- "Bezug" = "Revêtement" / "Füße" = "Pieds" / "Buche" = "hêtre" / "lackiert" = "verni"
-- Preserve <br> tags exactly — NEVER replace them with semicolons
-- NEVER use semicolons (;) as property separators"""
-
-    fix_prompt = f"""This French text still contains German words.
-Rewrite it as clean, natural French for Home24 France.
-Replace ALL German words with French equivalents.
-{extra_rules}
-
-Text: {text}
-
-Return ONLY the corrected French text."""
+    if target_language == "Dutch":
+        if column_name == "name":
+            extra_rules = (
+                "\n- Maximum 40 characters, no commas or brackets"
+                "\n- \"Sofa\" → \"bank\" / \"Sessel\" → \"fauteuil\" / \"Sitzer\" → \"zits\""
+            )
+        elif column_name == "materialDetail":
+            extra_rules = (
+                "\n- Bezug → bekleding / Füße → poten / Gestell → onderstel"
+                "\n- Preserve <br> tags exactly — NEVER replace them with semicolons"
+                "\n- NEVER use semicolons (;) as property separators"
+            )
+        else:
+            extra_rules = ""
+        fix_prompt = (
+            f"This Dutch text still contains German words.\n"
+            f"Rewrite it as clean, natural Dutch for Home24 Netherlands.\n"
+            f"Replace ALL German words with Dutch equivalents.{extra_rules}\n\n"
+            f"Text: {text}\n\n"
+            f"Return ONLY the corrected Dutch text."
+        )
+        sys_msg = "You remove German words from Dutch texts for Home24 Netherlands e-commerce."
+    else:
+        if column_name == "name":
+            extra_rules = (
+                "\n- Maximum 40 characters, no commas or brackets"
+                "\n- \"Sofa\" → \"Canapé\" / \"Sessel\" → \"Fauteuil\" / \"Sitzer\" → \"places\""
+            )
+        elif column_name == "materialDetail":
+            extra_rules = (
+                "\n- \"Bezug\" = \"Revêtement\" / \"Füße\" = \"Pieds\" / \"Buche\" = \"hêtre\" / \"lackiert\" = \"verni\""
+                "\n- Preserve <br> tags exactly — NEVER replace them with semicolons"
+                "\n- NEVER use semicolons (;) as property separators"
+            )
+        else:
+            extra_rules = ""
+        fix_prompt = (
+            f"This French text still contains German words.\n"
+            f"Rewrite it as clean, natural French for Home24 France.\n"
+            f"Replace ALL German words with French equivalents.{extra_rules}\n\n"
+            f"Text: {text}\n\n"
+            f"Return ONLY the corrected French text."
+        )
+        sys_msg = "You remove German words from French texts for Home24 France e-commerce."
 
     try:
         response = _api_call_with_retry(
             lambda: client.chat.completions.create(
                 model=OPENAI_MODEL,
                 messages=[
-                    {"role": "system", "content": "You remove German words from French texts for Home24 France e-commerce."},
+                    {"role": "system", "content": sys_msg},
                     {"role": "user",   "content": fix_prompt},
                 ],
                 temperature=0.2,
@@ -2044,6 +2352,7 @@ def refine_batch(
     client,
     items: list[tuple[str, str]],
     token_counter: dict,
+    target_language: str = "French",
 ) -> list[str]:
     """
     items: list of (translated_text, canonical_column_type)
@@ -2056,25 +2365,45 @@ def refine_batch(
     n     = len(items)
     texts = [t for t, _ in items]
 
-    system_prompt = (
-        "You are a premium French copywriter for Home24 France furniture e-commerce.\n"
-        "Improve the naturalness and professional tone of these French product texts.\n\n"
-        "Rules — follow every one:\n"
-        "- Preserve the exact meaning — do NOT invent or remove product information\n"
-        "- Improve French fluency and furniture vocabulary\n"
-        "- Avoid awkward literal translations from German patterns\n"
-        "  Examples: 'décoré' → 'revêtu', 'revêtu d\\'un film décoratif' → 'revêtu de film mélaminé'\n"
-        "- Use established French furniture/e-commerce terminology\n"
-        "- Preserve ALL <br> tags exactly — do not add, remove, or move them\n"
-        "- NEVER replace <br> tags with semicolons (;)\n"
-        "- NEVER use semicolons as property separators\n"
-        "- Do NOT modify numbers, dimensions, or percentages\n"
-        "- Keep product names concise — do NOT make them longer\n"
-        "- Do not exaggerate marketing claims\n"
-        "- If the text is already natural and correct, return it unchanged\n\n"
-        f"Return ONLY a valid JSON array of exactly {n} strings, in input order. No other text."
-    )
-    user_msg = f"Refine these {n} French texts:\n{json.dumps(texts, ensure_ascii=False)}"
+    if target_language == "Dutch":
+        system_prompt = (
+            "You are a premium Dutch copywriter for Home24 Netherlands furniture e-commerce.\n"
+            "Improve the naturalness and professional tone of these Dutch product texts.\n\n"
+            "Rules — follow every one:\n"
+            "- Preserve the exact meaning — do NOT invent or remove product information\n"
+            "- Improve Dutch fluency and furniture vocabulary\n"
+            "- Avoid awkward literal translations from German patterns\n"
+            "- Use established Dutch furniture/e-commerce terminology\n"
+            "- Preserve ALL <br> tags exactly — do not add, remove, or move them\n"
+            "- NEVER replace <br> tags with semicolons (;)\n"
+            "- NEVER use semicolons as property separators\n"
+            "- Do NOT modify numbers, dimensions, or percentages\n"
+            "- Keep product names concise — do NOT make them longer\n"
+            "- Do not exaggerate marketing claims\n"
+            "- If the text is already natural and correct, return it unchanged\n\n"
+            f"Return ONLY a valid JSON array of exactly {n} strings, in input order. No other text."
+        )
+        user_msg = f"Refine these {n} Dutch texts:\n{json.dumps(texts, ensure_ascii=False)}"
+    else:
+        system_prompt = (
+            "You are a premium French copywriter for Home24 France furniture e-commerce.\n"
+            "Improve the naturalness and professional tone of these French product texts.\n\n"
+            "Rules — follow every one:\n"
+            "- Preserve the exact meaning — do NOT invent or remove product information\n"
+            "- Improve French fluency and furniture vocabulary\n"
+            "- Avoid awkward literal translations from German patterns\n"
+            "  Examples: 'décoré' → 'revêtu', 'revêtu d\\'un film décoratif' → 'revêtu de film mélaminé'\n"
+            "- Use established French furniture/e-commerce terminology\n"
+            "- Preserve ALL <br> tags exactly — do not add, remove, or move them\n"
+            "- NEVER replace <br> tags with semicolons (;)\n"
+            "- NEVER use semicolons as property separators\n"
+            "- Do NOT modify numbers, dimensions, or percentages\n"
+            "- Keep product names concise — do NOT make them longer\n"
+            "- Do not exaggerate marketing claims\n"
+            "- If the text is already natural and correct, return it unchanged\n\n"
+            f"Return ONLY a valid JSON array of exactly {n} strings, in input order. No other text."
+        )
+        user_msg = f"Refine these {n} French texts:\n{json.dumps(texts, ensure_ascii=False)}"
 
     try:
         response = _api_call_with_retry(
@@ -2290,6 +2619,7 @@ def generate_csv_export(
     original_filename: str,
     header_row: int = 1,
     force_exclude_header: str | None = None,
+    target_language: str = "French",
 ) -> tuple[bytes | None, str | None, str | None]:
     """
     Reads the translated workbook from bytes, drops the name column, and
@@ -2338,10 +2668,14 @@ def generate_csv_export(
         return None, None, None
 
     # Build CSV content
+    lang_prefix = "NL" if target_language == "Dutch" else "FR"
     keep_cols = [i for i in range(len(headers)) if i != exclude_idx]
-    csv_filename = "FR-" + original_filename.replace(".xlsx", "").replace(".xls", "") + ".csv"
-    if not csv_filename.startswith("FR-"):
-        csv_filename = "FR-" + csv_filename
+    base_name = original_filename.replace(".xlsx", "").replace(".xls", "")
+    # Strip any existing language prefix before adding the correct one
+    for pfx in ("FR-", "NL-"):
+        if base_name.startswith(pfx):
+            base_name = base_name[len(pfx):]
+    csv_filename = f"{lang_prefix}-{base_name}.csv"
 
     lines: list[str] = []
     for row in ws.iter_rows(min_row=header_row, values_only=True):
@@ -2643,10 +2977,11 @@ def process_excel_with_progress(
     max_concurrent_batches: int = DEFAULT_MAX_CONCURRENT,
     header_row: int = 1,
     enable_refinement: bool = True,
+    target_language: str = "French",
 ) -> tuple[BytesIO, dict]:
     client   = get_openai_client()
     tm       = load_translation_memory()
-    glossary = load_glossary()
+    glossary = load_glossary(target_language)
 
     token_counter      = {"prompt_tokens": 0, "completion_tokens": 0}
     glossary_run_stats: dict = {"total_hits": 0, "term_counts": {}}
@@ -2732,7 +3067,7 @@ def process_excel_with_progress(
 
         for row_num, col_header, col_idx, canonical, text in cells_queue:
             col_type = _tm_col_type(canonical)
-            cached   = tm_get(tm, text, col_type)
+            cached   = tm_get(tm, text, col_type, target_language)
             if cached is not None:
                 results[(row_num, col_idx)] = cached
                 stats["tm_hits"] += 1
@@ -2770,6 +3105,7 @@ def process_excel_with_progress(
                 executor.submit(
                     _run_batch_task,
                     client, bid, batch_items, canonical, glossary, retry_counter, retry_lock,
+                    target_language,
                 ): bid
                 for bid, (batch_items, canonical) in enumerate(batch_list)
             }
@@ -2815,7 +3151,7 @@ def process_excel_with_progress(
                 if canonical == "name":
                     tr = validate_product_name(tr)
                 results[(row_num, col_idx)] = tr
-                tm_put(tm, text, tr, _tm_col_type(canonical))
+                tm_put(tm, text, tr, _tm_col_type(canonical), target_language)
                 stats["cells_translated"] += 1
 
         # Count TM hits as translated
@@ -2850,7 +3186,7 @@ def process_excel_with_progress(
             )[:5]
         )
         update_glossary_stats(glossary, glossary_run_stats.get("term_counts", {}))
-        save_glossary(glossary)
+        save_glossary(glossary, target_language)
 
         # Build source lookup for quality analysis
         source_lookup: dict[tuple, tuple] = {
@@ -2881,7 +3217,7 @@ def process_excel_with_progress(
                 for batch_start in range(0, total_refine, REFINEMENT_BATCH_SIZE):
                     batch = refine_queue[batch_start : batch_start + REFINEMENT_BATCH_SIZE]
                     items = [(text, canonical) for _, text, canonical in batch]
-                    refined_texts = refine_batch(client, items, refine_token_c)
+                    refined_texts = refine_batch(client, items, refine_token_c, target_language)
                     refine_api_calls += 1
 
                     for i, (key, orig_text, canonical) in enumerate(batch):
@@ -3036,13 +3372,13 @@ def process_excel_with_progress(
 
                 text = str(cell.value)
                 for _ in range(3):
-                    detected = detect_german_residue(text)
+                    detected = detect_german_residue(text, target_language)
                     if not detected:
                         break
-                    text = fix_german_residue(client, text, canonical, token_counter)
+                    text = fix_german_residue(client, text, canonical, token_counter, target_language)
                     stats["residue_corrections"] += 1
                 else:
-                    detected = detect_german_residue(text)
+                    detected = detect_german_residue(text, target_language)
                     if detected:
                         stats["unresolved_warnings"] += 1
                         stats["warning_details"].append({
@@ -3073,11 +3409,11 @@ def process_excel_with_progress(
                 if cell.value is None or str(cell.value).strip() == "":
                     continue
                 text     = str(cell.value)
-                detected = detect_german_residue(text)
+                detected = detect_german_residue(text, target_language)
                 if detected:
-                    corrected = fix_german_residue(client, text, canonical, token_counter)
+                    corrected = fix_german_residue(client, text, canonical, token_counter, target_language)
                     stats["residue_corrections"] += 1
-                    if detect_german_residue(corrected):
+                    if detect_german_residue(corrected, target_language):
                         already = any(
                             w["row"] == row_num and w["column"] == col_header
                             for w in stats["warning_details"]
@@ -3123,16 +3459,15 @@ def process_excel_with_progress(
         stats["warning_categories"] = dict(_cat_counts)
         stats["review_count"]       = len(all_warnings)
 
-        # ── Final capitalisation pass ─────────────────────────────────────────
-        # Runs on every translated cell after all translation, refinement, and
-        # residue-fixing passes are complete.
-        for row_num in range(data_start_row, worksheet.max_row + 1):
-            for col_header, (col_idx, canonical) in to_translate.items():
-                cell = worksheet.cell(row=row_num, column=col_idx)
-                if cell.value and str(cell.value).strip():
-                    cell.value = apply_french_capitalization_rules(
-                        str(cell.value), canonical, glossary
-                    )
+        # ── Final capitalisation pass (French only) ───────────────────────────
+        if target_language == "French":
+            for row_num in range(data_start_row, worksheet.max_row + 1):
+                for col_header, (col_idx, canonical) in to_translate.items():
+                    cell = worksheet.cell(row=row_num, column=col_idx)
+                    if cell.value and str(cell.value).strip():
+                        cell.value = apply_french_capitalization_rules(
+                            str(cell.value), canonical, glossary
+                        )
 
         progress_bar.progress(1.0)
 
@@ -3305,9 +3640,13 @@ def login_page():
             else:
                 role = verify_credentials(email_input, password_input)
                 if role:
-                    st.session_state["authenticated"] = True
-                    st.session_state["user_role"]     = role
-                    st.session_state["user_email"]    = email_input.strip().lower()
+                    session_id = str(uuid.uuid4())
+                    st.session_state["authenticated"]    = True
+                    st.session_state["user_role"]        = role
+                    st.session_state["user_email"]       = email_input.strip().lower()
+                    st.session_state["session_id"]       = session_id
+                    st.session_state["language_selected"] = False
+                    db_log_login(email_input.strip().lower(), role, session_id)
                     st.rerun()
                 else:
                     st.error("Invalid email or password.")
@@ -3320,8 +3659,11 @@ def login_page():
 # =============================================================================
 
 def translator_page():
+    target_language = st.session_state.get("target_language", "French")
+    lang_code       = "NL" if target_language == "Dutch" else "FR"
+    lang_label      = "Dutch (NL)" if target_language == "Dutch" else "French (FR)"
     render_page_header(
-        "German → French Translator",
+        f"German → {lang_label} Translator",
         "Upload a German Excel file to begin translation",
     )
 
@@ -3351,7 +3693,7 @@ def translator_page():
 
         st.markdown(f'<div class="file-chip">📄 {uploaded_file.name}</div>', unsafe_allow_html=True)
 
-        output_filename  = f"FR-{uploaded_file.name}"
+        output_filename  = f"{lang_code}-{uploaded_file.name}"
         wb_peek          = load_workbook(BytesIO(uploaded_file.getvalue()), read_only=True, data_only=True)
         available_sheets = wb_peek.sheetnames
         auto_sheet       = detect_target_sheet(available_sheets)
@@ -3440,12 +3782,12 @@ def translator_page():
                 )
             st.markdown("---")
             enable_refinement = st.checkbox(
-                "Premium French Refinement Enabled",
+                f"Premium {target_language} Refinement Enabled",
                 value=True,
                 key="enable_refinement",
                 help=(
-                    "Runs a second AI pass on materialDetail, qualityDetail, name, deliveryScope, "
-                    "and variantName to produce more natural, premium French e-commerce copy. "
+                    f"Runs a second AI pass on materialDetail, qualityDetail, name, deliveryScope, "
+                    f"and variantName to produce more natural, premium {target_language} e-commerce copy. "
                     "Short texts, pure colors, and dimensions are skipped automatically. "
                     "Adds a small cost (~5–15% extra API tokens)."
                 ),
@@ -3488,6 +3830,7 @@ def translator_page():
                     max_concurrent_batches=int(max_concurrent_batches),
                     header_row=header_row,
                     enable_refinement=enable_refinement,
+                    target_language=target_language,
                 )
                 progress_container.empty()
                 progress_bar.empty()
@@ -3495,7 +3838,8 @@ def translator_page():
                 # Generate CSV before saving history so the record is accurate
                 _excel_data = output_bytes.getvalue()
                 _csv_bytes, _csv_filename, _csv_removed_col = generate_csv_export(
-                    _excel_data, selected_sheet, uploaded_file.name, header_row=header_row,
+                    _excel_data, selected_sheet, uploaded_file.name,
+                    header_row=header_row, target_language=target_language,
                 )
 
                 job_id = str(uuid.uuid4())
@@ -3506,7 +3850,10 @@ def translator_page():
                     "output_filename":           output_filename,
                     "sheet_name":                selected_sheet,
                     "source_language":           "German",
-                    "target_language":           "French",
+                    "target_language":           target_language,
+                    "output_prefix":             lang_code,
+                    "user_email":                st.session_state.get("user_email", ""),
+                    "user_role":                 st.session_state.get("user_role", ""),
                     "cells_translated":          stats["cells_translated"],
                     "cells_skipped":             stats["cells_skipped"],
                     "residue_corrections":       stats["residue_corrections"],
@@ -3771,12 +4118,12 @@ def translator_page():
 # =============================================================================
 
 def history_page():
-    render_page_header(
-        "Translation History",
-        "All previous translation jobs — most recent first",
-    )
+    user_email = st.session_state.get("user_email", "")
+    user_role  = st.session_state.get("user_role", "")
+    subtitle   = "All jobs (admin view)" if user_role == "admin" else "Your translation jobs — most recent first"
+    render_page_header("Translation History", subtitle)
 
-    history = load_history()
+    history = db_load_history_for_user(user_email, user_role)
 
     st.markdown("""
     <div class="cloud-note">
@@ -3831,8 +4178,9 @@ def history_page():
         dt  = r.get("datetime", "")[:16].replace("T", " ")
         c   = r.get("estimated_cost_usd")
         qs  = r.get("quality_score")
-        rows.append({
+        row = {
             "Date / Time":     dt,
+            "Lang":            r.get("output_prefix", "FR"),
             "File":            r.get("original_filename", ""),
             "Sheet":           r.get("sheet_name", ""),
             "Translated":      r.get("cells_translated", 0),
@@ -3840,10 +4188,12 @@ def history_page():
             "Critical":        r.get("critical_warnings", "—"),
             "High":            r.get("high_warnings", "—"),
             "Warnings (total)": r.get("total_warnings", r.get("unresolved_warnings", 0)),
-            "Residue Fixes":   r.get("residue_corrections", 0),
             "Time":            r.get("processing_time_formatted", ""),
             "Est. Cost (USD)": f"${c:.4f}" if c is not None else "—",
-        })
+        }
+        if user_role == "admin":
+            row["User"] = r.get("user_email", "")
+        rows.append(row)
 
     st.dataframe(rows, use_container_width=True, hide_index=True)
 
@@ -3853,12 +4203,12 @@ def history_page():
 # =============================================================================
 
 def analytics_page():
-    render_page_header(
-        "Analytics",
-        "Aggregated statistics across all translation jobs",
-    )
+    user_email = st.session_state.get("user_email", "")
+    user_role  = st.session_state.get("user_role", "")
+    subtitle   = "Aggregated statistics across all jobs" if user_role == "admin" else "Your translation statistics"
+    render_page_header("Analytics", subtitle)
 
-    history = load_history()
+    history = db_load_history_for_user(user_email, user_role)
 
     if not history:
         st.markdown("""
@@ -4021,8 +4371,14 @@ def analytics_page():
             <div class="kpi-value" style="font-size:20px;">German (DE)</div>
         </div>
         <div class="kpi">
-            <div class="kpi-label">Target Language</div>
-            <div class="kpi-value" style="font-size:20px;">French (FR)</div>
+            <div class="kpi-label">FR Jobs</div>
+            <div class="kpi-value accent">{sum(1 for r in history if r.get("target_language","French")=="French")}</div>
+            <div class="kpi-sub">French translations</div>
+        </div>
+        <div class="kpi">
+            <div class="kpi-label">NL Jobs</div>
+            <div class="kpi-value" style="color:#e8523a;">{sum(1 for r in history if r.get("target_language","")=="Dutch")}</div>
+            <div class="kpi-sub">Dutch translations</div>
         </div>
     </div>
     """, unsafe_allow_html=True)
@@ -4214,10 +4570,19 @@ def analytics_page():
 def glossary_page():
     render_page_header(
         "Glossary Management",
-        "DE→FR terminology enforced consistently across all translations",
+        "Terminology enforced consistently across all translations",
     )
 
-    glossary    = load_glossary()
+    # Language filter
+    gloss_lang = st.radio(
+        "Show glossary for:",
+        ["French (FR)", "Dutch (NL)"],
+        horizontal=True,
+        key="gloss_lang_filter",
+    )
+    active_lang = "Dutch" if "Dutch" in gloss_lang else "French"
+
+    glossary    = load_glossary(active_lang)
     terms       = glossary.get("terms", {})
     gloss_stats = glossary.get("stats", {})
     term_counts = gloss_stats.get("term_counts", {})
@@ -4247,15 +4612,17 @@ def glossary_page():
     </div>
     """, unsafe_allow_html=True)
 
+    target_col_label = "Dutch" if active_lang == "Dutch" else "French"
+
     # ── Glossary table ──
-    st.markdown('<div class="section-label">Term List</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="section-label">Term List — DE→{target_col_label}</div>', unsafe_allow_html=True)
 
     rows = []
-    for de, fr in sorted(terms.items()):
+    for de, target in sorted(terms.items()):
         rows.append({
-            "German":      de,
-            "French":      fr,
-            "Times Used":  term_counts.get(de, 0),
+            "German":             de,
+            target_col_label:     target,
+            "Times Used":         term_counts.get(de, 0),
         })
 
     st.dataframe(rows, use_container_width=True, hide_index=True)
@@ -4264,30 +4631,34 @@ def glossary_page():
     st.markdown('<div class="section-label">Add / Update Term</div>', unsafe_allow_html=True)
 
     with st.form("add_term_form"):
-        col_de, col_fr = st.columns(2)
+        col_de, col_tgt = st.columns(2)
         with col_de:
             new_de = st.text_input("German term", placeholder="e.g. Kopfteil")
-        with col_fr:
-            new_fr = st.text_input("French translation", placeholder="e.g. Tête de lit")
+        with col_tgt:
+            new_target = st.text_input(
+                f"{target_col_label} translation",
+                placeholder=("e.g. hoofdbord" if active_lang == "Dutch" else "e.g. Tête de lit"),
+            )
         add_submitted = st.form_submit_button("Add term →", use_container_width=True)
 
     if add_submitted:
-        new_de = new_de.strip()
-        new_fr = new_fr.strip()
-        if new_de and new_fr:
-            glossary["terms"][new_de] = new_fr
-            save_glossary(glossary)
-            st.success(f"Added: **{new_de}** → **{new_fr}**")
+        new_de     = new_de.strip()
+        new_target = new_target.strip()
+        if new_de and new_target:
+            glossary["terms"][new_de] = new_target
+            save_glossary(glossary, active_lang)
+            st.success(f"Added: **{new_de}** → **{new_target}** ({active_lang})")
             st.rerun()
         else:
             st.error("Both fields are required.")
 
     # ── Reset to defaults ──
     st.markdown('<div class="section-label">Reset</div>', unsafe_allow_html=True)
-    if st.button("Reset glossary to defaults"):
-        glossary["terms"] = DEFAULT_GLOSSARY_TERMS.copy()
-        save_glossary(glossary)
-        st.success("Glossary reset to defaults.")
+    default_terms = DEFAULT_NL_GLOSSARY_TERMS if active_lang == "Dutch" else DEFAULT_GLOSSARY_TERMS
+    if st.button(f"Reset {target_col_label} glossary to defaults"):
+        glossary["terms"] = default_terms.copy()
+        save_glossary(glossary, active_lang)
+        st.success(f"{target_col_label} glossary reset to defaults.")
         st.rerun()
 
 
@@ -4374,14 +4745,179 @@ def translation_memory_page():
 
 
 # =============================================================================
+# PAGE: LANGUAGE SELECTION
+# =============================================================================
+
+def language_selection_page():
+    st.markdown("""
+    <div class="login-hero">
+        <div class="login-lockup">
+            <div class="login-lockup-dot"></div>
+            Home24 Localization Platform
+        </div>
+        <h1 class="login-title">Select target language</h1>
+        <p class="login-subtitle">Choose the language for this translation session</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    _, col, _ = st.columns([1, 2, 1])
+    with col:
+        st.markdown("""
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:8px 0 24px;">
+        """, unsafe_allow_html=True)
+
+        col_fr, col_nl = st.columns(2)
+        with col_fr:
+            if st.button("🇫🇷  French (FR)", use_container_width=True, key="pick_fr"):
+                st.session_state["target_language"]  = "French"
+                st.session_state["language_selected"] = True
+                st.rerun()
+            st.markdown("""
+            <div style="text-align:center;font-size:11px;color:#9090b8;margin-top:4px;">
+                German → French<br>FR- prefix
+            </div>
+            """, unsafe_allow_html=True)
+
+        with col_nl:
+            if st.button("🇳🇱  Dutch (NL)", use_container_width=True, key="pick_nl"):
+                st.session_state["target_language"]  = "Dutch"
+                st.session_state["language_selected"] = True
+                st.rerun()
+            st.markdown("""
+            <div style="text-align:center;font-size:11px;color:#9090b8;margin-top:4px;">
+                German → Dutch<br>NL- prefix
+            </div>
+            """, unsafe_allow_html=True)
+
+    render_footer()
+
+
+# =============================================================================
+# PAGE: ADMIN DASHBOARD
+# =============================================================================
+
+def admin_dashboard_page():
+    render_page_header(
+        "Admin Dashboard",
+        "Platform overview — metadata only, no file contents",
+    )
+
+    stats = db_get_admin_stats()
+
+    # ── KPIs ──
+    st.markdown('<div class="section-label">Platform Overview</div>', unsafe_allow_html=True)
+    st.markdown(f"""
+    <div class="kpi-row">
+        <div class="kpi">
+            <div class="kpi-label">Total Jobs</div>
+            <div class="kpi-value accent">{stats["total_jobs"]}</div>
+            <div class="kpi-sub">All translation jobs</div>
+        </div>
+        <div class="kpi">
+            <div class="kpi-label">Total Logins</div>
+            <div class="kpi-value">{stats["total_logins"]}</div>
+            <div class="kpi-sub">Across all users</div>
+        </div>
+        <div class="kpi">
+            <div class="kpi-label">FR Jobs</div>
+            <div class="kpi-value accent">{stats["fr_jobs"]}</div>
+            <div class="kpi-sub">French translations</div>
+        </div>
+        <div class="kpi">
+            <div class="kpi-label">NL Jobs</div>
+            <div class="kpi-value" style="color:#e8523a;">{stats["nl_jobs"]}</div>
+            <div class="kpi-sub">Dutch translations</div>
+        </div>
+    </div>
+    <div class="kpi-row-3">
+        <div class="kpi">
+            <div class="kpi-label">Total Cells</div>
+            <div class="kpi-value">{stats["total_cells"]:,}</div>
+            <div class="kpi-sub">Translated across all jobs</div>
+        </div>
+        <div class="kpi">
+            <div class="kpi-label">Total API Cost</div>
+            <div class="kpi-value warn">${stats["total_cost"]:.4f}</div>
+            <div class="kpi-sub">GPT-4o-mini estimated</div>
+        </div>
+        <div class="kpi">
+            <div class="kpi-label">Active Users</div>
+            <div class="kpi-value success">{len(stats["jobs_by_user"])}</div>
+            <div class="kpi-sub">Users with jobs</div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # ── Jobs by user ──
+    st.markdown('<div class="section-label">Jobs by User</div>', unsafe_allow_html=True)
+    if stats["jobs_by_user"]:
+        user_rows = []
+        for u in stats["jobs_by_user"]:
+            cost = u.get("cost") or 0.0
+            user_rows.append({
+                "User":         u.get("user_email", ""),
+                "Jobs":         u.get("job_count", 0),
+                "Cells":        u.get("cells") or 0,
+                "Est. Cost":    f"${cost:.4f}" if cost else "—",
+            })
+        st.dataframe(user_rows, use_container_width=True, hide_index=True)
+    else:
+        st.info("No jobs recorded yet.")
+
+    # ── Recent jobs (metadata only) ──
+    st.markdown('<div class="section-label">Recent Translation Jobs</div>', unsafe_allow_html=True)
+    all_jobs = db_load_history()
+    if all_jobs:
+        job_rows = []
+        for r in all_jobs[:50]:
+            dt = r.get("datetime", "")[:16].replace("T", " ")
+            c  = r.get("estimated_cost_usd")
+            job_rows.append({
+                "Date":         dt,
+                "User":         r.get("user_email", ""),
+                "Lang":         r.get("output_prefix", "FR"),
+                "File":         r.get("original_filename", ""),
+                "Cells":        r.get("cells_translated", 0),
+                "Warnings":     r.get("total_warnings", 0),
+                "Time (s)":     round(r.get("processing_time_seconds", 0), 1),
+                "Est. Cost":    f"${c:.4f}" if c is not None else "—",
+            })
+        st.dataframe(job_rows, use_container_width=True, hide_index=True)
+    else:
+        st.info("No jobs yet.")
+
+    # ── Login activity ──
+    st.markdown('<div class="section-label">Login Activity</div>', unsafe_allow_html=True)
+    logins = db_get_login_activity()
+    if logins:
+        login_rows = []
+        for l in logins[:100]:
+            login_rows.append({
+                "Login Time":  l.get("login_time", "")[:16].replace("T", " "),
+                "User":        l.get("user_email", ""),
+                "Role":        l.get("role", ""),
+                "Last Seen":   (l.get("last_seen") or "")[:16].replace("T", " "),
+            })
+        st.dataframe(login_rows, use_container_width=True, hide_index=True)
+    else:
+        st.info("No login records yet.")
+
+    st.markdown("""
+    <div class="alert alert-info" style="margin-top:24px;">
+        <span class="alert-icon">ℹ</span>
+        <span><strong>Privacy note:</strong> File contents and translated data are never
+        stored in this dashboard. Only metadata (filename, cell counts, timestamps) is shown.</span>
+    </div>
+    """, unsafe_allow_html=True)
+
+
+# =============================================================================
 # MAIN
 # =============================================================================
 
 def main():
-    is_auth = st.session_state.get("authenticated", False)
-
     st.set_page_config(
-        page_title="DE-FR Translator",
+        page_title="DE Translator",
         page_icon="🌐",
         layout="wide",
         initial_sidebar_state="expanded",
@@ -4393,8 +4929,15 @@ def main():
         st.session_state["user_role"] = ""
     if "user_email" not in st.session_state:
         st.session_state["user_email"] = ""
+    if "language_selected" not in st.session_state:
+        st.session_state["language_selected"] = False
+    if "target_language" not in st.session_state:
+        st.session_state["target_language"] = "French"
     if "db_initialized" not in st.session_state:
-        init_db(default_glossary=DEFAULT_GLOSSARY_TERMS)
+        init_db(
+            default_glossary=DEFAULT_GLOSSARY_TERMS,
+            default_nl_glossary=DEFAULT_NL_GLOSSARY_TERMS,
+        )
         st.session_state["db_initialized"] = True
 
     inject_custom_css()
@@ -4403,9 +4946,15 @@ def main():
         login_page()
         return
 
+    if not st.session_state["language_selected"]:
+        language_selection_page()
+        return
+
     page = render_sidebar()
 
-    if page == "Translator":
+    if page == "Admin Dashboard":
+        admin_dashboard_page()
+    elif page == "Translator":
         translator_page()
     elif page == "Translation History":
         history_page()
