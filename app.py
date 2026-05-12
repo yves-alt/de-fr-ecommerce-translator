@@ -2797,19 +2797,23 @@ def scan_sheet(
         for row_tuple in ws.iter_rows(min_row=1):
             if not row_tuple:
                 continue
-            row_num = row_tuple[0].row
+            # openpyxl read_only mode yields EmptyCell for blank rows;
+            # EmptyCell lacks .row in older versions — skip via getattr
+            row_num = getattr(row_tuple[0], "row", None)
             if row_num is None:
-                continue
+                continue  # EmptyCell row — skip, don't break
             if row_num > row_hard_limit:
                 break
             for cell in row_tuple:
-                val = cell.value
+                val = getattr(cell, "value", None)
                 if val is None:
                     continue
                 if not str(val).strip():
                     continue
-                r = cell.row or 0
-                c = cell.column or 0
+                r = getattr(cell, "row", None) or 0
+                c = getattr(cell, "column", None) or 0
+                if not r or not c:
+                    continue
                 if r > real_max_row:
                     real_max_row = r
                 if c > real_max_col:
