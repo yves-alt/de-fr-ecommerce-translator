@@ -312,24 +312,48 @@ CANONICAL_WORD_SETS: dict[str, set[str]] = {
 # AUTHENTICATION
 # =============================================================================
 
-def _get_credentials() -> tuple[str, str]:
+def _get_admin_credentials() -> tuple[str, str]:
+    # I try secrets first, then env vars; support both ADMIN_* and legacy APP_USER_* names
     try:
-        email    = st.secrets.get("APP_USER_EMAIL", "")
-        password = st.secrets.get("APP_USER_PASSWORD", "")
+        email    = st.secrets.get("ADMIN_EMAIL") or st.secrets.get("APP_USER_EMAIL", "")
+        password = st.secrets.get("ADMIN_PASSWORD") or st.secrets.get("APP_USER_PASSWORD", "")
         if email and password:
             return str(email), str(password)
     except Exception:
         pass
-    return os.environ.get("APP_USER_EMAIL", ""), os.environ.get("APP_USER_PASSWORD", "")
+    email    = os.environ.get("ADMIN_EMAIL") or os.environ.get("APP_USER_EMAIL", "")
+    password = os.environ.get("ADMIN_PASSWORD") or os.environ.get("APP_USER_PASSWORD", "")
+    return email or "", password or ""
 
 
-def verify_credentials(input_email: str, input_password: str) -> bool:
-    stored_email, stored_password = _get_credentials()
-    if not stored_email or not stored_password:
-        return False
-    email_ok    = hmac.compare_digest(input_email.strip().lower(), stored_email.strip().lower())
-    password_ok = hmac.compare_digest(input_password, stored_password)
-    return email_ok and password_ok
+def _get_guest_credentials() -> tuple[str, str]:
+    try:
+        email    = st.secrets.get("GUEST_EMAIL", "")
+        password = st.secrets.get("GUEST_PASSWORD", "")
+        if email and password:
+            return str(email), str(password)
+    except Exception:
+        pass
+    return os.environ.get("GUEST_EMAIL", ""), os.environ.get("GUEST_PASSWORD", "")
+
+
+def verify_credentials(input_email: str, input_password: str) -> str | None:
+    # Returns "admin", "guest", or None on failure
+    email = input_email.strip().lower()
+
+    admin_email, admin_password = _get_admin_credentials()
+    if admin_email and admin_password:
+        if (hmac.compare_digest(email, admin_email.strip().lower()) and
+                hmac.compare_digest(input_password, admin_password)):
+            return "admin"
+
+    guest_email, guest_password = _get_guest_credentials()
+    if guest_email and guest_password:
+        if (hmac.compare_digest(email, guest_email.strip().lower()) and
+                hmac.compare_digest(input_password, guest_password)):
+            return "guest"
+
+    return None
 
 
 # =============================================================================
@@ -1510,16 +1534,21 @@ def render_sidebar() -> str:
 
         st.markdown("---")
 
-        email, _ = _get_credentials()
+        email = st.session_state.get("user_email", "")
+        role  = st.session_state.get("user_role", "")
+        role_label = "Guest Demo Access" if role == "guest" else ""
         st.markdown(f"""
         <div class="sb-user">
             <span class="sb-user-label">Signed in as</span>
             <span class="sb-user-email">{email}</span>
+            {"<span style='display:block;font-size:0.68rem;color:#9b8fe0;margin-top:2px;'>" + role_label + "</span>" if role_label else ""}
         </div>
         """, unsafe_allow_html=True)
 
         if st.button("Sign out", key="logout_btn", use_container_width=True):
             st.session_state["authenticated"] = False
+            st.session_state.pop("user_role", None)
+            st.session_state.pop("user_email", None)
             st.rerun()
 
         st.markdown("---")
@@ -1598,7 +1627,7 @@ def analyze_translation_quality(
     issues   = []
     _glossary = glossary or {}
 
-    # Identical output (Critical) — check before residue so we don't double-flag
+    # Identical output (Critical) — check before residue so I don't double-flag
     if translation.strip() == source.strip():
         src_lower      = source.strip().lower()
         glossary_terms = _glossary.get("terms", {})
@@ -2236,7 +2265,7 @@ def apply_french_capitalization_rules(
 # =============================================================================
 
 # Columns where the source uses <br> as a property separator.
-# When the LLM replaces those <br> with " ; " we restore them — but ONLY when
+# When the LLM replaces those <br> with " ; " I restore them — but ONLY when
 # the source itself had <br>, so natural semicolons in source text are kept.
 _SEMICOLON_BR_CANONICALS = frozenset({
     "materialDetail", "qualityDetail", "deliveryScope", "colorDetail",
@@ -3261,17 +3290,27 @@ def login_page():
             password_input = st.text_input("Password", type="password", placeholder="••••••••")
             submitted      = st.form_submit_button("Continue →", use_container_width=True)
 
+        st.markdown(
+            '<p style="text-align:center;font-size:0.75rem;color:#b0b0c8;margin-top:10px;">'
+            'Demo guest access available</p>',
+            unsafe_allow_html=True,
+        )
         st.markdown('<p class="login-footer">Home24 · Internal use only</p>', unsafe_allow_html=True)
 
         if submitted:
-            _, stored_pw = _get_credentials()
-            if not stored_pw:
+            _, stored_pw = _get_admin_credentials()
+            guest_email, guest_pw = _get_guest_credentials()
+            if not stored_pw and not guest_pw:
                 st.error("Credentials not configured. Check Streamlit secrets or your .env file.")
-            elif verify_credentials(email_input, password_input):
-                st.session_state["authenticated"] = True
-                st.rerun()
             else:
-                st.error("Invalid email or password.")
+                role = verify_credentials(email_input, password_input)
+                if role:
+                    st.session_state["authenticated"] = True
+                    st.session_state["user_role"]     = role
+                    st.session_state["user_email"]    = email_input.strip().lower()
+                    st.rerun()
+                else:
+                    st.error("Invalid email or password.")
 
     render_footer()
 
@@ -4350,6 +4389,10 @@ def main():
 
     if "authenticated" not in st.session_state:
         st.session_state["authenticated"] = False
+    if "user_role" not in st.session_state:
+        st.session_state["user_role"] = ""
+    if "user_email" not in st.session_state:
+        st.session_state["user_email"] = ""
     if "db_initialized" not in st.session_state:
         init_db(default_glossary=DEFAULT_GLOSSARY_TERMS)
         st.session_state["db_initialized"] = True

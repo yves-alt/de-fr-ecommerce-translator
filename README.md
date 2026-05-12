@@ -94,11 +94,19 @@ Edit `.env` and fill in your real values:
 
 ```env
 OPENAI_API_KEY=sk-proj-your-real-key-here
-APP_USER_EMAIL=your@email.com
-APP_USER_PASSWORD=your-secure-password
+
+# Admin account
+ADMIN_EMAIL=your_admin_email_here
+ADMIN_PASSWORD=your_admin_password_here
+
+# Guest demo account
+GUEST_EMAIL=your_guest_email_here
+GUEST_PASSWORD=your_guest_password_here
 ```
 
 > **Never commit `.env` to Git.** It is already in `.gitignore`.
+
+> **Legacy key names** (`APP_USER_EMAIL` / `APP_USER_PASSWORD`) are still supported for the admin account — existing Streamlit Cloud deployments continue to work without changes.
 
 ### Run locally
 
@@ -325,8 +333,14 @@ The Analytics page includes a dedicated Cost Dashboard section.
 
 ```toml
 OPENAI_API_KEY = "sk-proj-your-real-key-here"
-APP_USER_EMAIL = "your@email.com"
-APP_USER_PASSWORD = "your-secure-password"
+
+# Admin account
+ADMIN_EMAIL    = "your_admin_email_here"
+ADMIN_PASSWORD = "your_admin_password_here"
+
+# Guest demo account
+GUEST_EMAIL    = "your_guest_email_here"
+GUEST_PASSWORD = "your_guest_password_here"
 ```
 
 5. Click **Deploy**
@@ -359,6 +373,10 @@ The app reads credentials from two sources (in order):
 
 1. **`st.secrets`** — used on Streamlit Cloud
 2. **`.env` file via python-dotenv** — used for local development
+
+Two accounts are supported:
+- **Admin** — reads `ADMIN_EMAIL` / `ADMIN_PASSWORD` (falls back to legacy `APP_USER_EMAIL` / `APP_USER_PASSWORD`)
+- **Guest** — reads `GUEST_EMAIL` / `GUEST_PASSWORD`
 
 Passwords are compared with `hmac.compare_digest` (constant-time) to prevent timing attacks.
 
