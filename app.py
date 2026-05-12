@@ -673,6 +673,72 @@ def inject_custom_css(theme: str = "Dark"):
         background-color: {bg_sb} !important;
         border-right: 1px solid {divider} !important;
         min-width: 216px !important;
+        transition: transform 0.25s cubic-bezier(0.4,0,0.2,1),
+                    width   0.25s cubic-bezier(0.4,0,0.2,1) !important;
+    }}
+
+    /* ── Sidebar expand button (visible when sidebar is collapsed) ── */
+    [data-testid="stSidebarCollapsedControl"],
+    [data-testid="collapsedControl"] {{
+        position: fixed !important;
+        top: 14px !important;
+        left: 14px !important;
+        z-index: 99999 !important;
+        display: flex !important;
+        visibility: visible !important;
+        opacity: 1 !important;
+    }}
+    [data-testid="stSidebarCollapsedControl"] > button,
+    [data-testid="collapsedControl"] > button {{
+        background: {bg_card} !important;
+        border: 1px solid {border_md} !important;
+        border-radius: 8px !important;
+        color: {text2} !important;
+        width: 34px !important;
+        height: 34px !important;
+        padding: 0 !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        cursor: pointer !important;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.18) !important;
+        transition: background 0.18s, border-color 0.18s, box-shadow 0.18s !important;
+    }}
+    [data-testid="stSidebarCollapsedControl"] > button:hover,
+    [data-testid="collapsedControl"] > button:hover {{
+        background: {bg_hover} !important;
+        border-color: rgba(124,92,252,0.4) !important;
+        box-shadow: 0 3px 14px rgba(124,92,252,0.22) !important;
+        transform: none !important;
+    }}
+    [data-testid="stSidebarCollapsedControl"] svg,
+    [data-testid="collapsedControl"] svg {{
+        color: {text2} !important;
+        fill: {text2} !important;
+    }}
+
+    /* ── Sidebar collapse button (inside sidebar when open) ─── */
+    [data-testid="stSidebarCollapseButton"] > button {{
+        background: transparent !important;
+        border: 1px solid {border} !important;
+        border-radius: 8px !important;
+        color: {text3} !important;
+        width: 30px !important;
+        height: 30px !important;
+        padding: 0 !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        cursor: pointer !important;
+        box-shadow: none !important;
+        transition: background 0.18s, border-color 0.18s, color 0.18s !important;
+    }}
+    [data-testid="stSidebarCollapseButton"] > button:hover {{
+        background: rgba(124,92,252,0.06) !important;
+        border-color: rgba(124,92,252,0.35) !important;
+        color: {text} !important;
+        transform: none !important;
+        box-shadow: none !important;
     }}
     [data-testid="stSidebarContent"] {{ padding: 20px 14px !important; }}
 
@@ -2105,6 +2171,131 @@ def _refinement_progress_html(sheet: str, done: int, total: int) -> str:
 
 
 # =============================================================================
+# FRENCH CAPITALIZATION ENGINE
+# =============================================================================
+
+# Known product/collection names whose capitalisation must be preserved
+_KNOWN_BRANDS: frozenset[str] = frozenset({
+    "Arin", "Bocca", "Level36", "Sonoma", "Loft", "Scandi",
+})
+
+# Split on <br> tags (case-insensitive), preserving the tag in the result
+_CAP_BR_RE = re.compile(r"(<br\s*/?>)", re.IGNORECASE)
+
+# Capitalized word immediately following a percentage → needs lowercasing
+_CAP_PERCENT_LOWER_RE = re.compile(
+    r"(\d+\s*%)\s+([A-ZÉÀÈÙÂÊÎÔÛËÏÜÇŒÆ][a-zéàèùâêîôûëïüçœæA-ZÉÀÈÙÂÊÎÔÛËÏÜÇŒÆA-zA-Z]*)",
+    re.UNICODE,
+)
+
+# Two words around a bare '/' with no surrounding spaces — structural separator
+# Minimum 3 chars per side; matches any case so cap_first handles normalisation
+_CAP_SLASH_RE = re.compile(
+    r"([a-zA-Zéàèùâêîôûëïüçœæ][a-zA-Zéàèùâêîôûëïüçœæ'’\-]{2,})"
+    r"/"
+    r"([a-zA-Zéàèùâêîôûëïüçœæ][a-zA-Zéàèùâêîôûëïüçœæ'’\-]{2,})",
+    re.UNICODE,
+)
+
+
+def _cap_first(s: str) -> str:
+    """Capitalize the first alphabetic character of s only when s starts with a letter.
+
+    Skips when the segment begins with a digit or symbol (e.g. "100% polyester",
+    "60% coton/lin") to avoid re-capitalising words that follow percentages.
+    """
+    stripped = s.lstrip()
+    if not stripped or not stripped[0].isalpha():
+        return s
+    for i, ch in enumerate(s):
+        if ch.isalpha():
+            return s[:i] + ch.upper() + s[i + 1:]
+    return s
+
+
+def _apply_slash_caps(segment: str) -> str:
+    """Capitalise both sides of structural '/' separators within a text segment."""
+    def repl(m: re.Match) -> str:
+        # Skip if a percentage figure appears before this slash in the same segment
+        # (material composition context: "60% polyester/coton")
+        if re.search(r"\d+\s*%", segment[: m.start()]):
+            return m.group(0)
+        return _cap_first(m.group(1)) + "/" + _cap_first(m.group(2))
+
+    return _CAP_SLASH_RE.sub(repl, segment)
+
+
+def _apply_percent_lowercase(segment: str) -> str:
+    """Lowercase a capitalised word that immediately follows a percentage figure."""
+    return _CAP_PERCENT_LOWER_RE.sub(
+        lambda m: m.group(1) + " " + m.group(2)[0].lower() + m.group(2)[1:],
+        segment,
+    )
+
+
+def _restore_brand_caps(text: str) -> str:
+    """Re-apply correct capitalisation for known product/brand names."""
+    for brand in _KNOWN_BRANDS:
+        text = re.sub(
+            r"\b" + re.escape(brand) + r"\b",
+            brand,
+            text,
+            flags=re.IGNORECASE | re.UNICODE,
+        )
+    return text
+
+
+def apply_french_capitalization_rules(
+    text: str, canonical: str, glossary: dict | None = None
+) -> str:
+    """Apply French e-commerce capitalisation rules to a translated cell value.
+
+    Execution order per segment (between <br> tags):
+      1. Structural '/' caps  — before start-cap so both sides get processed
+      2. Percentage lowercase — "100% Polyester" → "100% polyester"
+      3. Start-of-segment cap — always capitalise the first alphabetic character
+      4. Known brand restore  — re-capitalise brand/model names anywhere in text
+
+    Rules honoured:
+    - Capitalise start of text + each <br>-delimited segment
+    - Capitalise both words around a structural '/' (not inside % compositions)
+    - Never capitalise after ':' (French convention)
+    - Lowercase fibre/material words immediately following a percentage
+    - Preserve HTML <br> tags, numbers, dimensions, and glossary terms
+    - Restore known product/brand names to their canonical capitalisation
+    """
+    if not text or not text.strip():
+        return text
+
+    parts = _CAP_BR_RE.split(text)
+    result: list[str] = []
+    capitalize_next = True  # first segment always gets a capital start
+
+    for part in parts:
+        if _CAP_BR_RE.match(part):
+            result.append("<br>")
+            capitalize_next = True
+            continue
+        if not part:
+            result.append(part)
+            continue
+
+        # Step 1: structural slash caps (before start-cap avoids missed right-side words)
+        part = _apply_slash_caps(part)
+        # Step 2: percentage lowercase
+        part = _apply_percent_lowercase(part)
+        # Step 3: capitalise start of segment
+        if capitalize_next and part.strip():
+            part = _cap_first(part)
+            capitalize_next = False
+        # Step 4: restore brand names
+        part = _restore_brand_caps(part)
+        result.append(part)
+
+    return "".join(result)
+
+
+# =============================================================================
 # EXCEL PROCESSING
 # =============================================================================
 
@@ -2854,6 +3045,17 @@ def process_excel_with_progress(
         stats["quality_score"]      = compute_quality_score(all_warnings)
         stats["warning_categories"] = dict(_cat_counts)
         stats["review_count"]       = len(all_warnings)
+
+        # ── Final capitalisation pass ─────────────────────────────────────────
+        # Runs on every translated cell after all translation, refinement, and
+        # residue-fixing passes are complete.
+        for row_num in range(data_start_row, worksheet.max_row + 1):
+            for col_header, (col_idx, canonical) in to_translate.items():
+                cell = worksheet.cell(row=row_num, column=col_idx)
+                if cell.value and str(cell.value).strip():
+                    cell.value = apply_french_capitalization_rules(
+                        str(cell.value), canonical, glossary
+                    )
 
         progress_bar.progress(1.0)
 
@@ -3971,6 +4173,8 @@ def main():
         st.session_state["authenticated"] = False
     if "theme" not in st.session_state:
         st.session_state["theme"] = "Dark"
+    if "sidebar_open" not in st.session_state:
+        st.session_state["sidebar_open"] = True
     if "db_initialized" not in st.session_state:
         init_db(default_glossary=DEFAULT_GLOSSARY_TERMS)
         st.session_state["db_initialized"] = True
