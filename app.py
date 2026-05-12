@@ -1950,7 +1950,8 @@ def fix_german_residue(client, text: str, column_name: str, token_counter: dict 
     elif column_name == "materialDetail":
         extra_rules = """
 - "Bezug" = "Revêtement" / "Füße" = "Pieds" / "Buche" = "hêtre" / "lackiert" = "verni"
-- Preserve <br> tags exactly"""
+- Preserve <br> tags exactly — NEVER replace them with semicolons
+- NEVER use semicolons (;) as property separators"""
 
     fix_prompt = f"""This French text still contains German words.
 Rewrite it as clean, natural French for Home24 France.
@@ -2036,6 +2037,8 @@ def refine_batch(
         "  Examples: 'décoré' → 'revêtu', 'revêtu d\\'un film décoratif' → 'revêtu de film mélaminé'\n"
         "- Use established French furniture/e-commerce terminology\n"
         "- Preserve ALL <br> tags exactly — do not add, remove, or move them\n"
+        "- NEVER replace <br> tags with semicolons (;)\n"
+        "- NEVER use semicolons as property separators\n"
         "- Do NOT modify numbers, dimensions, or percentages\n"
         "- Keep product names concise — do NOT make them longer\n"
         "- Do not exaggerate marketing claims\n"
@@ -2232,26 +2235,14 @@ def apply_french_capitalization_rules(
 # SEMICOLON → BR POST-PROCESSING
 # =============================================================================
 
-# Columns where " ; " is almost certainly a property separator, not punctuation
+# Columns where the source uses <br> as a property separator.
+# When the LLM replaces those <br> with " ; " we restore them — but ONLY when
+# the source itself had <br>, so natural semicolons in source text are kept.
 _SEMICOLON_BR_CANONICALS = frozenset({
     "materialDetail", "qualityDetail", "deliveryScope", "colorDetail",
 })
 
 _SEMICOLON_SEP_RE = re.compile(r"\s*;\s*", re.UNICODE)
-
-
-def fix_semicolon_separators(text: str, canonical: str) -> str:
-    """
-    For material/quality/delivery columns, replace ` ; ` separators produced by
-    the LLM with `<br>` so the cell format stays consistent with the source.
-    Leaves other columns and numeric/technical semicolons untouched.
-    """
-    if canonical not in _SEMICOLON_BR_CANONICALS:
-        return text
-    if ";" not in text:
-        return text
-    # Replace every " ; " (with optional surrounding spaces) with <br>
-    return _SEMICOLON_SEP_RE.sub("<br>", text)
 
 
 # =============================================================================
@@ -2927,9 +2918,20 @@ def process_excel_with_progress(
         col_header_map = {ci: h for h, (ci, _) in to_translate.items()}
 
         for (row_num, col_idx), translation in results.items():
-            cell       = worksheet.cell(row=row_num, column=col_idx)
-            cell.value = translation
+            cell = worksheet.cell(row=row_num, column=col_idx)
             src_text, src_canonical = source_lookup.get((row_num, col_idx), (translation, "other"))
+
+            # Source-aware semicolon fix: only replace " ; " with <br> when the
+            # *source* text used <br> as its separator — meaning the LLM swapped
+            # them.  If the source already had semicolons, keep them intact.
+            if (
+                src_canonical in _SEMICOLON_BR_CANONICALS
+                and "<br>" in src_text.lower()
+                and ";" in translation
+            ):
+                translation = _SEMICOLON_SEP_RE.sub("<br>", translation)
+
+            cell.value = translation
             has_original = (row_num, col_idx) in original_excel_highlights
             col_header   = col_header_map.get(col_idx, str(col_idx))
 
@@ -3099,10 +3101,9 @@ def process_excel_with_progress(
             for col_header, (col_idx, canonical) in to_translate.items():
                 cell = worksheet.cell(row=row_num, column=col_idx)
                 if cell.value and str(cell.value).strip():
-                    _cv = str(cell.value)
-                    _cv = fix_semicolon_separators(_cv, canonical)
-                    _cv = apply_french_capitalization_rules(_cv, canonical, glossary)
-                    cell.value = _cv
+                    cell.value = apply_french_capitalization_rules(
+                        str(cell.value), canonical, glossary
+                    )
 
         progress_bar.progress(1.0)
 
