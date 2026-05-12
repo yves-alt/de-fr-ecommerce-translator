@@ -1756,7 +1756,9 @@ def _build_system_prompt(canonical: str, glossary_block: str) -> str:
         return (
             "You are a professional translator for Home24 France e-commerce.\n"
             "Translate the German material description to natural French:\n"
-            "- Preserve <br> tags exactly as they appear"
+            "- Preserve <br> tags exactly as they appear — do NOT replace them with semicolons\n"
+            "- NEVER use semicolons (;) to separate material properties; use <br> instead\n"
+            "- Natural French furniture/material terminology"
             f"{glossary_block}\n"
             "Return ONLY the translated text, nothing else."
         )
@@ -1807,7 +1809,7 @@ def translate_batch(
             "\"Ecksofa\"→\"Canapé d'angle\", \"Sitzer\"→\"places\""
         )
     elif canonical == "materialDetail":
-        batch_rules = "- Preserve <br> tags exactly\n- Natural French material terminology"
+        batch_rules = "- Preserve <br> tags exactly — NEVER replace with semicolons\n- NEVER use semicolons (;) as property separators\n- Natural French material terminology"
     else:
         batch_rules = "- Natural French, not literal\n- Remove all German traces\n- Preserve <br> tags exactly"
 
@@ -2224,6 +2226,32 @@ def apply_french_capitalization_rules(
         result.append(part)
 
     return "".join(result)
+
+
+# =============================================================================
+# SEMICOLON → BR POST-PROCESSING
+# =============================================================================
+
+# Columns where " ; " is almost certainly a property separator, not punctuation
+_SEMICOLON_BR_CANONICALS = frozenset({
+    "materialDetail", "qualityDetail", "deliveryScope", "colorDetail",
+})
+
+_SEMICOLON_SEP_RE = re.compile(r"\s*;\s*", re.UNICODE)
+
+
+def fix_semicolon_separators(text: str, canonical: str) -> str:
+    """
+    For material/quality/delivery columns, replace ` ; ` separators produced by
+    the LLM with `<br>` so the cell format stays consistent with the source.
+    Leaves other columns and numeric/technical semicolons untouched.
+    """
+    if canonical not in _SEMICOLON_BR_CANONICALS:
+        return text
+    if ";" not in text:
+        return text
+    # Replace every " ; " (with optional surrounding spaces) with <br>
+    return _SEMICOLON_SEP_RE.sub("<br>", text)
 
 
 # =============================================================================
@@ -3071,9 +3099,10 @@ def process_excel_with_progress(
             for col_header, (col_idx, canonical) in to_translate.items():
                 cell = worksheet.cell(row=row_num, column=col_idx)
                 if cell.value and str(cell.value).strip():
-                    cell.value = apply_french_capitalization_rules(
-                        str(cell.value), canonical, glossary
-                    )
+                    _cv = str(cell.value)
+                    _cv = fix_semicolon_separators(_cv, canonical)
+                    _cv = apply_french_capitalization_rules(_cv, canonical, glossary)
+                    cell.value = _cv
 
         progress_bar.progress(1.0)
 
@@ -3123,52 +3152,6 @@ def process_excel_with_progress(
 # =============================================================================
 
 def render_review_dashboard(all_warnings: list, stats: dict, highlight_in_excel: bool):
-    score               = stats.get("quality_score", 100)
-    verdict_text, score_color = quality_verdict(score)
-    critical = stats.get("critical_warnings", 0)
-    high     = stats.get("high_warnings", 0)
-    medium   = stats.get("medium_warnings", 0)
-    low_     = stats.get("low_warnings", 0)
-
-    st.markdown(f"""
-    <div class="card" style="text-align:center;padding:28px 24px;">
-        <div style="font-size:10px;font-weight:700;text-transform:uppercase;
-                    letter-spacing:0.1em;color:#686880;margin-bottom:10px;">
-            Translation Quality Score
-        </div>
-        <div style="font-size:62px;font-weight:800;letter-spacing:-0.04em;
-                    color:{score_color};line-height:1;">
-            {score}<span style="font-size:24px;color:#686880;">/100</span>
-        </div>
-        <div style="font-size:13px;color:#686880;margin-top:10px;">{verdict_text}</div>
-    </div>
-    """, unsafe_allow_html=True)
-
-    st.markdown(f"""
-    <div class="kpi-row">
-        <div class="kpi">
-            <div class="kpi-label" style="color:#ef4444;">Critical</div>
-            <div class="kpi-value" style="color:#ef4444;">{critical}</div>
-            <div class="kpi-sub">−10 pts each</div>
-        </div>
-        <div class="kpi">
-            <div class="kpi-label" style="color:#f59e0b;">High</div>
-            <div class="kpi-value" style="color:#f59e0b;">{high}</div>
-            <div class="kpi-sub">−5 pts each</div>
-        </div>
-        <div class="kpi">
-            <div class="kpi-label" style="color:#ca8a04;">Medium</div>
-            <div class="kpi-value" style="color:#ca8a04;">{medium}</div>
-            <div class="kpi-sub">−2 pts each</div>
-        </div>
-        <div class="kpi">
-            <div class="kpi-label" style="color:#818cf8;">Low</div>
-            <div class="kpi-value" style="color:#818cf8;">{low_}</div>
-            <div class="kpi-sub">−1 pt each</div>
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
-
     if not all_warnings:
         st.markdown("""
         <div class="alert alert-success">
@@ -3321,6 +3304,11 @@ def translator_page():
     )
 
     if uploaded_file is not None:
+        # Clear stale result when user switches to a different file
+        if st.session_state.get("_tr_result_file") != uploaded_file.name:
+            st.session_state.pop("_tr_result", None)
+            st.session_state["_tr_result_file"] = uploaded_file.name
+
         st.markdown(f'<div class="file-chip">📄 {uploaded_file.name}</div>', unsafe_allow_html=True)
 
         output_filename  = f"FR-{uploaded_file.name}"
@@ -3511,206 +3499,231 @@ def translator_page():
                 })
                 db_save_warnings(job_id, stats.get("all_warnings", []))
 
-                # ── Results ──
-                st.markdown('<div class="section-label">Results</div>', unsafe_allow_html=True)
-                render_stats(stats)
-
-                # ── Translation Intelligence ──
-                st.markdown('<div class="section-label">Translation Intelligence</div>', unsafe_allow_html=True)
-                render_intelligence_stats(stats)
-
-                if stats.get("glossary_top_terms"):
-                    top_terms_str = " · ".join(
-                        f"{de} → {DEFAULT_GLOSSARY_TERMS.get(de, '?')}"
-                        for de in list(stats["glossary_top_terms"].keys())[:3]
-                    )
-                    st.markdown(f"""
-                    <div class="alert alert-info" style="margin-top:0;">
-                        <span class="alert-icon">ℹ</span>
-                        <span><strong>Top glossary terms used:</strong> {top_terms_str}</span>
-                    </div>
-                    """, unsafe_allow_html=True)
-
-                # ── Quality gate ──
-                st.markdown('<div class="section-label">Quality Gate</div>', unsafe_allow_html=True)
-                qg = stats.get("quality_gate", {})
-                gate_rows = [
-                    ("✅" if qg.get("no_residue") else "⚠️",
-                     "German residue",
-                     "Clean" if qg.get("no_residue") else "Residue found — see warnings"),
-                    ("✅", "Row 1 (headers)", "Untouched"),
-                    ("✅" if qg.get("protected_columns") else "ℹ️",
-                     "Protected columns",
-                     ", ".join(qg.get("protected_columns", [])) or "None found"),
-                    ("⚠️" if qg.get("possible_missed") else "✅",
-                     "Missed columns",
-                     ", ".join(qg.get("possible_missed", [])) or "All matched"),
-                    ("✅", "Translation Memory",
-                     f"{stats.get('tm_hits', 0)} hits / {stats.get('tm_misses', 0)} misses"),
-                    ("✅", "Batch processing",
-                     f"{stats.get('batch_count', 0)} batches · avg {stats.get('avg_batch_size', 0)} cells/req"),
-                    (
-                        "✅" if stats.get("refinement_enabled") else "ℹ️",
-                        "Premium French Refinement",
-                        (
-                            f"{stats.get('cells_refined', 0)} cells improved "
-                            f"({stats.get('refinement_api_calls', 0)} refinement batch(es))"
-                            if stats.get("refinement_enabled")
-                            else "Disabled"
-                        ),
-                    ),
-                ]
-                qg_rows_html = "".join(
-                    f"""<div class="qg-row">
-                        <span class="qg-icon">{icon}</span>
-                        <span class="qg-label">{label}</span>
-                        <span class="qg-value">{value}</span>
-                    </div>"""
-                    for icon, label, value in gate_rows
-                )
-                st.markdown(f'<div class="qg">{qg_rows_html}</div>', unsafe_allow_html=True)
-
-                # ── Review Dashboard ──
-                st.markdown('<div class="section-label">Review Dashboard</div>', unsafe_allow_html=True)
-                render_review_dashboard(
-                    stats.get("all_warnings", []),
-                    stats,
-                    highlight_warnings_in_excel,
-                )
-
-                # ── Export Audit ──
-                n_orig  = stats.get("original_highlights_preserved", 0)
-                n_rev   = stats.get("review_highlights_applied", 0)
-                n_gloss = stats.get("glossary_hits", 0)
-                n_total_warn = len(stats.get("all_warnings", []))
-                rev_label = (
-                    f"{n_rev} cell(s) highlighted (Critical + High only)"
-                    if highlight_warnings_in_excel
-                    else f"0 — checkbox off, {n_total_warn} warning(s) in dashboard only"
-                )
-                orig_label = f"{n_orig} cell(s) — source formatting preserved" if n_orig else "None in this file"
-                audit_rows = [
-                    ("📋", "Original source highlights",    orig_label),
-                    ("🟡" if n_rev else "✅", "Review warnings in Excel", rev_label),
-                    ("✅", "Glossary hits in Excel",
-                     f"{n_gloss} hit(s) tracked in analytics — no cell color applied"),
-                ]
-                audit_html = "".join(
-                    f"""<div class="qg-row">
-                        <span class="qg-icon">{icon}</span>
-                        <span class="qg-label">{label}</span>
-                        <span class="qg-value">{value}</span>
-                    </div>"""
-                    for icon, label, value in audit_rows
-                )
-                st.markdown('<div class="section-label">Export Audit</div>', unsafe_allow_html=True)
-                st.markdown(f'<div class="qg">{audit_html}</div>', unsafe_allow_html=True)
-
-                # ── Completion banner ──
-                cost_str = (
-                    f"${stats['estimated_cost_usd']:.4f}"
-                    if stats.get("estimated_cost_usd") is not None
-                    else "cost N/A"
-                )
-                processed_sheet = stats.get("sheet_name", "")
-                qs = stats.get("quality_score", 100)
-                vt, _ = quality_verdict(qs)
-
-                if not stats.get("all_warnings"):
-                    st.markdown(f"""
-                    <div class="success-banner">
-                        <div class="success-banner-icon">✓</div>
-                        <div>
-                            <div class="success-banner-title">Translation complete — Score {qs}/100</div>
-                            <div class="success-banner-sub">
-                                {vt} · Sheet: {processed_sheet} · {stats["cells_translated"]} cells ·
-                                {stats["total_time"]} · {cost_str}
-                            </div>
-                        </div>
-                    </div>
-                    """, unsafe_allow_html=True)
-                else:
-                    st.markdown(f"""
-                    <div class="warn-banner">
-                        <div class="warn-banner-title">
-                            Translation complete — Score {qs}/100 · {n_total_warn} warning(s)
-                        </div>
-                        <div class="warn-banner-sub">
-                            {vt} · Sheet: {processed_sheet} · {stats["total_time"]} · {cost_str}
-                        </div>
-                    </div>
-                    """, unsafe_allow_html=True)
-
-                # ── Download ──
-                st.markdown("<br>", unsafe_allow_html=True)
-
-                if _csv_bytes is not None:
-                    dl_left, dl_right = st.columns(2)
-                    with dl_left:
-                        st.download_button(
-                            label="↓ Download Excel",
-                            data=_excel_data,
-                            file_name=output_filename,
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                            use_container_width=True,
-                        )
-                    with dl_right:
-                        st.download_button(
-                            label=f"↓ Download CSV (sans «{_csv_removed_col}»)",
-                            data=_csv_bytes,
-                            file_name=_csv_filename,
-                            mime="text/csv",
-                            use_container_width=True,
-                        )
-                else:
-                    # Name column not found — show Excel only + manual CSV selector
-                    _, dl_col, _ = st.columns([1, 2, 1])
-                    with dl_col:
-                        st.download_button(
-                            label="↓ Download Excel",
-                            data=_excel_data,
-                            file_name=output_filename,
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                            use_container_width=True,
-                        )
-                    import io as _io
-                    import openpyxl as _openpyxl
-                    _wb_peek = _openpyxl.load_workbook(_io.BytesIO(_excel_data), data_only=True)
-                    _ws_peek = _wb_peek[selected_sheet] if selected_sheet in _wb_peek.sheetnames else _wb_peek.active
-                    _all_headers = [
-                        str(_ws_peek.cell(row=header_row, column=c).value or "")
-                        for c in range(1, _ws_peek.max_column + 1)
-                        if _ws_peek.cell(row=header_row, column=c).value is not None
-                    ]
-                    st.warning(
-                        "CSV export: could not auto-detect the product name column. "
-                        "Select it manually to generate the CSV."
-                    )
-                    if _all_headers:
-                        _chosen = st.selectbox(
-                            "Column to exclude from CSV",
-                            options=_all_headers,
-                            key="csv_col_manual_select",
-                        )
-                        if st.button("Generate CSV without selected column", key="csv_manual_gen_btn"):
-                            _csv_b, _csv_f, _csv_rc = generate_csv_export(
-                                _excel_data, selected_sheet, uploaded_file.name,
-                                header_row=header_row,
-                                force_exclude_header=_chosen,
-                            )
-                            if _csv_b:
-                                st.download_button(
-                                    label=f"↓ Download CSV (sans «{_csv_rc}»)",
-                                    data=_csv_b,
-                                    file_name=_csv_f,
-                                    mime="text/csv",
-                                    use_container_width=True,
-                                )
+                # Store everything in session_state so results persist across reruns
+                # (e.g. when a download button is clicked)
+                st.session_state["_tr_result"] = {
+                    "stats":              stats,
+                    "excel_data":         _excel_data,
+                    "csv_bytes":          _csv_bytes,
+                    "csv_filename":       _csv_filename,
+                    "csv_removed_col":    _csv_removed_col,
+                    "output_filename":    output_filename,
+                    "highlight_in_excel": highlight_warnings_in_excel,
+                    "selected_sheet":     selected_sheet,
+                    "header_row":         header_row,
+                    "orig_filename":      uploaded_file.name,
+                }
 
             except ValueError as e:
                 st.error(f"Error: {e}")
             except Exception as e:
                 st.error(f"Unexpected error: {e}")
+
+        # ── Render results (persists across reruns / download clicks) ──────────
+        if "last_result" in st.session_state:
+            st.session_state["_tr_result"] = st.session_state.pop("last_result")
+
+        if st.session_state.get("_tr_result_file") == uploaded_file.name and "_tr_result" in st.session_state:
+            _r   = st.session_state["_tr_result"]
+            _s   = _r["stats"]
+            _hix = _r["highlight_in_excel"]
+            _ed  = _r["excel_data"]
+            _cb  = _r["csv_bytes"]
+            _cf  = _r["csv_filename"]
+            _crc = _r["csv_removed_col"]
+            _ofn = _r["output_filename"]
+            _ssh = _r["selected_sheet"]
+            _hdr = _r["header_row"]
+            _ofnm= _r["orig_filename"]
+
+            # ── Results ──
+            st.markdown('<div class="section-label">Results</div>', unsafe_allow_html=True)
+            render_stats(_s)
+
+            # ── Translation Intelligence ──
+            st.markdown('<div class="section-label">Translation Intelligence</div>', unsafe_allow_html=True)
+            render_intelligence_stats(_s)
+
+            if _s.get("glossary_top_terms"):
+                top_terms_str = " · ".join(
+                    f"{de} → {DEFAULT_GLOSSARY_TERMS.get(de, '?')}"
+                    for de in list(_s["glossary_top_terms"].keys())[:3]
+                )
+                st.markdown(f"""
+                <div class="alert alert-info" style="margin-top:0;">
+                    <span class="alert-icon">ℹ</span>
+                    <span><strong>Top glossary terms used:</strong> {top_terms_str}</span>
+                </div>
+                """, unsafe_allow_html=True)
+
+            # ── Quality Gate ──
+            st.markdown('<div class="section-label">Quality Gate</div>', unsafe_allow_html=True)
+            qg = _s.get("quality_gate", {})
+            gate_rows = [
+                ("✅" if qg.get("no_residue") else "⚠️",
+                 "German residue",
+                 "Clean" if qg.get("no_residue") else "Residue found — see warnings"),
+                ("✅", "Row 1 (headers)", "Untouched"),
+                ("✅" if qg.get("protected_columns") else "ℹ️",
+                 "Protected columns",
+                 ", ".join(qg.get("protected_columns", [])) or "None found"),
+                ("⚠️" if qg.get("possible_missed") else "✅",
+                 "Missed columns",
+                 ", ".join(qg.get("possible_missed", [])) or "All matched"),
+                ("✅", "Translation Memory",
+                 f"{_s.get('tm_hits', 0)} hits / {_s.get('tm_misses', 0)} misses"),
+                ("✅", "Batch processing",
+                 f"{_s.get('batch_count', 0)} batches · avg {_s.get('avg_batch_size', 0)} cells/req"),
+                (
+                    "✅" if _s.get("refinement_enabled") else "ℹ️",
+                    "Premium French Refinement",
+                    (
+                        f"{_s.get('cells_refined', 0)} cells improved "
+                        f"({_s.get('refinement_api_calls', 0)} refinement batch(es))"
+                        if _s.get("refinement_enabled")
+                        else "Disabled"
+                    ),
+                ),
+            ]
+            qg_rows_html = "".join(
+                f"""<div class="qg-row">
+                    <span class="qg-icon">{icon}</span>
+                    <span class="qg-label">{label}</span>
+                    <span class="qg-value">{value}</span>
+                </div>"""
+                for icon, label, value in gate_rows
+            )
+            st.markdown(f'<div class="qg">{qg_rows_html}</div>', unsafe_allow_html=True)
+
+            # ── Review Dashboard ──
+            st.markdown('<div class="section-label">Review Dashboard</div>', unsafe_allow_html=True)
+            render_review_dashboard(_s.get("all_warnings", []), _s, _hix)
+
+            # ── Export Audit ──
+            n_orig       = _s.get("original_highlights_preserved", 0)
+            n_rev        = _s.get("review_highlights_applied", 0)
+            n_gloss      = _s.get("glossary_hits", 0)
+            n_total_warn = len(_s.get("all_warnings", []))
+            rev_label = (
+                f"{n_rev} cell(s) highlighted (Critical + High only)"
+                if _hix
+                else f"0 — checkbox off, {n_total_warn} warning(s) in dashboard only"
+            )
+            orig_label = f"{n_orig} cell(s) — source formatting preserved" if n_orig else "None in this file"
+            audit_rows = [
+                ("📋", "Original source highlights",    orig_label),
+                ("🟡" if n_rev else "✅", "Review warnings in Excel", rev_label),
+                ("✅", "Glossary hits in Excel",
+                 f"{n_gloss} hit(s) tracked in analytics — no cell color applied"),
+            ]
+            audit_html = "".join(
+                f"""<div class="qg-row">
+                    <span class="qg-icon">{icon}</span>
+                    <span class="qg-label">{label}</span>
+                    <span class="qg-value">{value}</span>
+                </div>"""
+                for icon, label, value in audit_rows
+            )
+            st.markdown('<div class="section-label">Export Audit</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="qg">{audit_html}</div>', unsafe_allow_html=True)
+
+            # ── Completion banner ──
+            cost_str        = (
+                f"${_s['estimated_cost_usd']:.4f}"
+                if _s.get("estimated_cost_usd") is not None
+                else "cost N/A"
+            )
+            processed_sheet = _s.get("sheet_name", "")
+            n_warn_str      = f" · {n_total_warn} warning(s)" if n_total_warn else ""
+            if not _s.get("all_warnings"):
+                st.markdown(f"""
+                <div class="success-banner">
+                    <div class="success-banner-icon">✓</div>
+                    <div>
+                        <div class="success-banner-title">Translation complete</div>
+                        <div class="success-banner-sub">
+                            Sheet: {processed_sheet} · {_s["cells_translated"]} cells ·
+                            {_s["total_time"]} · {cost_str}
+                        </div>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+            else:
+                st.markdown(f"""
+                <div class="warn-banner">
+                    <div class="warn-banner-title">
+                        Translation complete{n_warn_str}
+                    </div>
+                    <div class="warn-banner-sub">
+                        Sheet: {processed_sheet} · {_s["total_time"]} · {cost_str}
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+
+            # ── Download buttons (always available after translation) ──
+            st.markdown("<br>", unsafe_allow_html=True)
+
+            if _cb is not None:
+                dl_left, dl_right = st.columns(2)
+                with dl_left:
+                    st.download_button(
+                        label="↓ Download Excel",
+                        data=_ed,
+                        file_name=_ofn,
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True,
+                        key="dl_excel_btn",
+                    )
+                with dl_right:
+                    st.download_button(
+                        label=f"↓ Download CSV (sans «{_crc}»)",
+                        data=_cb,
+                        file_name=_cf,
+                        mime="text/csv",
+                        use_container_width=True,
+                        key="dl_csv_btn",
+                    )
+            else:
+                # Name column not found — Excel only + manual CSV column picker
+                _, dl_col, _ = st.columns([1, 2, 1])
+                with dl_col:
+                    st.download_button(
+                        label="↓ Download Excel",
+                        data=_ed,
+                        file_name=_ofn,
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True,
+                        key="dl_excel_only_btn",
+                    )
+                import io as _io
+                import openpyxl as _openpyxl
+                _wb_pk = _openpyxl.load_workbook(_io.BytesIO(_ed), data_only=True)
+                _ws_pk = _wb_pk[_ssh] if _ssh in _wb_pk.sheetnames else _wb_pk.active
+                _all_h = [
+                    str(_ws_pk.cell(row=_hdr, column=c).value or "")
+                    for c in range(1, _ws_pk.max_column + 1)
+                    if _ws_pk.cell(row=_hdr, column=c).value is not None
+                ]
+                st.warning(
+                    "CSV export: could not auto-detect the product name column. "
+                    "Select it manually to generate the CSV."
+                )
+                if _all_h:
+                    _chosen = st.selectbox(
+                        "Column to exclude from CSV",
+                        options=_all_h,
+                        key="csv_col_manual_select",
+                    )
+                    if st.button("Generate CSV without selected column", key="csv_manual_gen_btn"):
+                        _csv_b2, _csv_f2, _csv_rc2 = generate_csv_export(
+                            _ed, _ssh, _ofnm, header_row=_hdr, force_exclude_header=_chosen,
+                        )
+                        if _csv_b2:
+                            # Persist the generated CSV so it survives the next rerun
+                            st.session_state["_tr_result"]["csv_bytes"]       = _csv_b2
+                            st.session_state["_tr_result"]["csv_filename"]    = _csv_f2
+                            st.session_state["_tr_result"]["csv_removed_col"] = _csv_rc2
+                            st.rerun()
 
 
 # =============================================================================
