@@ -13,6 +13,7 @@ import json
 import uuid
 import copy
 import hmac
+import string
 import tempfile
 import threading
 import time
@@ -285,6 +286,9 @@ TRANSLATE_ALIASES_T1 = {
         "artikelname", "artikel name", "artikelbezeichnung", "artikel bezeichnung",
         "produktbezeichnung", "produkt bezeichnung", "bezeichnung", "titelname",
         "title", "product title", "producttitle",
+        # additional real-world variations
+        "long name", "longname", "long description", "longdescription",
+        "kurzbeschreibung", "produkttitel", "item name", "itemname",
     ],
     "colorDetail": [
         "colordetail", "color detail", "colourdetail", "colour detail",
@@ -293,6 +297,9 @@ TRANSLATE_ALIASES_T1 = {
         "variantcolor", "variant color", "couleur", "detailcouleur",
         "detail couleur", "couleurdetail", "couleur detail",
         "colorangabe", "color angabe", "couleurduproduit",
+        # additional real-world variations
+        "farbton", "farbvariante", "color description", "colour description",
+        "kleur", "kleurdetail", "kleur detail",
     ],
     "deliveryScope": [
         "deliveryscope", "delivery scope", "delivery_scope", "lieferumfang",
@@ -300,6 +307,9 @@ TRANSLATE_ALIASES_T1 = {
         "lieferung", "inhaltsangabe", "contenulivraison", "contenu livraison",
         "perimetre livraison", "perimetre de livraison", "scope de livraison",
         "leveringsomvang", "leveromfang",
+        # additional real-world variations
+        "im lieferumfang", "lieferumfang enthalt", "was ist enthalten",
+        "included items", "included accessories", "inbegrepen",
     ],
     "materialDetail": [
         "materialdetail", "material detail", "materialdetails", "material details",
@@ -307,6 +317,9 @@ TRANSLATE_ALIASES_T1 = {
         "materialangaben", "material angaben", "werkstoffe", "werkstoff",
         "materiaux", "detail matiere", "detailmatiere", "compositionmatiere",
         "composition matiere", "matiere",
+        # additional real-world variations
+        "materials", "material description", "rohstoffe", "material overview",
+        "materiaaldetail", "materiaal detail", "materialen",
     ],
     "otherMeasurements": [
         "othermeasurements", "other measurements", "other measurement",
@@ -315,12 +328,20 @@ TRANSLATE_ALIASES_T1 = {
         "gesamtmasse", "gesamt masse", "produktmasse", "produkt masse",
         "dimensionen", "ausmasse", "aus masse", "autresmesures", "autres mesures",
         "mesures", "groesse", "breite hohe tiefe",
+        # additional real-world variations
+        "product dimensions", "product size", "produktgrosse", "grosse",
+        "size", "sizes", "maten", "afmetingen", "breedte hoogte diepte",
+        "b x h x t", "width height depth", "breite x hohe x tiefe",
     ],
     "qualityDetail": [
         "qualitydetail", "quality detail", "qualitydetails", "quality details",
         "qualitatsdetail", "qualitats detail", "qualite", "detail qualite",
         "detailqualite", "qualitaet", "pflegehinweise", "pflege hinweise",
         "eigenschaften", "produkteigenschaften",
+        # additional real-world variations
+        "care instructions", "care info", "pflegeanleitung", "pflegeempfehlung",
+        "features", "product features", "kwaliteit", "kwaliteitsdetail",
+        "onderhoud", "onderhoudsinstructies",
     ],
     "textileCompositionCover1": [
         "textilecompositioncover1", "textile composition cover 1",
@@ -336,12 +357,18 @@ TRANSLATE_ALIASES_T1 = {
         "materialzusammensetzung",  "material zusammensetzung",
         "textilescomposition",      "textiles composition",
         "bezugzusammensetzung",     "bezug zusammensetzung",
+        # additional real-world variations
+        "fabric composition", "fabric content", "stoffzusammensetzung",
+        "stof samenstelling", "textielesamenstelling", "samenstellingbekleding",
     ],
     "variantName": [
         "variantname", "variant name", "variantenname", "varianten name",
         "variantbezeichnung", "variant bezeichnung",
         "ausfuhrung", "ausfuehrung", "ausführung", "variante",
         "variantennamen", "varianten namen",
+        # additional real-world variations
+        "option", "option name", "optionname", "model", "modell",
+        "uitvoering", "variantbenaming",
     ],
 }
 
@@ -1587,14 +1614,29 @@ def render_column_report(classification: dict):
     if not to_translate:
         with st.expander("🔍 Detection debug report", expanded=True):
             ws_info = classification.get("ws_info", {})
-            col1, col2, col3 = st.columns(3)
-            col1.metric("Header row", header_row)
-            col2.metric("Columns found", ws_info.get("columns_found", len(normalized_map)))
-            col3.metric("Sheet rows", ws_info.get("max_row", "—"))
+
+            real_rows = ws_info.get("real_max_row") or ws_info.get("max_row", "—")
+            real_cols = ws_info.get("real_max_col") or ws_info.get("max_column", "—")
+            opl_rows  = ws_info.get("openpyxl_max_row", ws_info.get("max_row", "—"))
+            opl_cols  = ws_info.get("openpyxl_max_col", ws_info.get("max_column", "—"))
+
+            c1, c2, c3, c4, c5 = st.columns(5)
+            c1.metric("Header row", header_row)
+            c2.metric("Cols detected", ws_info.get("columns_found", len(normalized_map)))
+            c3.metric("Real rows", real_rows)
+            c4.metric("Real cols", real_cols)
+            c5.metric("openpyxl rows", opl_rows, delta=None,
+                      help="openpyxl's max_row from XML metadata — can be wrong if file metadata is stale")
+
+            if real_rows != opl_rows or real_cols != opl_cols:
+                st.info(
+                    f"openpyxl reported {opl_rows} rows × {opl_cols} cols, "
+                    f"but the actual data scan found {real_rows} rows × {real_cols} cols. "
+                    "This is normal for files with stale workbook metadata."
+                )
 
             all_raw = list(normalized_map.keys())
             if all_raw:
-                # Build a raw→col_idx lookup from all classification buckets
                 all_col_idx = {}
                 all_col_idx.update(protected)
                 all_col_idx.update(ignored)
@@ -1611,7 +1653,11 @@ def render_column_report(classification: dict):
                 ]
                 st.dataframe(rows, use_container_width=True, hide_index=True)
             else:
-                st.warning("No headers found in the detected header row. The sheet may be empty or the header row was not detected correctly.")
+                st.warning(
+                    f"No headers found in row {header_row}. "
+                    f"Real data scan found {real_rows} rows × {real_cols} cols. "
+                    "Try the manual column selector below."
+                )
 
 
 def render_sidebar() -> str:
@@ -2725,60 +2771,92 @@ def detect_target_sheet(sheet_names: list) -> str | None:
     return None
 
 
-def detect_header_row(worksheet, max_rows: int = 10) -> tuple[int, dict]:
+def scan_sheet(
+    ws,
+    header_scan_rows: int = 20,
+    row_hard_limit: int = 5000,
+) -> tuple[int, int, int, dict]:
     """
-    Scan the first max_rows rows to find the most likely header row.
-    Returns (row_number, {raw_header_text: col_index}).
-    Falls back to row 1 if nothing scores well.
+    Single-pass worksheet scan — safe in read_only mode (never iterates twice).
 
-    Uses iter_rows() exclusively — safe for both read-only and normal workbooks.
-    worksheet[row_num] is broken in read_only=True mode (openpyxl streaming reader).
+    Reads actual cell data from the XML stream; does NOT rely on ws.max_row or
+    ws.max_column, which openpyxl can misreport when workbook metadata is stale.
+
+    Returns:
+        real_max_row  — last row that contains any non-empty cell
+        real_max_col  — last column that contains any non-empty cell
+        header_row    — 1-based row number of the best-scoring candidate header row
+        headers       — {raw_header_text: col_index} for that header row
     """
-    best_row     = 1
-    best_score   = -1
+    real_max_row = 0
+    real_max_col = 0
+    # Buffer the first header_scan_rows rows for scoring
+    row_buffer: dict[int, list[tuple[int, object]]] = {}
+
+    try:
+        for row_tuple in ws.iter_rows(min_row=1):
+            if not row_tuple:
+                continue
+            row_num = row_tuple[0].row
+            if row_num is None:
+                continue
+            if row_num > row_hard_limit:
+                break
+            for cell in row_tuple:
+                val = cell.value
+                if val is None:
+                    continue
+                if not str(val).strip():
+                    continue
+                r = cell.row or 0
+                c = cell.column or 0
+                if r > real_max_row:
+                    real_max_row = r
+                if c > real_max_col:
+                    real_max_col = c
+                if r <= header_scan_rows:
+                    row_buffer.setdefault(r, []).append((c, val))
+    except Exception:
+        pass
+
+    best_row    = 1
+    best_score  = -1
     best_headers: dict[str, int] = {}
 
-    max_row    = worksheet.max_row or max_rows
-    scan_limit = min(max_rows, max_row)
-
-    for row_tuple in worksheet.iter_rows(min_row=1, max_row=scan_limit):
-        if not row_tuple:
-            continue
-        row_num = row_tuple[0].row
+    for row_num in sorted(row_buffer.keys()):
         score   = 0
         headers: dict[str, int] = {}
-
-        for cell in row_tuple:
-            if cell.value is None:
-                continue
-            raw  = str(cell.value)
+        for col_idx, value in row_buffer[row_num]:
+            raw  = str(value)
             text = raw.strip()
             if not text:
                 continue
-
-            # Penalty: looks like a pure number (data row, not header row)
             try:
                 float(raw)
                 score -= 3
                 continue
             except (ValueError, TypeError):
                 pass
-
-            col_idx = cell.column if cell.column is not None else (len(headers) + 1)
             headers[text] = col_idx
-            score += 1  # each non-empty string cell
-
-            # Bonus: contains known header keywords
+            score += 1
             norm = _normalize_col_header(text)
             if any(kw in norm for kw in HEADER_SCORE_KEYWORDS):
                 score += 3
-
         if score > best_score:
             best_score   = score
             best_row     = row_num
             best_headers = headers
 
-    return best_row, best_headers
+    return real_max_row, real_max_col, best_row, best_headers
+
+
+def detect_header_row(worksheet, max_rows: int = 20) -> tuple[int, dict]:
+    """
+    Wrapper kept for backward compat. Prefer scan_sheet() for new callers.
+    Uses scan_sheet internally so it inherits the real-range fix.
+    """
+    _, _, header_row, headers = scan_sheet(worksheet, header_scan_rows=max_rows)
+    return header_row, headers
 
 
 def detect_columns(worksheet) -> dict:
@@ -3060,8 +3138,11 @@ def process_excel_with_progress(
         if not to_translate:
             raise ValueError("No translatable columns found in the file.")
 
-        data_start_row = header_row + 1     # first row with actual data
-        total_rows     = max(0, worksheet.max_row - header_row)
+        # ws.max_row can still be wrong in some openpyxl versions even without read_only.
+        # Compute a reliable upper bound by taking max(ws.max_row, last row with data).
+        _ws_max_row = worksheet.max_row or 1
+        data_start_row = header_row + 1
+        total_rows     = max(0, _ws_max_row - header_row)
         start_time     = time.time()
 
         # ── Phase 0: Pre-scan ─────────────────────────────────────────────────
@@ -3074,7 +3155,7 @@ def process_excel_with_progress(
         )
 
         cells_queue: list[tuple] = []
-        for row_num in range(data_start_row, worksheet.max_row + 1):
+        for row_num in range(data_start_row, _ws_max_row + 1):
             for col_header, (col_idx, canonical) in to_translate.items():
                 cell = worksheet.cell(row=row_num, column=col_idx)
                 raw  = cell.value
@@ -3832,14 +3913,21 @@ def translator_page():
                 key="sheet_selector",
             )
 
+        # Single-pass scan: real dimensions + header detection (read_only safe)
         _peek_ws = wb_peek[selected_sheet]
-        header_row, peek_headers = detect_header_row(_peek_ws)
-        _ws_info = {
-            "max_row":       _peek_ws.max_row,
-            "max_column":    _peek_ws.max_column,
-            "columns_found": len(peek_headers),
-        }
+        _openpyxl_max_row = _peek_ws.max_row
+        _openpyxl_max_col = _peek_ws.max_column
+        real_max_row, real_max_col, header_row, peek_headers = scan_sheet(_peek_ws)
         wb_peek.close()
+
+        _ws_info = {
+            "openpyxl_max_row":  _openpyxl_max_row,
+            "openpyxl_max_col":  _openpyxl_max_col,
+            "real_max_row":      real_max_row,
+            "real_max_col":      real_max_col,
+            "columns_found":     len(peek_headers),
+        }
+
         classification = classify_columns(peek_headers)
         classification["header_row"] = header_row
         classification["ws_info"]    = _ws_info
@@ -3847,7 +3935,7 @@ def translator_page():
         render_column_report(classification)
 
         # Manual fallback when automatic detection found nothing
-        if not classification["to_translate"] and peek_headers:
+        if not classification["to_translate"]:
             st.markdown("""
             <div class="alert alert-warn" style="margin-top:0;">
                 <span class="alert-icon">⚠</span>
@@ -3859,9 +3947,18 @@ def translator_page():
             </div>
             """, unsafe_allow_html=True)
 
-            # Offer all non-protected headers as candidates
+            # Build candidate list — use headers if available, else column letters
             protected_keys = set(classification["protected"].keys())
-            candidates = [h for h in peek_headers if h not in protected_keys]
+            if peek_headers:
+                candidates = [h for h in peek_headers if h not in protected_keys]
+                candidate_col_map = {h: peek_headers[h] for h in candidates}
+            else:
+                # No headers found at all — offer column letters A–Z up to real_max_col
+                _letters = list(string.ascii_uppercase)
+                _extended = _letters + [f"A{l}" for l in _letters]
+                col_count = max(real_max_col, 1)
+                candidates = [_extended[i] for i in range(min(col_count, len(_extended)))]
+                candidate_col_map = {lbl: (i + 1) for i, lbl in enumerate(candidates)}
 
             manual_cols = st.multiselect(
                 "Select columns to translate:",
@@ -3873,8 +3970,7 @@ def translator_page():
             if manual_cols:
                 manual_to_translate = {}
                 for h in manual_cols:
-                    col_idx = peek_headers[h]
-                    # Best-effort canonical type; fallback to "other"
+                    col_idx = candidate_col_map[h]
                     canonical, _, _ = _classify_header(h)
                     manual_to_translate[h] = (col_idx, canonical or "other")
                 classification["to_translate"] = manual_to_translate
