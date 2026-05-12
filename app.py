@@ -41,6 +41,19 @@ from database import (
     db_log_login,
     db_get_login_activity,
     db_get_admin_stats,
+    db_save_glossary_suggestions,
+    db_load_glossary_suggestions,
+    db_update_suggestion_status,
+)
+from intelligence import (
+    normalize_text,
+    dedup_api_queue,
+    try_glossary_only,
+    try_pattern_translation,
+    semantic_tm_match,
+    detect_product_type,
+    get_product_type_hint,
+    extract_glossary_suggestions,
 )
 
 load_dotenv()
@@ -2056,6 +2069,7 @@ def translate_batch(
     glossary_run_stats: dict,
     notify_fn=None,
     target_language: str = "French",
+    product_type_hint: str = "",
 ) -> list[str]:
     if not texts:
         return []
@@ -2117,7 +2131,8 @@ def translate_batch(
 
     system_prompt = (
         f"You are a professional translator for {store_label} e-commerce.\n"
-        f"Translate each German text to {target_label}.\n{batch_rules}{glossary_block}\n\n"
+        f"Translate each German text to {target_label}.\n{batch_rules}{glossary_block}"
+        f"{product_type_hint}\n\n"
         f"Return ONLY a valid JSON array of exactly {n} translated strings, "
         "in the same order as the input. No other text."
     )
@@ -2208,6 +2223,7 @@ def _run_batch_task(
     retry_counter: list,
     retry_lock: threading.Lock,
     target_language: str = "French",
+    product_type_hint: str = "",
 ) -> dict:
     """Worker: runs one translation batch in a thread. No shared-state mutations."""
     local_tokens  = {"prompt_tokens": 0, "completion_tokens": 0}
@@ -2226,6 +2242,7 @@ def _run_batch_task(
             local_tokens, glossary, local_glossary,
             notify_fn=_notify,
             target_language=target_language,
+            product_type_hint=product_type_hint,
         )
     except Exception:
         failed       = True
@@ -3020,6 +3037,15 @@ def process_excel_with_progress(
         "refinement_api_calls":   0,
         "refinement_prompt_tokens": 0,
         "refinement_completion_tokens": 0,
+        # Intelligence Engine (populated during processing)
+        "semantic_tm_hits":       0,
+        "duplicate_groups":       0,
+        "duplicate_cells_saved":  0,
+        "glossary_only_count":    0,
+        "pattern_count":          0,
+        "gpt_calls_avoided":      0,
+        "detected_product_type":  "generic",
+        "_glossary_suggestions":  [],
     }
 
     with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
@@ -3061,6 +3087,23 @@ def process_excel_with_progress(
         if total_to_process == 0:
             raise ValueError("All translatable cells are empty — nothing to translate.")
 
+        # ── Intelligence: Product Type Detection ─────────────────────────────
+        name_samples = [text for _, _, _, can, text in cells_queue if can == "name"][:20]
+        ctx_samples  = [text for _, _, _, can, text in cells_queue if can == "materialDetail"][:5]
+        product_type = detect_product_type(name_samples, ctx_samples)
+        product_hint = get_product_type_hint(product_type, target_language)
+
+        # TIE stats tracking
+        tie_stats = {
+            "semantic_tm_hits":      0,
+            "duplicate_groups":      0,
+            "duplicate_cells_saved": 0,
+            "glossary_only_count":   0,
+            "pattern_count":         0,
+            "gpt_calls_avoided":     0,
+            "detected_product_type": product_type,
+        }
+
         # ── Phase 1: Translation Memory check ────────────────────────────────
         results: dict[tuple, str] = {}
         api_queue: list[tuple]    = []
@@ -3075,13 +3118,64 @@ def process_excel_with_progress(
                 api_queue.append((row_num, col_header, col_idx, canonical, text))
                 stats["tm_misses"] += 1
 
+        # ── Intelligence: Duplicate Detection ────────────────────────────────
+        unique_queue, dup_restore_map, dup_groups, cells_saved = dedup_api_queue(api_queue)
+        tie_stats["duplicate_groups"]      = dup_groups
+        tie_stats["duplicate_cells_saved"] = cells_saved
+        tie_stats["gpt_calls_avoided"]    += cells_saved
+
+        # ── Intelligence: Glossary-Only + Pattern + Semantic TM ──────────────
+        final_api_queue: list[tuple] = []
+        for item in unique_queue:
+            row_num, col_header, col_idx, canonical, text = item
+            col_type = _tm_col_type(canonical)
+            resolved = False
+
+            # Glossary-only resolution
+            gl_tr = try_glossary_only(text, glossary, target_language)
+            if gl_tr is not None:
+                results[(row_num, col_idx)] = gl_tr
+                tm_put(tm, text, gl_tr, col_type, target_language)
+                tie_stats["glossary_only_count"] += 1
+                tie_stats["gpt_calls_avoided"]   += 1
+                resolved = True
+
+            # Pattern / rule-based translation
+            if not resolved:
+                pat_tr = try_pattern_translation(text, glossary, target_language)
+                if pat_tr is not None:
+                    results[(row_num, col_idx)] = pat_tr
+                    tm_put(tm, text, pat_tr, col_type, target_language)
+                    tie_stats["pattern_count"]      += 1
+                    tie_stats["gpt_calls_avoided"]  += 1
+                    resolved = True
+
+            # Semantic TM match
+            if not resolved:
+                sem = semantic_tm_match(tm, text, col_type, target_language)
+                if sem is not None:
+                    sem_tr, _score = sem
+                    results[(row_num, col_idx)] = sem_tr
+                    tm_put(tm, text, sem_tr, col_type, target_language)
+                    tie_stats["semantic_tm_hits"]   += 1
+                    tie_stats["gpt_calls_avoided"]  += 1
+                    resolved = True
+
+            if not resolved:
+                final_api_queue.append(item)
+
+        # Restore duplicate results (copy from representative cell)
+        for (dup_row, dup_col), (rep_row, rep_col) in dup_restore_map.items():
+            if (rep_row, rep_col) in results:
+                results[(dup_row, dup_col)] = results[(rep_row, rep_col)]
+
         # ── Phase 2: Parallel batch translation ──────────────────────────────
         by_col_type: dict[str, list] = {}
-        for item in api_queue:
+        for item in final_api_queue:
             ct = _tm_col_type(item[3])
             by_col_type.setdefault(ct, []).append(item)
 
-        total_api_cells = len(api_queue)
+        total_api_cells = len(final_api_queue)
 
         # Build a flat, ordered batch list across all col_types
         batch_list: list[tuple] = []
@@ -3104,8 +3198,8 @@ def process_excel_with_progress(
             future_map = {
                 executor.submit(
                     _run_batch_task,
-                    client, bid, batch_items, canonical, glossary, retry_counter, retry_lock,
-                    target_language,
+                    client, bid, batch_items, canonical, glossary,
+                    retry_counter, retry_lock, target_language, product_hint,
                 ): bid
                 for bid, (batch_items, canonical) in enumerate(batch_list)
             }
@@ -3154,8 +3248,18 @@ def process_excel_with_progress(
                 tm_put(tm, text, tr, _tm_col_type(canonical), target_language)
                 stats["cells_translated"] += 1
 
-        # Count TM hits as translated
+        # Restore duplicate cells into the translated count
+        stats["cells_translated"] += len(dup_restore_map)
+
+        # Count TM + intelligence hits as translated (exact TM)
         stats["cells_translated"] += stats["tm_hits"]
+        # Add intelligence-resolved cells to translated count
+        stats["cells_translated"] += (
+            tie_stats["glossary_only_count"]
+            + tie_stats["pattern_count"]
+            + tie_stats["semantic_tm_hits"]
+        )
+
         stats["batch_count"]       = total_batches
         stats["failed_batches"]    = failed_batches
         stats["avg_batch_duration"] = round(
@@ -3167,14 +3271,29 @@ def process_excel_with_progress(
             if total_batches > 0 else 0.0
         )
 
-        # 1 API call per cell without batching + TM; now 1 per batch + 0 for TM hits
+        # Merge TIE stats
+        stats.update(tie_stats)
+
+        # API call accounting: include all intelligence-layer savings
         stats["api_calls_made"]    = total_batches
-        stats["api_calls_reduced"] = max(total_to_process - total_batches - stats["tm_hits"], 0)
+        total_avoided = (
+            stats["tm_hits"]
+            + tie_stats["gpt_calls_avoided"]
+        )
+        stats["api_calls_reduced"] = max(total_to_process - total_batches - total_avoided, 0)
+
+        # Glossary suggestions — extract from source texts for admin review
+        all_source_texts = [text for _, _, _, _, text in cells_queue]
+        suggestions = extract_glossary_suggestions(
+            all_source_texts, glossary, target_language,
+            min_occurrences=2, max_results=20,
+        )
+        stats["_glossary_suggestions"] = suggestions
 
         # Persist TM
         tm["global_stats"]["total_hits"]            += stats["tm_hits"]
         tm["global_stats"]["total_misses"]          += stats["tm_misses"]
-        tm["global_stats"]["total_api_calls_saved"] += stats["tm_hits"]
+        tm["global_stats"]["total_api_calls_saved"] += stats["tm_hits"] + tie_stats["semantic_tm_hits"]
         save_translation_memory(tm)
 
         # Persist Glossary stats
@@ -3883,8 +4002,21 @@ def translator_page():
                     "csv_removed_column":        _csv_removed_col or "",
                     "csv_delimiter":             ";",
                     "csv_encoding":              "utf-8-sig",
+                    # Intelligence Engine fields
+                    "semantic_tm_hits":          stats.get("semantic_tm_hits", 0),
+                    "duplicate_groups":          stats.get("duplicate_groups", 0),
+                    "duplicate_cells_saved":     stats.get("duplicate_cells_saved", 0),
+                    "glossary_only_count":       stats.get("glossary_only_count", 0),
+                    "pattern_count":             stats.get("pattern_count", 0),
+                    "gpt_calls_avoided":         stats.get("gpt_calls_avoided", 0),
+                    "detected_product_type":     stats.get("detected_product_type", "generic"),
                 })
                 db_save_warnings(job_id, stats.get("all_warnings", []))
+
+                # Persist glossary suggestions for admin review
+                suggestions = stats.get("_glossary_suggestions", [])
+                if suggestions:
+                    db_save_glossary_suggestions(suggestions, job_id, target_language)
 
                 # Store everything in session_state so results persist across reruns
                 # (e.g. when a download button is clicked)
@@ -4562,6 +4694,83 @@ def analytics_page():
         </div>
         """, unsafe_allow_html=True)
 
+    # ── Translation Intelligence Engine ──────────────────────────────────────
+    total_sem_hits    = sum(r.get("semantic_tm_hits", 0)      for r in history)
+    total_dup_groups  = sum(r.get("duplicate_groups", 0)       for r in history)
+    total_dup_saved   = sum(r.get("duplicate_cells_saved", 0)  for r in history)
+    total_gloss_only  = sum(r.get("glossary_only_count", 0)    for r in history)
+    total_pattern     = sum(r.get("pattern_count", 0)          for r in history)
+    total_avoided     = sum(r.get("gpt_calls_avoided", 0)      for r in history)
+
+    # Product type distribution
+    from collections import Counter as _Counter
+    type_counts = _Counter(
+        r.get("detected_product_type", "generic")
+        for r in history
+        if r.get("detected_product_type") and r.get("detected_product_type") != "generic"
+    )
+
+    if total_avoided > 0 or total_sem_hits > 0 or type_counts:
+        st.markdown('<div class="section-label">Translation Intelligence Engine</div>', unsafe_allow_html=True)
+        avoided_cost = round(
+            total_avoided * (500 * _INPUT_COST_PER_TOKEN + 100 * _OUTPUT_COST_PER_TOKEN), 4
+        )
+        st.markdown(f"""
+        <div class="kpi-row">
+            <div class="kpi">
+                <div class="kpi-label">GPT Calls Avoided</div>
+                <div class="kpi-value success">{total_avoided:,}</div>
+                <div class="kpi-sub">Est. saved ${avoided_cost:.4f}</div>
+            </div>
+            <div class="kpi">
+                <div class="kpi-label">Duplicate Groups</div>
+                <div class="kpi-value accent">{total_dup_groups:,}</div>
+                <div class="kpi-sub">{total_dup_saved:,} cells deduplicated</div>
+            </div>
+            <div class="kpi">
+                <div class="kpi-label">Glossary-Only</div>
+                <div class="kpi-value">{total_gloss_only:,}</div>
+                <div class="kpi-sub">No API needed</div>
+            </div>
+            <div class="kpi">
+                <div class="kpi-label">Pattern Matches</div>
+                <div class="kpi-value">{total_pattern:,}</div>
+                <div class="kpi-sub">Dimensions / percentages</div>
+            </div>
+        </div>
+        <div class="kpi-row-3">
+            <div class="kpi">
+                <div class="kpi-label">Semantic TM Hits</div>
+                <div class="kpi-value accent">{total_sem_hits:,}</div>
+                <div class="kpi-sub">Near-match reuse (≥88%)</div>
+            </div>
+            <div class="kpi">
+                <div class="kpi-label">Top Product Category</div>
+                <div class="kpi-value" style="font-size:18px;text-transform:capitalize;">
+                    {type_counts.most_common(1)[0][0] if type_counts else "—"}
+                </div>
+                <div class="kpi-sub">Detected in source files</div>
+            </div>
+            <div class="kpi">
+                <div class="kpi-label">Categories Detected</div>
+                <div class="kpi-value">{len(type_counts)}</div>
+                <div class="kpi-sub">Unique furniture types</div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        if type_counts:
+            cat_chips = "".join(
+                f'<span class="chip chip-accent" style="text-transform:capitalize;">{cat} · {n}×</span>'
+                for cat, n in type_counts.most_common(8)
+            )
+            st.markdown(f"""
+            <div class="card" style="margin-top:0;">
+                <div class="card-title">Product categories translated</div>
+                <div>{cat_chips}</div>
+            </div>
+            """, unsafe_allow_html=True)
+
 
 # =============================================================================
 # PAGE: GLOSSARY MANAGEMENT
@@ -4660,6 +4869,53 @@ def glossary_page():
         save_glossary(glossary, active_lang)
         st.success(f"{target_col_label} glossary reset to defaults.")
         st.rerun()
+
+    # ── AI-Assisted Glossary Suggestions ────────────────────────────────────
+    st.markdown('<div class="section-label">AI Glossary Suggestions</div>', unsafe_allow_html=True)
+    suggestions = db_load_glossary_suggestions(target_language=active_lang, status="pending")
+
+    if not suggestions:
+        st.markdown("""
+        <div class="alert alert-info">
+            <span class="alert-icon">ℹ</span>
+            <span>No pending suggestions for this language. Suggestions are auto-generated
+            after each translation job and appear here for review.</span>
+        </div>
+        """, unsafe_allow_html=True)
+    else:
+        st.markdown(
+            f'<div class="alert alert-warn"><span class="alert-icon">💡</span>'
+            f'<span><strong>{len(suggestions)} suggestion(s)</strong> detected from recent jobs. '
+            f'Review and accept or reject each term.</span></div>',
+            unsafe_allow_html=True,
+        )
+        for s in suggestions:
+            sid    = s["id"]
+            term   = s["term"]
+            occ    = s["occurrences"]
+            ctx    = s.get("example_context", "")[:80]
+            col_a, col_b, col_c = st.columns([3, 1, 1])
+            with col_a:
+                proposed = st.text_input(
+                    f"**{term}** ({occ}× in source) — propose {target_col_label}:",
+                    key=f"sug_input_{sid}",
+                    placeholder=f"Type {target_col_label} translation…",
+                    help=f"Context: {ctx}" if ctx else "",
+                )
+            with col_b:
+                if st.button("Accept", key=f"sug_acc_{sid}", use_container_width=True):
+                    if proposed.strip():
+                        glossary["terms"][term] = proposed.strip()
+                        save_glossary(glossary, active_lang)
+                        db_update_suggestion_status(sid, "accepted")
+                        st.success(f"Added **{term}** → **{proposed.strip()}**")
+                        st.rerun()
+                    else:
+                        st.error("Enter a translation first.")
+            with col_c:
+                if st.button("Reject", key=f"sug_rej_{sid}", use_container_width=True):
+                    db_update_suggestion_status(sid, "rejected")
+                    st.rerun()
 
 
 # =============================================================================

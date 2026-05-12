@@ -106,6 +106,17 @@ CREATE TABLE IF NOT EXISTS app_metrics (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS glossary_suggestions (
+    id              TEXT PRIMARY KEY,
+    term            TEXT NOT NULL,
+    target_language TEXT NOT NULL DEFAULT 'French',
+    occurrences     INTEGER DEFAULT 1,
+    example_context TEXT,
+    status          TEXT DEFAULT 'pending',
+    job_id          TEXT,
+    created_at      TEXT NOT NULL
+);
 """
 
 
@@ -136,6 +147,7 @@ def init_db(
     with _db() as conn:
         conn.executescript(_SCHEMA)
     _ensure_v2_migration()
+    _ensure_v3_migration()
     _migrate_json_if_needed()
     if default_glossary:
         _seed_glossary_if_empty(default_glossary, "French")
@@ -268,6 +280,45 @@ def _migrate_tm_keys_to_language_prefix() -> None:
         pass
 
 
+def _ensure_v3_migration() -> None:
+    """Add Intelligence Engine columns to translation_jobs and glossary_suggestions table."""
+    if _get_schema_version() >= 3:
+        return
+    try:
+        new_cols = [
+            ("semantic_tm_hits",       "INTEGER DEFAULT 0"),
+            ("duplicate_groups",       "INTEGER DEFAULT 0"),
+            ("duplicate_cells_saved",  "INTEGER DEFAULT 0"),
+            ("glossary_only_count",    "INTEGER DEFAULT 0"),
+            ("pattern_count",          "INTEGER DEFAULT 0"),
+            ("gpt_calls_avoided",      "INTEGER DEFAULT 0"),
+            ("detected_product_type",  "TEXT DEFAULT 'generic'"),
+        ]
+        with _db() as conn:
+            existing = _table_columns(conn, "translation_jobs")
+            for col_name, col_def in new_cols:
+                if col_name not in existing:
+                    conn.execute(
+                        f"ALTER TABLE translation_jobs ADD COLUMN {col_name} {col_def}"
+                    )
+            # Ensure glossary_suggestions table exists (may not have been created on old DBs)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS glossary_suggestions (
+                    id              TEXT PRIMARY KEY,
+                    term            TEXT NOT NULL,
+                    target_language TEXT NOT NULL DEFAULT 'French',
+                    occurrences     INTEGER DEFAULT 1,
+                    example_context TEXT,
+                    status          TEXT DEFAULT 'pending',
+                    job_id          TEXT,
+                    created_at      TEXT NOT NULL
+                )
+            """)
+        _set_schema_version(3)
+    except Exception:
+        pass
+
+
 # =============================================================================
 # HISTORY
 # =============================================================================
@@ -354,6 +405,14 @@ def db_save_history_record(record: dict) -> None:
         record.get("csv_removed_column", ""),
         record.get("csv_delimiter", ";"),
         record.get("csv_encoding", "utf-8-sig"),
+        # Intelligence Engine fields (v3)
+        record.get("semantic_tm_hits", 0),
+        record.get("duplicate_groups", 0),
+        record.get("duplicate_cells_saved", 0),
+        record.get("glossary_only_count", 0),
+        record.get("pattern_count", 0),
+        record.get("gpt_calls_avoided", 0),
+        record.get("detected_product_type", "generic"),
     )
 
     try:
@@ -373,9 +432,13 @@ def db_save_history_record(record: dict) -> None:
                     critical_warnings, high_warnings, medium_warnings, low_warnings,
                     total_warnings, quality_score, warning_categories,
                     excel_exported, csv_exported, csv_removed_column,
-                    csv_delimiter, csv_encoding
+                    csv_delimiter, csv_encoding,
+                    semantic_tm_hits, duplicate_groups, duplicate_cells_saved,
+                    glossary_only_count, pattern_count, gpt_calls_avoided,
+                    detected_product_type
                 ) VALUES (
-                    ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?
+                    ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
+                    ?,?,?,?,?,?,?
                 )
                 """,
                 params,
@@ -768,3 +831,88 @@ def _run_json_migration() -> None:
                 db_save_glossary(glossary, "French")
         except Exception:
             pass
+
+
+# =============================================================================
+# GLOSSARY SUGGESTIONS
+# =============================================================================
+
+def db_save_glossary_suggestions(
+    suggestions: list[dict],
+    job_id: str,
+    target_language: str = "French",
+) -> None:
+    """Persist new glossary suggestions (pending review). Skips duplicates."""
+    if not suggestions:
+        return
+    now = datetime.now().isoformat(timespec="seconds")
+    rows = []
+    for s in suggestions:
+        rows.append((
+            str(uuid.uuid4()),
+            s.get("term", ""),
+            target_language,
+            s.get("occurrences", 1),
+            s.get("example_context", ""),
+            "pending",
+            job_id,
+            now,
+        ))
+    try:
+        with _db() as conn:
+            # Only insert if the term+language doesn't already have a pending suggestion
+            for row in rows:
+                existing = conn.execute(
+                    "SELECT id FROM glossary_suggestions "
+                    "WHERE term=? AND target_language=? AND status='pending'",
+                    (row[1], row[2]),
+                ).fetchone()
+                if not existing:
+                    conn.execute(
+                        """
+                        INSERT OR IGNORE INTO glossary_suggestions
+                            (id, term, target_language, occurrences, example_context,
+                             status, job_id, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        row,
+                    )
+    except Exception:
+        pass
+
+
+def db_load_glossary_suggestions(
+    target_language: str | None = None,
+    status: str = "pending",
+) -> list[dict]:
+    """Load glossary suggestions, optionally filtered by language and status."""
+    try:
+        with _db() as conn:
+            if target_language:
+                rows = conn.execute(
+                    "SELECT * FROM glossary_suggestions "
+                    "WHERE target_language=? AND status=? "
+                    "ORDER BY occurrences DESC, created_at DESC",
+                    (target_language, status),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM glossary_suggestions "
+                    "WHERE status=? ORDER BY occurrences DESC, created_at DESC",
+                    (status,),
+                ).fetchall()
+        return [dict(r) for r in rows]
+    except Exception:
+        return []
+
+
+def db_update_suggestion_status(suggestion_id: str, status: str) -> None:
+    """Set status to 'accepted' or 'rejected' for a suggestion."""
+    try:
+        with _db() as conn:
+            conn.execute(
+                "UPDATE glossary_suggestions SET status=? WHERE id=?",
+                (status, suggestion_id),
+            )
+    except Exception:
+        pass
