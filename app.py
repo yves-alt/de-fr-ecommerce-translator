@@ -666,77 +666,24 @@ def inject_custom_css():
         to   {{ opacity: 1; transform: translateX(0); }}
     }}
 
-    /* ── Sidebar ──────────────────────────────────────────────── */
+    /* ── Sidebar — permanently visible, never collapsible ──── */
     [data-testid="stSidebar"] {{
         background-color: {bg_sb} !important;
         border-right: 1px solid {divider} !important;
-        min-width: 216px !important;
-        transition: transform 0.25s cubic-bezier(0.4,0,0.2,1),
-                    width   0.25s cubic-bezier(0.4,0,0.2,1) !important;
+        min-width: 230px !important;
+        width: 230px !important;
+        transform: translateX(0) !important;
+        visibility: visible !important;
+        display: flex !important;
     }}
 
-    /* ── Sidebar expand button (visible when sidebar is collapsed) ── */
+    /* Hide both the collapse button (inside sidebar) and the expand button (hamburger) */
+    [data-testid="stSidebarCollapseButton"],
     [data-testid="stSidebarCollapsedControl"],
     [data-testid="collapsedControl"] {{
-        position: fixed !important;
-        top: 14px !important;
-        left: 14px !important;
-        z-index: 99999 !important;
-        display: flex !important;
-        visibility: visible !important;
-        opacity: 1 !important;
-    }}
-    [data-testid="stSidebarCollapsedControl"] > button,
-    [data-testid="collapsedControl"] > button {{
-        background: #ffffff !important;
-        border: 1.5px solid rgba(124,92,252,0.35) !important;
-        border-radius: 8px !important;
-        color: #7070a0 !important;
-        width: 34px !important;
-        height: 34px !important;
-        padding: 0 !important;
-        display: flex !important;
-        align-items: center !important;
-        justify-content: center !important;
-        cursor: pointer !important;
-        box-shadow: 0 2px 10px rgba(124,92,252,0.15) !important;
-        transition: background 0.18s, border-color 0.18s, box-shadow 0.18s !important;
-    }}
-    [data-testid="stSidebarCollapsedControl"] > button:hover,
-    [data-testid="collapsedControl"] > button:hover {{
-        background: rgba(124,92,252,0.06) !important;
-        border-color: rgba(124,92,252,0.55) !important;
-        box-shadow: 0 3px 14px rgba(124,92,252,0.25) !important;
-        transform: none !important;
-    }}
-    [data-testid="stSidebarCollapsedControl"] svg,
-    [data-testid="collapsedControl"] svg {{
-        color: #7c5cfc !important;
-        fill: #7c5cfc !important;
-    }}
-
-    /* ── Sidebar collapse button (inside sidebar when open) ─── */
-    [data-testid="stSidebarCollapseButton"] > button {{
-        background: transparent !important;
-        border: 1px solid {border} !important;
-        border-radius: 8px !important;
-        color: {text3} !important;
-        width: 30px !important;
-        height: 30px !important;
-        padding: 0 !important;
-        display: flex !important;
-        align-items: center !important;
-        justify-content: center !important;
-        cursor: pointer !important;
-        box-shadow: none !important;
-        transition: background 0.18s, border-color 0.18s, color 0.18s !important;
-    }}
-    [data-testid="stSidebarCollapseButton"] > button:hover {{
-        background: rgba(124,92,252,0.06) !important;
-        border-color: rgba(124,92,252,0.35) !important;
-        color: {text} !important;
-        transform: none !important;
-        box-shadow: none !important;
+        display: none !important;
+        visibility: hidden !important;
+        pointer-events: none !important;
     }}
     [data-testid="stSidebarContent"] {{ padding: 20px 14px !important; }}
 
@@ -1556,7 +1503,7 @@ def render_sidebar() -> str:
 
         page = st.radio(
             "Navigation",
-            ["Translator", "Translation History", "Analytics", "Glossary"],
+            ["Translator", "Translation History", "Analytics", "Glossary", "Translation Memory"],
             key="nav_radio",
             label_visibility="collapsed",
         )
@@ -4292,6 +4239,88 @@ def glossary_page():
 
 
 # =============================================================================
+# PAGE: TRANSLATION MEMORY
+# =============================================================================
+
+def translation_memory_page():
+    render_page_header(
+        "Translation Memory",
+        "Cached translations reused across jobs to reduce API calls and cost",
+    )
+
+    tm = load_translation_memory()
+    entries     = tm.get("entries", {})
+    gs          = tm.get("global_stats", {})
+    total_hits  = gs.get("total_hits", 0)
+    total_miss  = gs.get("total_misses", 0)
+    saved_calls = gs.get("total_api_calls_saved", 0)
+    hit_rate    = int(total_hits / max(total_hits + total_miss, 1) * 100)
+    tm_cost_saved = round(
+        total_hits * (_INPUT_COST_PER_TOKEN * 500 + _OUTPUT_COST_PER_TOKEN * 100), 4
+    )
+
+    st.markdown(f"""
+    <div class="kpi-row">
+        <div class="kpi">
+            <div class="kpi-label">Memory Entries</div>
+            <div class="kpi-value accent">{len(entries):,}</div>
+            <div class="kpi-sub">Unique cached phrases</div>
+        </div>
+        <div class="kpi">
+            <div class="kpi-label">Cache Hits</div>
+            <div class="kpi-value success">{total_hits:,}</div>
+            <div class="kpi-sub">{hit_rate}% hit rate</div>
+        </div>
+        <div class="kpi">
+            <div class="kpi-label">API Calls Saved</div>
+            <div class="kpi-value">{saved_calls:,}</div>
+            <div class="kpi-sub">via memory reuse</div>
+        </div>
+        <div class="kpi">
+            <div class="kpi-label">Est. Cost Saved</div>
+            <div class="kpi-value warn">${tm_cost_saved:.4f}</div>
+            <div class="kpi-sub">from TM cache hits</div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    if not entries:
+        st.markdown("""
+        <div class="history-empty">
+            No translation memory entries yet.<br>
+            <span class="history-empty-sub">
+                Run a translation to start building the cache.
+            </span>
+        </div>
+        """, unsafe_allow_html=True)
+        return
+
+    # Sort by hit count descending
+    sorted_entries = sorted(entries.items(), key=lambda x: -x[1].get("hit_count", 0))
+
+    st.markdown('<div class="section-label">Cached Translations</div>', unsafe_allow_html=True)
+
+    rows_html = "".join(
+        f"""<div class="qg-row">
+            <span class="qg-label" style="width:40%;word-break:break-word;">{de}</span>
+            <span class="qg-value" style="width:40%;word-break:break-word;">{val.get("translation","")}</span>
+            <span style="font-size:11px;color:#9090b8;min-width:60px;text-align:right;">
+                {val.get("hit_count",0)}× &nbsp;·&nbsp; {val.get("col_type","other")}
+            </span>
+        </div>"""
+        for de, val in sorted_entries[:200]
+    )
+    st.markdown(f'<div class="qg">{rows_html}</div>', unsafe_allow_html=True)
+
+    if len(sorted_entries) > 200:
+        st.markdown(
+            f'<div style="font-size:12px;color:#9090b8;margin-top:8px;">'
+            f'Showing top 200 of {len(sorted_entries):,} entries.</div>',
+            unsafe_allow_html=True,
+        )
+
+
+# =============================================================================
 # MAIN
 # =============================================================================
 
@@ -4302,13 +4331,11 @@ def main():
         page_title="DE-FR Translator",
         page_icon="🌐",
         layout="wide",
-        initial_sidebar_state="expanded" if is_auth else "collapsed",
+        initial_sidebar_state="expanded",
     )
 
     if "authenticated" not in st.session_state:
         st.session_state["authenticated"] = False
-    if "sidebar_open" not in st.session_state:
-        st.session_state["sidebar_open"] = True
     if "db_initialized" not in st.session_state:
         init_db(default_glossary=DEFAULT_GLOSSARY_TERMS)
         st.session_state["db_initialized"] = True
@@ -4329,6 +4356,8 @@ def main():
         analytics_page()
     elif page == "Glossary":
         glossary_page()
+    elif page == "Translation Memory":
+        translation_memory_page()
 
     render_footer()
 
