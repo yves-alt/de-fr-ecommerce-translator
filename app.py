@@ -2280,6 +2280,93 @@ def apply_french_capitalization_rules(
 
 
 # =============================================================================
+# CSV EXPORT
+# =============================================================================
+
+_NAME_COLUMN_ALIASES = {
+    "name", "productname", "product name", "produktname", "produkt name",
+    "nom", "designation", "bezeichnung", "title", "titre",
+}
+
+
+def generate_csv_export(
+    excel_bytes: bytes,
+    sheet_name: str,
+    original_filename: str,
+    header_row: int = 1,
+    force_exclude_header: str | None = None,
+) -> tuple[bytes | None, str | None, str | None]:
+    """
+    Reads the translated workbook from bytes, drops the name column, and
+    returns (csv_bytes, csv_filename, excluded_col_name).
+    Returns (None, None, None) if no name column is found and no forced header given.
+    """
+    import io
+    from openpyxl import load_workbook as _load_wb
+
+    wb = _load_wb(io.BytesIO(excel_bytes), data_only=True)
+    ws = wb[sheet_name] if sheet_name in wb.sheetnames else wb.active
+
+    # Read header row
+    headers = [
+        (ws.cell(row=header_row, column=c).value or "")
+        for c in range(1, ws.max_column + 1)
+    ]
+
+    # Find name column
+    exclude_idx = None
+    exclude_name = None
+
+    if force_exclude_header is not None:
+        for i, h in enumerate(headers):
+            if str(h).strip() == force_exclude_header.strip():
+                exclude_idx = i
+                exclude_name = force_exclude_header
+                break
+    else:
+        for i, h in enumerate(headers):
+            canonical, _, _ = _classify_header(str(h))
+            if canonical == "name":
+                exclude_idx = i
+                exclude_name = str(h).strip()
+                break
+        # fallback: alias check on raw header
+        if exclude_idx is None:
+            for i, h in enumerate(headers):
+                norm = _normalize_col_header(str(h))
+                if norm in _NAME_COLUMN_ALIASES or norm.replace(" ", "") in _NAME_COLUMN_ALIASES:
+                    exclude_idx = i
+                    exclude_name = str(h).strip()
+                    break
+
+    if exclude_idx is None:
+        return None, None, None
+
+    # Build CSV content
+    keep_cols = [i for i in range(len(headers)) if i != exclude_idx]
+    csv_filename = "FR-" + original_filename.replace(".xlsx", "").replace(".xls", "") + ".csv"
+    if not csv_filename.startswith("FR-"):
+        csv_filename = "FR-" + csv_filename
+
+    lines: list[str] = []
+    for row in ws.iter_rows(min_row=header_row, values_only=True):
+        row_list = list(row)
+        values = [str(row_list[i]) if row_list[i] is not None else "" for i in keep_cols]
+        # Escape semicolons and quotes in cell values
+        escaped = []
+        for v in values:
+            if ";" in v or '"' in v or "\n" in v:
+                escaped.append('"' + v.replace('"', '""') + '"')
+            else:
+                escaped.append(v)
+        lines.append(";".join(escaped))
+
+    content = "\n".join(lines)
+    csv_bytes = "﻿".encode("utf-8") + content.encode("utf-8")
+    return csv_bytes, csv_filename, exclude_name
+
+
+# =============================================================================
 # EXCEL PROCESSING
 # =============================================================================
 
@@ -3430,6 +3517,12 @@ def translator_page():
                 progress_container.empty()
                 progress_bar.empty()
 
+                # Generate CSV before saving history so the record is accurate
+                _excel_data = output_bytes.getvalue()
+                _csv_bytes, _csv_filename, _csv_removed_col = generate_csv_export(
+                    _excel_data, selected_sheet, uploaded_file.name, header_row=header_row,
+                )
+
                 job_id = str(uuid.uuid4())
                 save_history_record({
                     "id":                        job_id,
@@ -3463,6 +3556,11 @@ def translator_page():
                     "total_warnings":            len(stats.get("all_warnings", [])),
                     "quality_score":             stats.get("quality_score", 100),
                     "warning_categories":        stats.get("warning_categories", {}),
+                    "excel_exported":            1,
+                    "csv_exported":              1 if _csv_bytes is not None else 0,
+                    "csv_removed_column":        _csv_removed_col or "",
+                    "csv_delimiter":             ";",
+                    "csv_encoding":              "utf-8-sig",
                 })
                 db_save_warnings(job_id, stats.get("all_warnings", []))
 
@@ -3598,15 +3696,69 @@ def translator_page():
 
                 # ── Download ──
                 st.markdown("<br>", unsafe_allow_html=True)
-                _, dl_col, _ = st.columns([1, 2, 1])
-                with dl_col:
-                    st.download_button(
-                        label=f"↓ Download {output_filename}",
-                        data=output_bytes,
-                        file_name=output_filename,
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        use_container_width=True,
+
+                if _csv_bytes is not None:
+                    dl_left, dl_right = st.columns(2)
+                    with dl_left:
+                        st.download_button(
+                            label="↓ Download Excel",
+                            data=_excel_data,
+                            file_name=output_filename,
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            use_container_width=True,
+                        )
+                    with dl_right:
+                        st.download_button(
+                            label=f"↓ Download CSV (sans «{_csv_removed_col}»)",
+                            data=_csv_bytes,
+                            file_name=_csv_filename,
+                            mime="text/csv",
+                            use_container_width=True,
+                        )
+                else:
+                    # Name column not found — show Excel only + manual CSV selector
+                    _, dl_col, _ = st.columns([1, 2, 1])
+                    with dl_col:
+                        st.download_button(
+                            label="↓ Download Excel",
+                            data=_excel_data,
+                            file_name=output_filename,
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            use_container_width=True,
+                        )
+                    import io as _io
+                    import openpyxl as _openpyxl
+                    _wb_peek = _openpyxl.load_workbook(_io.BytesIO(_excel_data), data_only=True)
+                    _ws_peek = _wb_peek[selected_sheet] if selected_sheet in _wb_peek.sheetnames else _wb_peek.active
+                    _all_headers = [
+                        str(_ws_peek.cell(row=header_row, column=c).value or "")
+                        for c in range(1, _ws_peek.max_column + 1)
+                        if _ws_peek.cell(row=header_row, column=c).value is not None
+                    ]
+                    st.warning(
+                        "CSV export: could not auto-detect the product name column. "
+                        "Select it manually to generate the CSV."
                     )
+                    if _all_headers:
+                        _chosen = st.selectbox(
+                            "Column to exclude from CSV",
+                            options=_all_headers,
+                            key="csv_col_manual_select",
+                        )
+                        if st.button("Generate CSV without selected column", key="csv_manual_gen_btn"):
+                            _csv_b, _csv_f, _csv_rc = generate_csv_export(
+                                _excel_data, selected_sheet, uploaded_file.name,
+                                header_row=header_row,
+                                force_exclude_header=_chosen,
+                            )
+                            if _csv_b:
+                                st.download_button(
+                                    label=f"↓ Download CSV (sans «{_csv_rc}»)",
+                                    data=_csv_b,
+                                    file_name=_csv_f,
+                                    mime="text/csv",
+                                    use_container_width=True,
+                                )
 
             except ValueError as e:
                 st.error(f"Error: {e}")

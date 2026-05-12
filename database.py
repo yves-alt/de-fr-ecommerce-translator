@@ -52,7 +52,12 @@ CREATE TABLE IF NOT EXISTS translation_jobs (
     low_warnings              INTEGER DEFAULT 0,
     total_warnings            INTEGER DEFAULT 0,
     quality_score             INTEGER DEFAULT 100,
-    warning_categories        TEXT DEFAULT '{}'
+    warning_categories        TEXT DEFAULT '{}',
+    excel_exported            INTEGER DEFAULT 1,
+    csv_exported              INTEGER DEFAULT 0,
+    csv_removed_column        TEXT DEFAULT '',
+    csv_delimiter             TEXT DEFAULT ';',
+    csv_encoding              TEXT DEFAULT 'utf-8-sig'
 );
 
 CREATE TABLE IF NOT EXISTS review_warnings (
@@ -110,9 +115,36 @@ def _db():
 def init_db(default_glossary: dict | None = None) -> None:
     with _db() as conn:
         conn.executescript(_SCHEMA)
+    _ensure_csv_columns()
     _migrate_json_if_needed()
     if default_glossary:
         _seed_glossary_if_empty(default_glossary)
+
+
+def _ensure_csv_columns() -> None:
+    """Add CSV export columns to existing databases that predate this schema version."""
+    new_cols = [
+        ("excel_exported",     "INTEGER DEFAULT 1"),
+        ("csv_exported",       "INTEGER DEFAULT 0"),
+        ("csv_removed_column", "TEXT DEFAULT ''"),
+        ("csv_delimiter",      "TEXT DEFAULT ';'"),
+        ("csv_encoding",       "TEXT DEFAULT 'utf-8-sig'"),
+    ]
+    try:
+        with _db() as conn:
+            existing = {
+                row[1]
+                for row in conn.execute(
+                    "PRAGMA table_info(translation_jobs)"
+                ).fetchall()
+            }
+            for col_name, col_def in new_cols:
+                if col_name not in existing:
+                    conn.execute(
+                        f"ALTER TABLE translation_jobs ADD COLUMN {col_name} {col_def}"
+                    )
+    except Exception:
+        pass
 
 
 # =============================================================================
@@ -175,6 +207,11 @@ def db_save_history_record(record: dict) -> None:
         record.get("total_warnings", 0),
         record.get("quality_score", 100),
         wc_json,
+        record.get("excel_exported", 1),
+        record.get("csv_exported", 0),
+        record.get("csv_removed_column", ""),
+        record.get("csv_delimiter", ";"),
+        record.get("csv_encoding", "utf-8-sig"),
     )
 
     try:
@@ -191,9 +228,11 @@ def db_save_history_record(record: dict) -> None:
                     tm_hits, tm_misses, batch_count, avg_batch_size,
                     api_calls_reduced, glossary_hits, review_count, retry_count,
                     critical_warnings, high_warnings, medium_warnings, low_warnings,
-                    total_warnings, quality_score, warning_categories
+                    total_warnings, quality_score, warning_categories,
+                    excel_exported, csv_exported, csv_removed_column,
+                    csv_delimiter, csv_encoding
                 ) VALUES (
-                    ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?
+                    ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?
                 )
                 """,
                 params,
