@@ -130,10 +130,13 @@ def try_glossary_only(
 # =============================================================================
 
 # Dimension string: "B 120 x H 80 x T 40 cm", "120 × 80 cm", "Ø 45 cm"
+# Allows optional label letters between dimensions (B, H, T, Ø...)
 _DIM_RE = re.compile(
-    r"^[A-ZÄÖÜa-zäöüß\sØø]*"
-    r"\d+[\.,]?\d*\s*(?:x|×|X)\s*\d+[\.,]?\d*"
-    r"(?:\s*(?:x|×|X)\s*\d+[\.,]?\d*)?"
+    r"^[A-ZÄÖÜa-zäöüß\sØø]*"          # optional prefix label
+    r"\d+[\.,]?\d*"                      # first number
+    r"(?:\s*(?:x|×|X)\s*"               # × separator
+    r"[A-ZÄÖÜa-zäöüß]?\s*"             # optional label between dimensions
+    r"\d+[\.,]?\d*)+"                    # next number (one or more pairs)
     r"\s*(?:cm|mm|m\b|in\b)?\s*$",
     re.IGNORECASE,
 )
