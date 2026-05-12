@@ -586,40 +586,38 @@ def _normalize_col_header(raw) -> str:
 # DESIGN SYSTEM — CSS
 # =============================================================================
 
-def inject_custom_css(theme: str = "Dark"):
-    dark = theme == "Dark"
-
+def inject_custom_css():
     # ── Background tokens ──────────────────────────────────────────────────────
-    bg_app    = "#0a0a0f"                 if dark else "#f4f4fa"
-    bg_sb     = "#06060d"                 if dark else "#eceaf6"
-    bg_card   = "#111118"                 if dark else "#ffffff"
-    bg_input  = "#18181f"                 if dark else "#f0f0f8"
-    bg_hover  = "rgba(255,255,255,0.02)"  if dark else "rgba(0,0,0,0.025)"
-    bg_subtle = "rgba(255,255,255,0.025)" if dark else "rgba(0,0,0,0.03)"
+    bg_app    = "#f4f4fa"
+    bg_sb     = "#eceaf6"
+    bg_card   = "#ffffff"
+    bg_input  = "#f0f0f8"
+    bg_hover  = "rgba(0,0,0,0.025)"
+    bg_subtle = "rgba(0,0,0,0.03)"
     # ── Border / divider tokens ────────────────────────────────────────────────
-    divider   = "rgba(255,255,255,0.05)"  if dark else "rgba(0,0,0,0.07)"
-    divider_s = "rgba(255,255,255,0.04)"  if dark else "rgba(0,0,0,0.05)"
-    border    = "rgba(255,255,255,0.06)"  if dark else "rgba(0,0,0,0.09)"
-    border_sm = "rgba(255,255,255,0.07)"  if dark else "rgba(0,0,0,0.09)"
-    border_md = "rgba(255,255,255,0.08)"  if dark else "rgba(0,0,0,0.10)"
-    border_dsh= "rgba(255,255,255,0.09)"  if dark else "rgba(0,0,0,0.12)"
-    border_hv = "rgba(255,255,255,0.12)"  if dark else "rgba(0,0,0,0.16)"
-    hover_rb  = "rgba(255,255,255,0.05)"  if dark else "rgba(0,0,0,0.06)"
+    divider   = "rgba(0,0,0,0.08)"
+    divider_s = "rgba(0,0,0,0.06)"
+    border    = "rgba(0,0,0,0.10)"
+    border_sm = "rgba(0,0,0,0.10)"
+    border_md = "rgba(0,0,0,0.12)"
+    border_dsh= "rgba(0,0,0,0.14)"
+    border_hv = "rgba(0,0,0,0.20)"
+    hover_rb  = "rgba(0,0,0,0.06)"
     # ── Text tokens ───────────────────────────────────────────────────────────
-    text      = "#f1f0f7" if dark else "#1a1a2e"
-    text2     = "#686880" if dark else "#5a5a7a"
-    text2b    = "#4a4a60" if dark else "#6a6a8a"
-    text3     = "#3a3a52" if dark else "#7070a0"
-    text4     = "#2e2e44" if dark else "#9090b8"
-    text5     = "#22223a" if dark else "#aaaacc"
-    text6     = "#1e1e2e" if dark else "#b0b0cc"
+    text      = "#1a1a2e"
+    text2     = "#5a5a7a"
+    text2b    = "#6a6a8a"
+    text3     = "#7070a0"
+    text4     = "#9090b8"
+    text5     = "#aaaacc"
+    text6     = "#b0b0cc"
     # ── Component-specific tokens ──────────────────────────────────────────────
-    sb_btn    = "#3a3a52" if dark else "#8888aa"
-    code_bg   = "rgba(255,255,255,0.07)" if dark else "rgba(0,0,0,0.06)"
-    code_clr  = "#9b9bbb" if dark else "#6060a0"
-    prog_trk  = "rgba(255,255,255,0.05)" if dark else "rgba(0,0,0,0.08)"
-    chip_bg   = "rgba(255,255,255,0.04)" if dark else "rgba(0,0,0,0.04)"
-    chip_bdr  = "rgba(255,255,255,0.08)" if dark else "rgba(0,0,0,0.09)"
+    sb_btn    = "#8888aa"
+    code_bg   = "rgba(0,0,0,0.06)"
+    code_clr  = "#6060a0"
+    prog_trk  = "rgba(0,0,0,0.08)"
+    chip_bg   = "rgba(0,0,0,0.04)"
+    chip_bdr  = "rgba(0,0,0,0.09)"
 
     st.markdown(f"""
     <style>
@@ -690,10 +688,10 @@ def inject_custom_css(theme: str = "Dark"):
     }}
     [data-testid="stSidebarCollapsedControl"] > button,
     [data-testid="collapsedControl"] > button {{
-        background: {bg_card} !important;
-        border: 1px solid {border_md} !important;
+        background: #ffffff !important;
+        border: 1.5px solid rgba(124,92,252,0.35) !important;
         border-radius: 8px !important;
-        color: {text2} !important;
+        color: #7070a0 !important;
         width: 34px !important;
         height: 34px !important;
         padding: 0 !important;
@@ -701,20 +699,20 @@ def inject_custom_css(theme: str = "Dark"):
         align-items: center !important;
         justify-content: center !important;
         cursor: pointer !important;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.18) !important;
+        box-shadow: 0 2px 10px rgba(124,92,252,0.15) !important;
         transition: background 0.18s, border-color 0.18s, box-shadow 0.18s !important;
     }}
     [data-testid="stSidebarCollapsedControl"] > button:hover,
     [data-testid="collapsedControl"] > button:hover {{
-        background: {bg_hover} !important;
-        border-color: rgba(124,92,252,0.4) !important;
-        box-shadow: 0 3px 14px rgba(124,92,252,0.22) !important;
+        background: rgba(124,92,252,0.06) !important;
+        border-color: rgba(124,92,252,0.55) !important;
+        box-shadow: 0 3px 14px rgba(124,92,252,0.25) !important;
         transform: none !important;
     }}
     [data-testid="stSidebarCollapsedControl"] svg,
     [data-testid="collapsedControl"] svg {{
-        color: {text2} !important;
-        fill: {text2} !important;
+        color: #7c5cfc !important;
+        fill: #7c5cfc !important;
     }}
 
     /* ── Sidebar collapse button (inside sidebar when open) ─── */
@@ -803,11 +801,6 @@ def inject_custom_css(theme: str = "Dark"):
         margin-top: 3px; padding-left: 16px;
     }}
     .sb-nav-label {{
-        font-size: 10px; font-weight: 600; text-transform: uppercase;
-        letter-spacing: 0.1em; color: {text5} !important;
-        padding: 0 10px; margin-bottom: 4px; display: block;
-    }}
-    .sb-theme-label {{
         font-size: 10px; font-weight: 600; text-transform: uppercase;
         letter-spacing: 0.1em; color: {text5} !important;
         padding: 0 10px; margin-bottom: 4px; display: block;
@@ -1583,21 +1576,12 @@ def render_sidebar() -> str:
             st.rerun()
 
         st.markdown("---")
-        st.markdown('<span class="sb-theme-label">Appearance</span>', unsafe_allow_html=True)
-        st.radio(
-            "Theme",
-            ["Dark", "Light"],
-            key="theme",
-            label_visibility="collapsed",
-        )
-
-        st.markdown("---")
         db_status = db_get_status()
         dot   = "🟢" if db_status["connected"] else "🔴"
         label = "SQLite · connected" if db_status["connected"] else "SQLite · error"
         st.markdown(
-            f'<div style="font-size:0.72rem;color:#9ca3af;margin-top:2px;">'
-            f'{dot} <strong style="color:#e5e7eb;">{label}</strong><br>'
+            f'<div style="font-size:0.72rem;color:#9090b8;margin-top:2px;">'
+            f'{dot} <strong style="color:#5a5a7a;">{label}</strong><br>'
             f'Jobs: {db_status["jobs"]} &nbsp;·&nbsp; '
             f'TM: {db_status["tm_entries"]} &nbsp;·&nbsp; '
             f'Glossary: {db_status["glossary_terms"]}'
@@ -4171,15 +4155,13 @@ def main():
 
     if "authenticated" not in st.session_state:
         st.session_state["authenticated"] = False
-    if "theme" not in st.session_state:
-        st.session_state["theme"] = "Dark"
     if "sidebar_open" not in st.session_state:
         st.session_state["sidebar_open"] = True
     if "db_initialized" not in st.session_state:
         init_db(default_glossary=DEFAULT_GLOSSARY_TERMS)
         st.session_state["db_initialized"] = True
 
-    inject_custom_css(st.session_state["theme"])
+    inject_custom_css()
 
     if not st.session_state["authenticated"]:
         login_page()
