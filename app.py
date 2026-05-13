@@ -179,6 +179,16 @@ DEFAULT_GLOSSARY_TERMS = {
     "Set bestehend aus":  "ensemble composé de",
     "ohne Dekoration":    "sans décoration",
     "Absetzung":          "bordure contrastante",
+    # Mattress
+    "Matratze":                        "matelas",
+    "Taschenfederkernmatratze":        "matelas à ressorts ensachés",
+    "Taschenfederkern":                "ressorts ensachés",
+    "Kokosmatte":                      "couche de coco",
+    "Einseitige Kokosmatte":           "couche de coco sur une face",
+    "Doppeltuch":                      "coutil double",
+    "Reißverschluss":                  "fermeture éclair",
+    "4-seitiger Reißverschluss":       "fermeture éclair sur 4 côtés",
+    "Abnehmbarer Bezug":               "revêtement amovible",
 }
 
 DEFAULT_NL_GLOSSARY_TERMS = {
@@ -237,6 +247,16 @@ DEFAULT_NL_GLOSSARY_TERMS = {
     "Holzwerkstoff": "houtmateriaal",
     "Spanplatte":    "spaanplaat",
     "Massivholz":    "massief hout",
+    # Mattress
+    "Matratze":                        "matras",
+    "Taschenfederkernmatratze":        "pocketveringmatras",
+    "Taschenfederkern":                "pocketveringkern",
+    "Kokosmatte":                      "kokoslaag",
+    "Einseitige Kokosmatte":           "kokoslaag aan één zijde",
+    "Doppeltuch":                      "dubbeldoek",
+    "Reißverschluss":                  "ritssluiting",
+    "4-seitiger Reißverschluss":       "ritssluiting aan 4 zijden",
+    "Abnehmbarer Bezug":               "afneembare hoes",
 }
 
 GERMAN_RESIDUE_WORDS = [
@@ -282,6 +302,12 @@ GERMAN_RESIDUE_WORDS = [
     "Tischgestell", "Untergestell", "Zargen", "Zarge",
     # Descriptors / phrases
     "bestehend", "Absetzung", "Abhebung",
+    # Mattress / bedding
+    "Taschenfederkern", "Taschenfederkernmatratze", "Bonellfeder",
+    "Kaltschaummatratze", "Latexmatratze",
+    "Kokosmatte", "Kokosschicht",
+    "Doppeltuch",
+    "Reißverschluss", "Reissverschluss",
 ]
 
 FRENCH_ACCEPTABLE_WORDS = [
@@ -2219,9 +2245,13 @@ def translate_batch(
             batch_rules = (
                 "Rules for each product name:\n"
                 "- Maximum 40 characters, no commas, no brackets\n"
+                "- ALL German words MUST be translated — zero German residue\n"
                 "- Natural commercial Dutch furniture e-commerce\n"
                 "- \"Sofa\"→\"bank\", \"Sessel\"→\"fauteuil\", "
-                "\"Ecksofa\"→\"hoekbank\", \"Schlafsofa\"→\"slaapbank\", \"Sitzer\"→\"zits\""
+                "\"Ecksofa\"→\"hoekbank\", \"Schlafsofa\"→\"slaapbank\", \"Sitzer\"→\"zits\"\n"
+                "- \"Taschenfederkernmatratze\"→\"pocketveringmatras\", "
+                "\"7-Zonen-Taschenfederkernmatratze\"→\"7-zones pocketveringmatras\"\n"
+                "- Preserve model/collection names exactly (Asely, Arin, Bocca, Level36, etc.)"
             )
         elif canonical == "materialDetail":
             batch_rules = (
@@ -2250,7 +2280,10 @@ def translate_batch(
                 "\"Ecksofa\"→\"Canapé d'angle\", \"Sitzer\"→\"places\"\n"
                 "- \"Loungeset\"→\"Salon de jardin\", \"Gartenessgruppe\"→\"Ensemble de jardin\"\n"
                 "- \"Gartengruppe\"→\"Salon de jardin\", \"Sofaelement\"→\"Module de canapé\"\n"
-                "- Preserve model/collection names exactly (Vedene, Arin, Bocca, etc.)"
+                "- \"Taschenfederkernmatratze\"→\"Matelas ressorts ensachés\"\n"
+                "- \"7-Zonen-Taschenfederkernmatratze\"→\"Matelas ressorts ensachés 7 zones\"\n"
+                "- \"Matratze\"→\"Matelas\"\n"
+                "- Preserve model/collection names exactly (Asely, Arin, Bocca, Vedene, Level36, etc.)"
             )
         elif canonical == "materialDetail":
             batch_rules = (
@@ -2279,6 +2312,12 @@ def translate_batch(
                 "- Natural French, not literal German structure\n"
                 "- \"pulverbeschichtet\"→\"thermolaqué\", \"Geflecht\"→\"résine tressée\"\n"
                 "- \"bestehend aus\"→\"composé de\", \"ohne Dekoration\"→\"sans décoration\"\n"
+                "- \"Kokosmatte\"→\"couche de coco\" (NEVER \"paillasson\")\n"
+                "- \"Einseitige Kokosmatte\"→\"couche de coco sur une face\"\n"
+                "- \"Doppeltuch\"→\"coutil double\"\n"
+                "- \"Reißverschluss\"→\"fermeture éclair\"\n"
+                "- \"4-seitiger Reißverschluss\"→\"fermeture éclair sur 4 côtés\"\n"
+                "- \"Abnehmbarer Bezug\"→\"revêtement amovible\"\n"
                 "- Preserve <br> tags exactly\n"
                 "- Preserve numbers, dimensions and percentages exactly"
             )
@@ -2701,6 +2740,7 @@ def _refinement_progress_html(sheet: str, done: int, total: int) -> str:
 # Known product/collection names whose capitalisation must be preserved
 _KNOWN_BRANDS: frozenset[str] = frozenset({
     "Arin", "Bocca", "Level36", "Sonoma", "Loft", "Scandi",
+    "Asely", "Vedene", "Lano", "Bori", "Nalo", "Veda",
 })
 
 # Split on <br> tags (case-insensitive), preserving the tag in the result
@@ -3430,15 +3470,11 @@ def process_excel_with_progress(
             if not resolved:
                 final_api_queue.append(item)
 
-        # Track which cells went through API translation (for targeted residue check)
+        # Track which cells went through API translation (for targeted residue check).
+        # Populated now with representatives; duplicates are added after Phase 2.
         api_translated_cells: set[tuple] = {
             (row_num, col_idx) for row_num, _, col_idx, _, _ in final_api_queue
         }
-
-        # Restore duplicate results (copy from representative cell)
-        for (dup_row, dup_col), (rep_row, rep_col) in dup_restore_map.items():
-            if (rep_row, rep_col) in results:
-                results[(dup_row, dup_col)] = results[(rep_row, rep_col)]
 
         # ── Phase 2: Parallel batch translation ──────────────────────────────
         by_col_type: dict[str, list] = {}
@@ -3518,6 +3554,14 @@ def process_excel_with_progress(
                 results[(row_num, col_idx)] = tr
                 tm_put(tm, text, tr, _tm_col_type(canonical), target_language)
                 stats["cells_translated"] += 1
+
+        # Restore duplicate cells — representative cells are now in results
+        for (dup_row, dup_col), (rep_row, rep_col) in dup_restore_map.items():
+            if (rep_row, rep_col) in results:
+                results[(dup_row, dup_col)] = results[(rep_row, rep_col)]
+                # Include restored duplicates in residue tracking
+                if (rep_row, rep_col) in api_translated_cells:
+                    api_translated_cells.add((dup_row, dup_col))
 
         # Restore duplicate cells into the translated count
         stats["cells_translated"] += len(dup_restore_map)

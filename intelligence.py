@@ -309,6 +309,12 @@ _PRODUCT_KEYWORDS: dict[str, list[str]] = {
         "lampe", "leuchte", "pendelleuchte", "tischlampe",
         "wandlampe", "stehlampe",
     ],
+    "mattress": [
+        "matratze", "taschenfederkern", "taschenfederkernmatratze",
+        "kaltschaummatratze", "latexmatratze", "bonellfeder",
+        "7-zonen", "9-zonen", "zonen-taschenfederkern",
+        "kokosmatte", "kokosschicht", "doppeltuch", "reißverschluss",
+    ],
 }
 
 
@@ -347,6 +353,12 @@ _CATEGORY_FR_HINTS: dict[str, str] = {
     "textile":  "Product: TEXTILE — prefer: housse, garnissage, lavable.",
     "outdoor":  "Product: OUTDOOR FURNITURE — prefer: salon de jardin, mobilier de jardin, résine tressée, thermolaqué, résistant aux UV, ensemble composé de, module de canapé.",
     "lighting": "Product: LIGHTING — prefer: ampoule incluse, culot E27, intensité réglable.",
+    "mattress": (
+        "Product: MATTRESS — prefer: matelas à ressorts ensachés, coutil, couche de coco, "
+        "fermeture éclair sur 4 côtés, revêtement amovible. "
+        "NEVER use 'paillasson' for Kokosmatte — always 'couche de coco'. "
+        "Preserve model names exactly (Asely, Arin, etc.)."
+    ),
 }
 
 _CATEGORY_NL_HINTS: dict[str, str] = {
@@ -359,6 +371,10 @@ _CATEGORY_NL_HINTS: dict[str, str] = {
     "textile":  "Product: TEXTIEL — prefer: hoes, vulling, wasbaar.",
     "outdoor":  "Product: BUITEN — prefer: UV-bestendig, weerbestendig, stapelbaar.",
     "lighting": "Product: VERLICHTING — prefer: lamp inbegrepen, fitting E27, dimbaar.",
+    "mattress": (
+        "Product: MATRAS — prefer: pocketveringmatras, tijk, kokoslaag, ritssluiting, afneembare hoes. "
+        "Preserve model names exactly (Asely, Arin, etc.)."
+    ),
 }
 
 
@@ -478,6 +494,19 @@ FURNITURE_TERM_MAP_FR: dict[str, str] = {
     "Absetzung":          "bordure contrastante",
     "Abhebung":           "bordure contrastante",
     "Dekoration":         "décoration",
+    # Mattress / bedding
+    "7-Zonen-Taschenfederkernmatratze": "matelas ressorts ensachés 7 zones",
+    "9-Zonen-Taschenfederkernmatratze": "matelas ressorts ensachés 9 zones",
+    "Taschenfederkernmatratze":         "matelas à ressorts ensachés",
+    "Taschenfederkern":                 "ressorts ensachés",
+    "4-seitiger Reißverschluss":        "fermeture éclair sur 4 côtés",
+    "Einseitige Kokosmatte":            "couche de coco sur une face",
+    "Abnehmbarer Bezug":                "revêtement amovible",
+    "Kokosmatte":                       "couche de coco",
+    "Kokosschicht":                     "couche de coco",
+    "Doppeltuch":                       "coutil double",
+    "Reißverschluss":                   "fermeture éclair",
+    "Matratze":                         "matelas",
 }
 
 FURNITURE_TERM_MAP_NL: dict[str, str] = {
@@ -509,6 +538,19 @@ FURNITURE_TERM_MAP_NL: dict[str, str] = {
     "Ausziehbar":         "uitschuifbaar",
     "Absetzung":          "contrasterende rand",
     "Dekoration":         "decoratie",
+    # Mattress / bedding
+    "7-Zonen-Taschenfederkernmatratze": "7-zones pocketveringmatras",
+    "9-Zonen-Taschenfederkernmatratze": "9-zones pocketveringmatras",
+    "Taschenfederkernmatratze":         "pocketveringmatras",
+    "Taschenfederkern":                 "pocketveringkern",
+    "4-seitiger Reißverschluss":        "ritssluiting aan 4 zijden",
+    "Einseitige Kokosmatte":            "kokoslaag aan één zijde",
+    "Abnehmbarer Bezug":                "afneembare hoes",
+    "Kokosmatte":                       "kokoslaag",
+    "Kokosschicht":                     "kokoslaag",
+    "Doppeltuch":                       "dubbeldoek",
+    "Reißverschluss":                   "ritssluiting",
+    "Matratze":                         "matras",
 }
 
 # Sorted once by length descending so multi-word phrases replace before substrings

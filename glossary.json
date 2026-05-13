@@ -194,7 +194,19 @@
     "Set bestehend aus": "ensemble composé de",
     "bestehend aus": "composé de",
     "ohne Dekoration": "sans décoration",
-    "Absetzung": "bordure contrastante"
+    "Absetzung": "bordure contrastante",
+    "Matratze": "matelas",
+    "Taschenfederkernmatratze": "matelas à ressorts ensachés",
+    "Taschenfederkern": "ressorts ensachés",
+    "7-Zonen-Taschenfederkernmatratze": "matelas ressorts ensachés 7 zones",
+    "9-Zonen-Taschenfederkernmatratze": "matelas ressorts ensachés 9 zones",
+    "Kokosmatte": "couche de coco",
+    "Einseitige Kokosmatte": "couche de coco sur une face",
+    "Kokosschicht": "couche de coco",
+    "Doppeltuch": "coutil double",
+    "Reißverschluss": "fermeture éclair",
+    "4-seitiger Reißverschluss": "fermeture éclair sur 4 côtés",
+    "Abnehmbarer Bezug": "revêtement amovible"
   },
   "stats": {
     "total_hits": 0,
