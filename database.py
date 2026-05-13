@@ -149,6 +149,7 @@ def init_db(
     _ensure_v2_migration()
     _ensure_v3_migration()
     _ensure_v4_migration()
+    _ensure_v5_migration()
     _migrate_json_if_needed()
     if default_glossary:
         _seed_glossary_if_empty(default_glossary, "French")
@@ -277,6 +278,29 @@ def _migrate_tm_keys_to_language_prefix() -> None:
                 WHERE tm_key NOT LIKE 'fr:%'
                   AND tm_key NOT LIKE 'nl:%'
             """)
+    except Exception:
+        pass
+
+
+def _ensure_v5_migration() -> None:
+    """Add consistency and QA stats columns to translation_jobs."""
+    if _get_schema_version() >= 5:
+        return
+    try:
+        new_cols = [
+            ("consistency_corrections", "INTEGER DEFAULT 0"),
+            ("consistency_detected",    "INTEGER DEFAULT 0"),
+            ("terms_harmonized",        "INTEGER DEFAULT 0"),
+            ("qa_issues_found",         "INTEGER DEFAULT 0"),
+        ]
+        with _db() as conn:
+            existing = _table_columns(conn, "translation_jobs")
+            for col_name, col_def in new_cols:
+                if col_name not in existing:
+                    conn.execute(
+                        f"ALTER TABLE translation_jobs ADD COLUMN {col_name} {col_def}"
+                    )
+        _set_schema_version(5)
     except Exception:
         pass
 

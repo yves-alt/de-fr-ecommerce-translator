@@ -568,3 +568,108 @@ def auto_learn_glossary_from_source(
             "occurrences": count,
         })
     return learnable
+
+
+# ── Translation Consistency Engine ────────────────────────────────────────────
+
+# Wrong AI-generated French variants → preferred canonical
+CONSISTENCY_VARIANTS_FR: dict[str, str] = {
+    "rotin synthétique":    "résine tressée",
+    "rattan synthétique":   "résine tressée",
+    "osier synthétique":    "résine tressée",
+    "rotin en plastique":   "résine tressée",
+    "laqué par poudre":     "thermolaqué",
+    "traitement en poudre": "revêtement thermolaqué",
+    "contenant":            "composé de",
+    "se compose de":        "composé de",
+    "qui comprend":         "composé de",
+}
+
+# Wrong AI-generated Dutch variants → preferred canonical
+CONSISTENCY_VARIANTS_NL: dict[str, str] = {
+    "synthetisch rotan":  "kunststof vlechtwerk",
+    "kunststof rotan":    "kunststof vlechtwerk",
+    "poedercoating":      "gepoedercoat",
+    "bevat":              "bestaande uit",
+    "omvat":              "bestaande uit",
+}
+
+_CONSISTENCY_KEYS_FR = sorted(CONSISTENCY_VARIANTS_FR.keys(), key=len, reverse=True)
+_CONSISTENCY_KEYS_NL = sorted(CONSISTENCY_VARIANTS_NL.keys(), key=len, reverse=True)
+
+
+def run_local_consistency_pass(
+    results: dict,
+    source_lookup: dict,
+    glossary: dict,
+    target_language: str = "French",
+) -> dict:
+    """
+    Two-stage consistency pass (no API calls):
+      Stage 1 — same source → same translation: cells with identical German source
+        that received different translations are unified (glossary wins; otherwise
+        most-frequent translation wins).
+      Stage 2 — hard variant replacement: known wrong AI-generated variants are
+        replaced with the preferred term.
+    Returns {"corrections": int, "detected": int, "harmonized": int}.
+    """
+    from collections import defaultdict
+
+    variant_map  = CONSISTENCY_VARIANTS_FR if target_language == "French" else CONSISTENCY_VARIANTS_NL
+    sorted_keys  = _CONSISTENCY_KEYS_FR    if target_language == "French" else _CONSISTENCY_KEYS_NL
+    glos_terms   = {k.lower(): v for k, v in glossary.get("terms", {}).items()}
+
+    # Stage 1 — group by normalized source text
+    src_to_keys: defaultdict = defaultdict(list)
+    src_to_translations: defaultdict = defaultdict(list)
+
+    for key, tr in results.items():
+        src_text, _ = source_lookup.get(key, ("", "other"))
+        if not src_text or not tr:
+            continue
+        norm = src_text.strip().lower()
+        src_to_keys[norm].append(key)
+        src_to_translations[norm].append(tr)
+
+    corrections = 0
+    detected    = 0
+    harmonized  = 0
+
+    for norm_src, translations in src_to_translations.items():
+        unique_tr = set(translations)
+        if len(unique_tr) <= 1:
+            continue
+        detected += 1
+
+        canonical = glos_terms.get(norm_src)
+        if canonical is None:
+            canonical = Counter(translations).most_common(1)[0][0]
+
+        for key in src_to_keys[norm_src]:
+            if results[key] != canonical:
+                results[key] = canonical
+                corrections += 1
+        harmonized += 1
+
+    # Stage 2 — hard variant replacement
+    for key in list(results.keys()):
+        text = results[key]
+        if not text:
+            continue
+        changed = False
+        for wrong in sorted_keys:
+            if wrong.lower() not in text.lower():
+                continue
+            pattern = re.compile(
+                r'(?<!\w)' + re.escape(wrong) + r'(?!\w)',
+                re.IGNORECASE | re.UNICODE,
+            )
+            new_text = pattern.sub(variant_map[wrong], text)
+            if new_text != text:
+                text    = new_text
+                changed = True
+        if changed:
+            results[key] = text
+            corrections += 1
+
+    return {"corrections": corrections, "detected": detected, "harmonized": harmonized}

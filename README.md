@@ -2,7 +2,7 @@
 
 > **Project Type:** Portfolio Prototype / Internal Tool Demo
 
-AI-powered product localization platform that translates German Excel product data to French for e-commerce market expansion. Includes Translation Memory, Batch Processing, a professional Glossary system, Retry System with exponential backoff, advanced Column Intelligence, a Cost Dashboard, Human Review Mode with Excel highlighting, and a Premium AI Refinement layer for natural French e-commerce copy.
+AI-powered product localization platform that translates German Excel product data to French (and Dutch) for e-commerce market expansion. Includes Translation Memory, Batch Processing, a professional Glossary system with auto-learning, Retry System with exponential backoff, advanced Column Intelligence, a Cost Dashboard, Human Review Mode with Excel highlighting, a Premium AI Refinement layer, a Furniture Localization Engine with 30+ outdoor/garden term mappings, and a 5-Pass Quality Pipeline with Terminology Consistency and Final QA.
 
 ---
 
@@ -12,20 +12,22 @@ This Streamlit web application provides a production-grade translation workflow 
 
 **Key capabilities:**
 - Secure login before accessing the translator
-- Upload German `.xlsx` files and translate product data to French using AI
+- Upload German `.xlsx` files and translate product data to French or Dutch using AI
 - Translation Memory: reuse past translations instantly — no API call needed
 - Batch Processing: translate 15 cells per API request instead of 1
-- Glossary System: enforce consistent terminology across every translation
+- Glossary System: enforce consistent terminology; auto-learns furniture terms from each file
 - Retry System: up to 3 retries with exponential backoff on API errors and rate limits
 - Column Intelligence: 3-tier classifier (exact alias → substring → camelCase word-set)
-- **Premium AI Refinement**: optional second AI pass to produce natural, premium French e-commerce copy
+- **5-Pass Quality Pipeline**: Translation → Refinement → Residue → Consistency → Final QA
+- **Furniture Localization Engine**: 30+ outdoor/garden/lounge furniture mappings applied locally (no API cost)
+- **Translation Consistency Engine**: detects same-source cells translated differently and harmonizes them
 - Human Review Mode: quality analysis per cell, flagged rows highlighted yellow in Excel
 - Cost Dashboard: total tokens, prompt vs completion breakdown, avg cost/file and /cell, per-job bar chart
 - Real-time progress tracking with batch and TM stats
 - Translation History dashboard with per-job statistics
 - Analytics dashboard with TM savings, batch efficiency, glossary usage, and cost trends
-- Glossary Management page: view, add, and update DE→FR terms
-- Download the translated French Excel file with preserved formatting
+- Glossary Management page: view, add, and update DE→FR/NL terms
+- Download the translated French/Dutch Excel file with preserved formatting
 
 ---
 
@@ -34,20 +36,24 @@ This Streamlit web application provides a production-grade translation workflow 
 | Feature | Description |
 |---------|-------------|
 | **Authentication** | Secure login — credentials stored in secrets, never in code |
-| **AI Translation** | OpenAI GPT-4o-mini for context-aware product translations |
+| **AI Translation** | OpenAI GPT-4o-mini for context-aware product translations (FR + NL) |
 | **Translation Memory** | SQLite-backed cache: reuses past translations, tracks hits/misses/cost saved |
 | **Batch Processing** | Groups 20 cells per API request — up to 20× fewer API calls |
-| **Glossary System** | 35+ DE→FR e-commerce terms injected into every prompt; editable via UI |
+| **Glossary System** | 166+ DE→FR/NL e-commerce terms; auto-learns furniture terms (≥2× in source); editable via UI |
 | **Retry System** | Up to 3 retries with exponential backoff; rate-limit detection; notify on each retry |
 | **Column Intelligence** | 3-tier classifier: T1 exact alias → T2 substring → T3 camelCase word-set (≥2 matches) |
-| **Premium AI Refinement** | Optional second AI pass on name, materialDetail, qualityDetail, deliveryScope, variantName — produces natural, premium French copy; skips short texts, colors, and dimensions automatically |
+| **5-Pass Quality Pipeline** | Pass 1 Translation → Pass 2 Refinement → Pass 3 Residue → Pass 4 Consistency → Pass 5 Final QA |
+| **Furniture Localization Engine** | 30+ outdoor/garden/lounge mappings (Loungeset, Sofaelement, pulverbeschichtet, Geflecht…) applied locally — zero API cost |
+| **Translation Consistency Engine** | Detects when the same German source was translated differently across the file; harmonizes all instances; fixes known wrong AI variants (e.g. "rotin synthétique" → "résine tressée") |
+| **Premium AI Refinement** | Optional second AI pass on name, materialDetail, qualityDetail, deliveryScope, variantName — produces natural, premium copy; skips short texts, colors, and dimensions automatically |
+| **Final QA Scan** | Full-file local scan after all passes: flags empty cells with source content and any residue that slipped through; never blocks download |
 | **Human Review Mode** | Quality analysis per cell; flags German residue, lost `<br>`, name violations; yellow highlight in Excel |
 | **Cost Dashboard** | Total tokens, prompt vs completion breakdown, avg cost/file and /cell, per-job bar chart |
-| **Real-Time Progress** | Live updates showing batch number, TM hits, cells queued |
+| **Real-Time Progress** | Live updates showing batch number, TM hits, cells queued, active pass |
 | **Residue Detection** | Up to 3 correction passes to eliminate remaining German words |
 | **Quality Gate** | Post-translation report: residue, TM stats, batch info, protected columns |
 | **Analytics** | TM hit rate, cost saved, batch efficiency, top glossary terms, cost trends |
-| **Glossary Management** | Add/update DE→FR terms, view usage counts, reset to defaults |
+| **Glossary Management** | Add/update DE→FR/NL terms, view usage counts, reset to defaults |
 | **Translation History** | SQLite-backed log of all jobs with TM hits, batch count, cost, and quality scores |
 
 ---
@@ -263,6 +269,60 @@ Roughly 5–15% extra tokens compared to translation-only mode, depending on how
 
 ---
 
+## 5-Pass Quality Pipeline
+
+Every translation job runs through up to five sequential passes. The first three are always active; Passes 4 and 5 can be toggled off in Advanced settings.
+
+| Pass | Name | Cost | What it does |
+|------|------|------|--------------|
+| **1** | Initial Translation | API | Batch-translate all cells via GPT-4o-mini; serve TM/glossary hits locally |
+| **2** | Premium Refinement | API (optional) | Second AI pass on long-text columns to produce natural e-commerce copy |
+| **3** | Residue Check | Local + API | Local furniture term fix first; AI fix for any remaining German words (max 2 attempts) |
+| **4** | Consistency Pass | Local | Harmonize same-source inconsistencies; fix known wrong AI variants — zero API cost |
+| **5** | Final QA | Local | Full-file scan: flag empty cells and any residue that slipped through earlier passes — zero API cost, never blocks download |
+
+A **Quality Pipeline** status panel is shown in the Results section after each job, indicating which passes ran and their outcomes.
+
+---
+
+## Furniture Localization Engine
+
+A local, regex-based replacement layer applied after initial translation (Pass 1) and again during residue checking (Pass 3). Covers 30+ German outdoor, lounge, and garden furniture terms that the general AI translation tends to handle inconsistently.
+
+**Example mappings:**
+
+| German | French | Dutch |
+|--------|--------|-------|
+| Loungeset | salon de jardin | loungeset |
+| Sofaelement | module de canapé | bankmodule |
+| Gartenessgruppe | ensemble de jardin | tuineetset |
+| pulverbeschichtet | thermolaqué | gepoedercoat |
+| Geflecht / Polyrattan | résine tressée | kunststof vlechtwerk |
+| Tischgestell | piètement de table | tafelpoot |
+| Set bestehend aus | ensemble composé de | set bestaande uit |
+| Absetzung | bordure contrastante | contrasterende rand |
+
+All replacements use word-boundary regex (no partial matches) and are applied longest-match first.
+
+---
+
+## Translation Consistency Engine
+
+After refinement (Pass 4), a two-stage local pass ensures terminology is uniform across the entire file.
+
+**Stage 1 — Same source → same translation:**
+- Scans all translated cells and groups them by their (normalized) German source text.
+- Any group where the same German text produced different translations gets harmonized.
+- Glossary takes priority; otherwise the most-frequent translation wins.
+
+**Stage 2 — Hard variant replacement:**
+- Fixes known wrong AI-generated variants such as "rotin synthétique" → "résine tressée" or "laqué par poudre" → "thermolaqué".
+- Applied with word-boundary regex — no unintended partial replacements.
+
+Both stages run entirely locally with no API calls.
+
+---
+
 ## Column Intelligence (3-Tier)
 
 Headers are matched to canonical column names through three tiers, in order:
@@ -403,12 +463,14 @@ Column headers are matched via a two-tier fuzzy classifier (exact alias → subs
 
 ```
 de-fr-ecommerce-translator/
-├── app.py                           # Main Streamlit application
+├── app.py                           # Main Streamlit application (~5 600 lines)
+├── intelligence.py                  # Translation intelligence engine (consistency, furniture terms, glossary auto-learn)
+├── database.py                      # SQLite backend (history, TM, glossary, migrations)
+├── glossary.json                    # 166+ DE→FR furniture/e-commerce terms
 ├── requirements.txt                 # Python dependencies
 ├── .env.example                     # Local config template (no real values)
 ├── .streamlit/
 │   └── secrets.toml.example         # Streamlit Cloud secrets template
-├── database.py                      # SQLite backend (history, TM, glossary)
 ├── .gitignore                       # Excludes .env, *.xlsx, *.db
 └── README.md                        # This file
 ```
@@ -421,15 +483,19 @@ de-fr-ecommerce-translator/
 ## Workflow
 
 1. **Login** — Enter your email and password
-2. **Upload** — Select your German Excel file (.xlsx)
-3. **Review** — Check the Column Detection Report
-4. **Configure** — Adjust batch size, concurrency, and refinement in Advanced settings
+2. **Upload** — Select your German Excel file (.xlsx) and choose target language (French / Dutch)
+3. **Review** — Check the Column Detection summary; admin users can expand the full report
+4. **Configure** — Adjust batch size, concurrency, refinement, consistency, and QA in Advanced settings
 5. **Translate** — Click "Run Translation →" and watch live batch progress
-6. **Refine** — Premium AI Refinement runs automatically on eligible columns (Phase 2.5)
-7. **Review results** — See TM hits, batch stats, refined cell count, glossary matches
-8. **Download** — Get your translated `FR-filename.xlsx`
-9. **Analytics** — Track TM savings, batch efficiency, and glossary usage
-10. **Glossary** — View and extend your terminology library
+6. **Pass 1** — Batch translation via GPT-4o-mini; TM/glossary hits served instantly
+7. **Pass 2** — Premium Refinement on long-text columns (if enabled)
+8. **Pass 3** — Residue check: local furniture-term fix first, then AI fix for persistent German words
+9. **Pass 4** — Consistency pass: harmonize recurring terms across the file (if enabled)
+10. **Pass 5** — Final QA scan: flag empty cells and residue missed by earlier passes (if enabled)
+11. **Review results** — Quality Pipeline status, TM hits, batch stats, glossary matches, warnings
+12. **Download** — Get your translated `FR-filename.xlsx` (or `NL-filename.xlsx`)
+13. **Analytics** — Track TM savings, batch efficiency, and glossary usage
+14. **Glossary** — View and extend your terminology library
 
 ---
 

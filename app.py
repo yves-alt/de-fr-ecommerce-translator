@@ -57,6 +57,7 @@ from intelligence import (
     extract_glossary_suggestions,
     apply_furniture_terms,
     auto_learn_glossary_from_source,
+    run_local_consistency_pass,
     FURNITURE_TERM_MAP_FR,
     FURNITURE_TERM_MAP_NL,
 )
@@ -2640,6 +2641,31 @@ def refine_batch(
     return texts  # fallback — return originals unchanged
 
 
+def _pipeline_status_html(steps: list[tuple[str, str]]) -> str:
+    """Render a compact Quality Pipeline status panel.
+    steps = [(label, status)] where status is "done" | "running" | "skipped" | "pending".
+    """
+    icons   = {"done": "✓", "running": "⟳", "skipped": "—", "pending": "○"}
+    colours = {"done": "#22c55e", "running": "#f59e0b", "skipped": "#94a3b8", "pending": "#94a3b8"}
+    rows = ""
+    for label, status in steps:
+        icon   = icons.get(status, "○")
+        colour = colours.get(status, "#94a3b8")
+        rows += (
+            f'<div style="display:flex;align-items:center;gap:8px;padding:4px 0;">'
+            f'<span style="color:{colour};font-weight:700;font-size:14px;width:16px">{icon}</span>'
+            f'<span style="font-size:13px;color:{"#1e293b" if status=="done" else "#64748b"}">{label}</span>'
+            f'</div>'
+        )
+    return (
+        '<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;'
+        'padding:12px 16px;margin-top:12px;">'
+        '<div style="font-weight:700;font-size:12px;text-transform:uppercase;letter-spacing:.06em;'
+        'color:#64748b;margin-bottom:8px;">Quality Pipeline</div>'
+        + rows + '</div>'
+    )
+
+
 def _refinement_progress_html(sheet: str, done: int, total: int) -> str:
     pct = int((done / max(total, 1)) * 100)
     return f"""
@@ -3217,6 +3243,8 @@ def process_excel_with_progress(
     max_concurrent_batches: int = DEFAULT_MAX_CONCURRENT,
     header_row: int = 1,
     enable_refinement: bool = True,
+    enable_consistency: bool = True,
+    enable_final_qa: bool = True,
     target_language: str = "French",
 ) -> tuple[BytesIO, dict]:
     client   = get_openai_client()
@@ -3269,8 +3297,18 @@ def process_excel_with_progress(
         "gpt_calls_avoided":      0,
         "detected_product_type":  "generic",
         "_glossary_suggestions":  [],
-        "auto_learned_terms":     0,
-        "furniture_term_fixes":   0,
+        "auto_learned_terms":       0,
+        "furniture_term_fixes":     0,
+        # Consistency pass
+        "consistency_corrections":  0,
+        "consistency_detected":     0,
+        "terms_harmonized":         0,
+        # Final QA
+        "qa_issues_found":          0,
+        # Pipeline tracking
+        "pipeline_refinement":      enable_refinement,
+        "pipeline_consistency":     enable_consistency,
+        "pipeline_final_qa":        enable_final_qa,
     }
 
     with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
@@ -3631,6 +3669,22 @@ def process_excel_with_progress(
             save_glossary(glossary, target_language)
             stats["auto_learned_terms"] = len(learnable)
 
+        # ── Phase 2.7: Terminology Consistency Pass (fast, no API) ────────────
+        if enable_consistency:
+            progress_bar.progress(0.68)
+            progress_container.markdown(
+                '<div class="prog-shell"><div class="prog-head"><div>'
+                '<div class="prog-phase">Phase 2.7 — Terminology Consistency</div>'
+                f'<div class="prog-sheet">Sheet: {sheet_name} · Harmonizing recurring terms</div>'
+                '</div><span class="prog-badge"><span class="prog-badge-dot"></span>CHECKING</span>'
+                '</div></div>',
+                unsafe_allow_html=True,
+            )
+            con_result = run_local_consistency_pass(results, source_lookup, glossary, target_language)
+            stats["consistency_corrections"] = con_result["corrections"]
+            stats["consistency_detected"]    = con_result["detected"]
+            stats["terms_harmonized"]        = con_result["harmonized"]
+
         # ── Signal separation ─────────────────────────────────────────────────
         # Three independent signals — only the first two may affect Excel color:
         #   original_excel_highlights : source cell fills → always preserved
@@ -3736,7 +3790,7 @@ def process_excel_with_progress(
             canonical  = col_canonical_map.get(col_idx, "other")
             col_header = col_header_for_ci.get(col_idx, str(col_idx))
             elapsed    = time.time() - start_time
-            progress   = 0.68 + (checked / total_residue_cells) * 0.22
+            progress   = 0.70 + (checked / total_residue_cells) * 0.20
             pct        = int(progress * 100)
 
             progress_bar.progress(progress)
@@ -3788,12 +3842,12 @@ def process_excel_with_progress(
             cell.value = text
 
         # ── Phase 4: Final verification pass ─────────────────────────────────
-        progress_bar.progress(0.94)
+        progress_bar.progress(0.91)
         elapsed = time.time() - start_time
         progress_container.markdown(
             _progress_html(
                 "Phase 4 — Final Verification", sheet_name, "all columns",
-                total_rows, total_rows, 94, elapsed, 0,
+                total_rows, total_rows, 91, elapsed, 0,
                 stats["cells_translated"], stats["cells_skipped"],
                 stats["residue_corrections"],
             ),
@@ -3866,6 +3920,79 @@ def process_excel_with_progress(
                         cell.value = apply_french_capitalization_rules(
                             str(cell.value), canonical, glossary
                         )
+
+        # ── Phase 5: Final QA — full-file local scan ──────────────────────────
+        if enable_final_qa:
+            progress_bar.progress(0.96)
+            progress_container.markdown(
+                '<div class="prog-shell"><div class="prog-head"><div>'
+                '<div class="prog-phase">Phase 5 — Final QA</div>'
+                f'<div class="prog-sheet">Sheet: {sheet_name} · Scanning all cells</div>'
+                '</div><span class="prog-badge"><span class="prog-badge-dot"></span>QA</span>'
+                '</div></div>',
+                unsafe_allow_html=True,
+            )
+            qa_issues = 0
+            ts_qa = datetime.now().isoformat(timespec="seconds")
+            for row_num in range(data_start_row, worksheet.max_row + 1):
+                for col_header, (col_idx, canonical) in to_translate.items():
+                    cell = worksheet.cell(row=row_num, column=col_idx)
+                    if cell.value is None or str(cell.value).strip() == "":
+                        # Empty cell that should have content (flag if source was non-empty)
+                        src_text, _ = source_lookup.get((row_num, col_idx), ("", "other"))
+                        if src_text and src_text.strip():
+                            qa_issues += 1
+                            all_warnings.append({
+                                "severity":        SEVERITY_HIGH,
+                                "category":        "Empty translation",
+                                "row":             row_num,
+                                "column":          col_header,
+                                "original_text":   src_text[:120],
+                                "translated_text": "",
+                                "reason":          "Cell is empty after translation — source had content",
+                                "suggested_fix":   "Translate manually",
+                                "timestamp":       ts_qa,
+                            })
+                        continue
+                    text = str(cell.value)
+                    # Check for residue that slipped past Phases 3 & 4
+                    residue = detect_german_residue(text, target_language)
+                    if residue:
+                        already = any(
+                            w["row"] == row_num and w["column"] == col_header
+                            and w["category"] == "German residue"
+                            for w in all_warnings
+                        )
+                        if not already:
+                            qa_issues += 1
+                            all_warnings.append({
+                                "severity":        SEVERITY_CRITICAL,
+                                "category":        "German residue",
+                                "row":             row_num,
+                                "column":          col_header,
+                                "original_text":   "",
+                                "translated_text": text[:120],
+                                "reason":          f"German residue detected in Final QA: {', '.join(residue[:3])}",
+                                "suggested_fix":   "Retranslate manually",
+                                "timestamp":       ts_qa,
+                            })
+            stats["qa_issues_found"] = qa_issues
+
+            # Recompute warning totals with QA additions
+            _crit = sum(1 for w in all_warnings if w["severity"] == SEVERITY_CRITICAL)
+            _high = sum(1 for w in all_warnings if w["severity"] == SEVERITY_HIGH)
+            _med  = sum(1 for w in all_warnings if w["severity"] == SEVERITY_MEDIUM)
+            _low  = sum(1 for w in all_warnings if w["severity"] == SEVERITY_LOW)
+            from collections import Counter as _Counter
+            _cat_counts = _Counter(w["category"] for w in all_warnings)
+            stats["all_warnings"]       = all_warnings
+            stats["critical_warnings"]  = _crit
+            stats["high_warnings"]      = _high
+            stats["medium_warnings"]    = _med
+            stats["low_warnings"]       = _low
+            stats["quality_score"]      = compute_quality_score(all_warnings)
+            stats["warning_categories"] = dict(_cat_counts)
+            stats["review_count"]       = len(all_warnings)
 
         progress_bar.progress(1.0)
 
@@ -4224,7 +4351,7 @@ def translator_page():
                 )
             st.markdown("---")
             enable_refinement = st.checkbox(
-                f"Premium {target_language} Refinement Enabled",
+                f"Premium {target_language} Refinement (Pass 2)",
                 value=True,
                 key="enable_refinement",
                 help=(
@@ -4232,6 +4359,27 @@ def translator_page():
                     f"and variantName to produce more natural, premium {target_language} e-commerce copy. "
                     "Short texts, pure colors, and dimensions are skipped automatically. "
                     "Adds a small cost (~5–15% extra API tokens)."
+                ),
+            )
+            enable_consistency = st.checkbox(
+                "Terminology Consistency Pass (Pass 4)",
+                value=True,
+                key="enable_consistency",
+                help=(
+                    "Fast local pass — no API cost. Detects when the same German source term "
+                    "was translated differently across the file and harmonizes all occurrences "
+                    "to a single canonical translation. Also fixes known wrong AI variants "
+                    "(e.g. 'rotin synthétique' → 'résine tressée')."
+                ),
+            )
+            enable_final_qa = st.checkbox(
+                "Final QA Scan (Pass 5)",
+                value=True,
+                key="enable_final_qa",
+                help=(
+                    "Fast local scan of every translated cell — no API cost. Flags empty cells "
+                    "that had source content and any German residue that slipped through earlier "
+                    "passes. Issues are added to Warning Details; download is never blocked."
                 ),
             )
             highlight_warnings_in_excel = st.checkbox(
@@ -4272,6 +4420,8 @@ def translator_page():
                     max_concurrent_batches=int(max_concurrent_batches),
                     header_row=header_row,
                     enable_refinement=enable_refinement,
+                    enable_consistency=enable_consistency,
+                    enable_final_qa=enable_final_qa,
                     target_language=target_language,
                 )
                 progress_container.empty()
@@ -4333,6 +4483,11 @@ def translator_page():
                     "pattern_count":             stats.get("pattern_count", 0),
                     "gpt_calls_avoided":         stats.get("gpt_calls_avoided", 0),
                     "detected_product_type":     stats.get("detected_product_type", "generic"),
+                    # Consistency + QA pass fields
+                    "consistency_corrections":   stats.get("consistency_corrections", 0),
+                    "consistency_detected":      stats.get("consistency_detected", 0),
+                    "terms_harmonized":          stats.get("terms_harmonized", 0),
+                    "qa_issues_found":           stats.get("qa_issues_found", 0),
                 })
                 db_save_warnings(job_id, stats.get("all_warnings", []))
 
@@ -4381,6 +4536,32 @@ def translator_page():
             # ── Results ──
             st.markdown('<div class="section-label">Results</div>', unsafe_allow_html=True)
             render_stats(_s)
+
+            # ── Quality Pipeline status ──
+            _pipeline_steps = [
+                ("Pass 1 — Initial Translation", "done"),
+                (
+                    f"Pass 2 — Premium Refinement"
+                    + (f" ({_s.get('cells_refined', 0)} cells improved)" if _s.get("pipeline_refinement") else ""),
+                    "done" if _s.get("pipeline_refinement") else "skipped",
+                ),
+                (
+                    f"Pass 3 — Residue Check"
+                    + (f" ({_s.get('residue_corrections', 0)} fix(es))" if _s.get("residue_corrections") else ""),
+                    "done",
+                ),
+                (
+                    f"Pass 4 — Consistency"
+                    + (f" ({_s.get('consistency_corrections', 0)} harmonized)" if _s.get("pipeline_consistency") else ""),
+                    "done" if _s.get("pipeline_consistency") else "skipped",
+                ),
+                (
+                    f"Pass 5 — Final QA"
+                    + (f" ({_s.get('qa_issues_found', 0)} issue(s))" if _s.get("pipeline_final_qa") else ""),
+                    "done" if _s.get("pipeline_final_qa") else "skipped",
+                ),
+            ]
+            st.markdown(_pipeline_status_html(_pipeline_steps), unsafe_allow_html=True)
 
             # ── Translation Intelligence ──
             st.markdown('<div class="section-label">Translation Intelligence</div>', unsafe_allow_html=True)
