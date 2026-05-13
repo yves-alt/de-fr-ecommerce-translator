@@ -55,6 +55,10 @@ from intelligence import (
     detect_product_type,
     get_product_type_hint,
     extract_glossary_suggestions,
+    apply_furniture_terms,
+    auto_learn_glossary_from_source,
+    FURNITURE_TERM_MAP_FR,
+    FURNITURE_TERM_MAP_NL,
 )
 
 load_dotenv()
@@ -142,16 +146,38 @@ DEFAULT_GLOSSARY_TERMS = {
     "Baumwolle":     "coton",
     "Leinen":        "lin",
     "Wolle":         "laine",
-    "Sofa":          "Canapé",
-    "Sessel":        "Fauteuil",
-    "Ecksofa":       "Canapé d'angle",
-    "Schlafsofa":    "Canapé-lit",
-    "Tisch":         "Table",
-    "Stuhl":         "Chaise",
-    "Schrank":       "Armoire",
-    "Kommode":       "Commode",
-    "Regal":         "Étagère",
-    "inkl.":         "inclus",
+    "Sofa":               "Canapé",
+    "Sessel":             "Fauteuil",
+    "Ecksofa":            "Canapé d'angle",
+    "Schlafsofa":         "Canapé-lit",
+    "Tisch":              "Table",
+    "Stuhl":              "Chaise",
+    "Schrank":            "Armoire",
+    "Kommode":            "Commode",
+    "Regal":              "Étagère",
+    "inkl.":              "inclus",
+    # Outdoor / lounge / garden
+    "Loungeset":          "salon de jardin",
+    "Sofaelement":        "module de canapé",
+    "Gartenessgruppe":    "ensemble de jardin",
+    "Gartengruppe":       "salon de jardin",
+    "Gartenset":          "salon de jardin",
+    "Gartenstuhl":        "chaise de jardin",
+    "Gartentisch":        "table de jardin",
+    "Gartenliege":        "chaise longue de jardin",
+    "Gartenmöbel":        "mobilier de jardin",
+    "Terrassenmöbel":     "mobilier de terrasse",
+    # Materials / finishes
+    "pulverbeschichtet":  "thermolaqué",
+    "Geflecht":           "résine tressée",
+    "Polyrattan":         "résine tressée",
+    "Rattan":             "rotin",
+    "Tischgestell":       "piètement de table",
+    # Phrases
+    "bestehend aus":      "composé de",
+    "Set bestehend aus":  "ensemble composé de",
+    "ohne Dekoration":    "sans décoration",
+    "Absetzung":          "bordure contrastante",
 }
 
 DEFAULT_NL_GLOSSARY_TERMS = {
@@ -241,6 +267,20 @@ GERMAN_RESIDUE_WORDS = [
     "höhenverstellbar", "hoehenverstellbar", "ausziehbar", "klappbar",
     "Lieferumfang", "Hinweis", "Achtung", "Wichtig",
     "Zierkissen", "Dekoration",
+    # Outdoor / lounge / garden furniture
+    "Loungeset", "Loungesofa", "Loungesessel",
+    "Sofaelement", "Sofamodul",
+    "Gartenessgruppe", "Gartengruppe", "Gartenset",
+    "Gartenstuhl", "Gartentisch", "Gartenbank", "Gartenliege", "Gartensofa",
+    "Gartenmöbel", "Terrassenmöbel", "Terrassenmoebel", "Terrassenset",
+    # Materials / finishes
+    "pulverbeschichtet", "Pulverbeschichtung", "thermobeschichtet",
+    "Geflecht", "Kunststoffgeflecht", "Flechtwerk", "Polyrattan",
+    "Rattan",
+    # Frame / structural parts
+    "Tischgestell", "Untergestell", "Zargen", "Zarge",
+    # Descriptors / phrases
+    "bestehend", "Absetzung", "Abhebung",
 ]
 
 FRENCH_ACCEPTABLE_WORDS = [
@@ -1953,37 +1993,76 @@ def _build_system_prompt(canonical: str, glossary_block: str, target_language: s
     # French prompts
     if canonical == "name":
         return (
-            "You are a professional translator for Home24 France e-commerce.\n"
-            "Translate the German product name to French following these STRICT rules:\n"
+            "You are a premium French copywriter for Home24 France furniture e-commerce.\n"
+            "Translate the German product name to natural, elegant French.\n\n"
+            "STRICT rules:\n"
             "- Maximum 40 characters total\n"
-            "- No commas allowed\n"
-            "- No brackets or parentheses allowed\n"
-            "- Natural, commercial French product name\n"
-            "- \"Sofa\" must become \"Canapé\"\n"
-            "- \"Sessel\" must become \"Fauteuil\"\n"
-            "- \"Ecksofa\" must become \"Canapé d'angle\"\n"
-            "- \"Sitzer\" must become \"places\" (e.g., \"3-Sitzer\" = \"3 places\")\n"
-            "- Use only French words"
+            "- No commas, no brackets, no parentheses\n"
+            "- All German words MUST be translated — zero German residue allowed\n"
+            "- \"Sofa\" → \"Canapé\"\n"
+            "- \"Sessel\" → \"Fauteuil\"\n"
+            "- \"Ecksofa\" → \"Canapé d'angle\"\n"
+            "- \"Schlafsofa\" → \"Canapé convertible\"\n"
+            "- \"Sitzer\" → \"places\" (\"3-Sitzer\" = \"3 places\")\n"
+            "- \"Loungeset\" → \"Salon de jardin\"\n"
+            "- \"Gartenessgruppe\" / \"Gartengruppe\" → \"Ensemble de jardin\" / \"Salon de jardin\"\n"
+            "- \"Sofaelement\" → \"Module de canapé\"\n"
+            "- \"Gartenstuhl\" → \"Chaise de jardin\"\n"
+            "- \"Gartentisch\" → \"Table de jardin\"\n"
+            "- Preserve model/collection names exactly (e.g. Vedene, Arin, Bocca, Level36)\n"
+            "- Preserve dimensions and numbers exactly\n"
+            "- Write elegant, commercial French — not literal word-for-word translation"
             f"{glossary_block}\n"
             "Return ONLY the translated text, nothing else."
         )
     elif canonical == "materialDetail":
         return (
-            "You are a professional translator for Home24 France e-commerce.\n"
-            "Translate the German material description to natural French:\n"
-            "- Preserve <br> tags exactly as they appear — do NOT replace them with semicolons\n"
-            "- NEVER use semicolons (;) to separate material properties; use <br> instead\n"
-            "- Natural French furniture/material terminology"
+            "You are a premium French copywriter for Home24 France furniture e-commerce.\n"
+            "Translate the German material description to natural, precise French.\n\n"
+            "Rules:\n"
+            "- Preserve <br> tags exactly — NEVER replace them with semicolons\n"
+            "- NEVER use semicolons (;) to separate properties; use <br> instead\n"
+            "- All German words MUST be translated\n"
+            "- \"pulverbeschichtet\" → \"thermolaqué\" (NEVER \"revêtu par poudre\")\n"
+            "- \"Geflecht\" / \"Polyrattan\" / \"Kunststoffgeflecht\" → \"résine tressée\"\n"
+            "- \"Rattan\" → \"rotin\"\n"
+            "- \"Gestell\" / \"Tischgestell\" → \"piètement\" or \"structure\" per context\n"
+            "- \"Bezug\" → \"revêtement\" (NEVER \"housse\" for frame components)\n"
+            "- \"Korpus\" → \"caisson\"\n"
+            "- \"Untergestell\" → \"structure inférieure\"\n"
+            "- Use professional French furniture terminology"
+            f"{glossary_block}\n"
+            "Return ONLY the translated text, nothing else."
+        )
+    elif canonical == "deliveryScope":
+        return (
+            "You are a premium French copywriter for Home24 France furniture e-commerce.\n"
+            "Translate the German delivery scope text to natural, elegant French.\n\n"
+            "Rules:\n"
+            "- All German words MUST be translated — zero German residue\n"
+            "- \"Set bestehend aus\" → \"Ensemble composé de\"\n"
+            "- \"bestehend aus\" → \"composé de\"\n"
+            "- \"inkl.\" / \"inklusive\" → \"inclus(e)\"\n"
+            "- \"ohne Dekoration\" → \"sans décoration\"\n"
+            "- Use natural French e-commerce phrasing — not literal German structure\n"
+            "- Prefer \"composé de\" over \"contenant\" for set descriptions\n"
+            "- Preserve <br> tags exactly"
             f"{glossary_block}\n"
             "Return ONLY the translated text, nothing else."
         )
     else:
         return (
-            "You are a professional translator for Home24 France e-commerce.\n"
-            "Translate the German text to natural French:\n"
-            "- Use natural French, not literal translation\n"
-            "- Remove all German traces\n"
-            "- Preserve <br> tags exactly as they appear"
+            "You are a premium French copywriter for Home24 France furniture e-commerce.\n"
+            "Translate the German text to natural, elegant French.\n\n"
+            "Rules:\n"
+            "- All German words MUST be translated — zero German residue allowed\n"
+            "- Use natural French, not literal word-for-word translation\n"
+            "- \"pulverbeschichtet\" → \"thermolaqué\"\n"
+            "- \"Geflecht\" / \"Polyrattan\" → \"résine tressée\"\n"
+            "- \"bestehend aus\" → \"composé de\"\n"
+            "- \"ohne Dekoration\" → \"sans décoration\"\n"
+            "- Preserve <br> tags exactly as they appear\n"
+            "- Preserve numbers, dimensions and percentages exactly"
             f"{glossary_block}\n"
             "Return ONLY the translated text, nothing else."
         )
@@ -2164,14 +2243,44 @@ def translate_batch(
             batch_rules = (
                 "Rules for each product name:\n"
                 "- Maximum 40 characters, no commas, no brackets\n"
-                "- Natural commercial French\n"
+                "- ALL German words MUST be translated — zero German residue\n"
+                "- Natural commercial French furniture e-commerce\n"
                 "- \"Sofa\"→\"Canapé\", \"Sessel\"→\"Fauteuil\", "
-                "\"Ecksofa\"→\"Canapé d'angle\", \"Sitzer\"→\"places\""
+                "\"Ecksofa\"→\"Canapé d'angle\", \"Sitzer\"→\"places\"\n"
+                "- \"Loungeset\"→\"Salon de jardin\", \"Gartenessgruppe\"→\"Ensemble de jardin\"\n"
+                "- \"Gartengruppe\"→\"Salon de jardin\", \"Sofaelement\"→\"Module de canapé\"\n"
+                "- Preserve model/collection names exactly (Vedene, Arin, Bocca, etc.)"
             )
         elif canonical == "materialDetail":
-            batch_rules = "- Preserve <br> tags exactly — NEVER replace with semicolons\n- NEVER use semicolons (;) as property separators\n- Natural French material terminology"
+            batch_rules = (
+                "- Preserve <br> tags exactly — NEVER replace with semicolons\n"
+                "- NEVER use semicolons (;) as property separators\n"
+                "- ALL German words MUST be translated\n"
+                "- \"pulverbeschichtet\"→\"thermolaqué\"\n"
+                "- \"Geflecht\"/\"Polyrattan\"→\"résine tressée\"\n"
+                "- \"Rattan\"→\"rotin\", \"Tischgestell\"→\"piètement de table\"\n"
+                "- \"Bezug\"→\"revêtement\" (NEVER \"housse\" for frame components)\n"
+                "- Natural French furniture/material terminology"
+            )
+        elif canonical == "deliveryScope":
+            batch_rules = (
+                "- ALL German words MUST be translated — zero German residue\n"
+                "- \"Set bestehend aus\"→\"Ensemble composé de\"\n"
+                "- \"bestehend aus\"→\"composé de\"\n"
+                "- \"inkl.\"/\"inklusive\"→\"inclus(e)\"\n"
+                "- \"ohne Dekoration\"→\"sans décoration\"\n"
+                "- Prefer \"composé de\" over \"contenant\"\n"
+                "- Preserve <br> tags exactly"
+            )
         else:
-            batch_rules = "- Natural French, not literal\n- Remove all German traces\n- Preserve <br> tags exactly"
+            batch_rules = (
+                "- ALL German words MUST be translated — zero German residue\n"
+                "- Natural French, not literal German structure\n"
+                "- \"pulverbeschichtet\"→\"thermolaqué\", \"Geflecht\"→\"résine tressée\"\n"
+                "- \"bestehend aus\"→\"composé de\", \"ohne Dekoration\"→\"sans décoration\"\n"
+                "- Preserve <br> tags exactly\n"
+                "- Preserve numbers, dimensions and percentages exactly"
+            )
         store_label = "Home24 France"
         target_label = "French"
 
@@ -2317,6 +2426,13 @@ def fix_german_residue(
     if not text:
         return text
 
+    # Step 1: Fast local term replacement — no API call needed
+    locally_fixed = apply_furniture_terms(text, target_language)
+    if locally_fixed != text:
+        text = locally_fixed
+        if not detect_german_residue(text, target_language):
+            return text
+
     if target_language == "Dutch":
         if column_name == "name":
             extra_rules = (
@@ -2343,24 +2459,45 @@ def fix_german_residue(
         if column_name == "name":
             extra_rules = (
                 "\n- Maximum 40 characters, no commas or brackets"
-                "\n- \"Sofa\" → \"Canapé\" / \"Sessel\" → \"Fauteuil\" / \"Sitzer\" → \"places\""
+                "\n- \"Sofa\"→\"Canapé\" / \"Sessel\"→\"Fauteuil\" / \"Sitzer\"→\"places\""
+                "\n- \"Loungeset\"→\"Salon de jardin\" / \"Gartenessgruppe\"→\"Ensemble de jardin\""
+                "\n- \"Gartengruppe\"→\"Salon de jardin\" / \"Sofaelement\"→\"Module de canapé\""
+                "\n- Preserve model names (Vedene, Arin, Bocca, etc.) exactly"
             )
         elif column_name == "materialDetail":
             extra_rules = (
-                "\n- \"Bezug\" = \"Revêtement\" / \"Füße\" = \"Pieds\" / \"Buche\" = \"hêtre\" / \"lackiert\" = \"verni\""
+                "\n- \"pulverbeschichtet\"→\"thermolaqué\""
+                "\n- \"Geflecht\"/\"Polyrattan\"/\"Kunststoffgeflecht\"→\"résine tressée\""
+                "\n- \"Rattan\"→\"rotin\" / \"Tischgestell\"→\"piètement de table\""
+                "\n- \"Bezug\"→\"revêtement\" / \"Füße\"→\"pieds\" / \"Buche\"→\"hêtre\""
                 "\n- Preserve <br> tags exactly — NEVER replace them with semicolons"
                 "\n- NEVER use semicolons (;) as property separators"
             )
+        elif column_name == "deliveryScope":
+            extra_rules = (
+                "\n- \"Set bestehend aus\"→\"Ensemble composé de\""
+                "\n- \"bestehend aus\"→\"composé de\""
+                "\n- \"ohne Dekoration\"→\"sans décoration\""
+                "\n- \"inkl.\"/\"inklusive\"→\"inclus(e)\""
+            )
         else:
-            extra_rules = ""
+            extra_rules = (
+                "\n- \"pulverbeschichtet\"→\"thermolaqué\""
+                "\n- \"Geflecht\"/\"Polyrattan\"→\"résine tressée\""
+                "\n- \"bestehend aus\"→\"composé de\""
+                "\n- \"ohne Dekoration\"→\"sans décoration\""
+            )
         fix_prompt = (
             f"This French text still contains German words.\n"
             f"Rewrite it as clean, natural French for Home24 France.\n"
-            f"Replace ALL German words with French equivalents.{extra_rules}\n\n"
+            f"Replace EVERY German word with the correct French equivalent.{extra_rules}\n\n"
             f"Text: {text}\n\n"
             f"Return ONLY the corrected French text."
         )
-        sys_msg = "You remove German words from French texts for Home24 France e-commerce."
+        sys_msg = (
+            "You are a professional French editor for Home24 France e-commerce. "
+            "You eliminate all German words from French texts and rewrite them in premium, natural French."
+        )
 
     try:
         response = _api_call_with_retry(
@@ -2457,6 +2594,10 @@ def refine_batch(
             "- Avoid awkward literal translations from German patterns\n"
             "  Examples: 'décoré' → 'revêtu', 'revêtu d\\'un film décoratif' → 'revêtu de film mélaminé'\n"
             "- Use established French furniture/e-commerce terminology\n"
+            "- Outdoor: 'thermolaqué' not 'poudré', 'résine tressée' not 'tressage plastique'\n"
+            "- Delivery: 'ensemble composé de' not 'set contenant', 'composé de' not 'comprenant'\n"
+            "- Frame: 'piètement' or 'structure' — NEVER 'housse' for frame components\n"
+            "- If text says 'Structure' when it should be 'Revêtement', leave it — preserve meaning\n"
             "- Preserve ALL <br> tags exactly — do not add, remove, or move them\n"
             "- NEVER replace <br> tags with semicolons (;)\n"
             "- NEVER use semicolons as property separators\n"
@@ -3128,6 +3269,8 @@ def process_excel_with_progress(
         "gpt_calls_avoided":      0,
         "detected_product_type":  "generic",
         "_glossary_suggestions":  [],
+        "auto_learned_terms":     0,
+        "furniture_term_fixes":   0,
     }
 
     with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
@@ -3249,6 +3392,11 @@ def process_excel_with_progress(
             if not resolved:
                 final_api_queue.append(item)
 
+        # Track which cells went through API translation (for targeted residue check)
+        api_translated_cells: set[tuple] = {
+            (row_num, col_idx) for row_num, _, col_idx, _, _ in final_api_queue
+        }
+
         # Restore duplicate results (copy from representative cell)
         for (dup_row, dup_col), (rep_row, rep_col) in dup_restore_map.items():
             if (rep_row, rep_col) in results:
@@ -3367,10 +3515,10 @@ def process_excel_with_progress(
         )
         stats["api_calls_reduced"] = max(total_to_process - total_batches - total_avoided, 0)
 
-        # Glossary suggestions — extract from source texts for admin review
-        all_source_texts = [text for _, _, _, _, text in cells_queue]
+        # Glossary suggestions — extract unknown terms from source texts for admin review
+        _src_texts_for_suggestions = [text for _, _, _, _, text in cells_queue]
         suggestions = extract_glossary_suggestions(
-            all_source_texts, glossary, target_language,
+            _src_texts_for_suggestions, glossary, target_language,
             min_occurrences=2, max_results=20,
         )
         stats["_glossary_suggestions"] = suggestions
@@ -3462,6 +3610,27 @@ def process_excel_with_progress(
         stats["refinement_prompt_tokens"]       = refine_token_c["prompt_tokens"]
         stats["refinement_completion_tokens"]   = refine_token_c["completion_tokens"]
 
+        # ── Phase 2.6: Local furniture term pass (fast, no API) ───────────────
+        furniture_fixes = 0
+        for key in list(results.keys()):
+            original_tr = results[key]
+            fixed_tr = apply_furniture_terms(original_tr, target_language)
+            if fixed_tr != original_tr:
+                results[key] = fixed_tr
+                furniture_fixes += 1
+        stats["furniture_term_fixes"] = furniture_fixes
+
+        # ── Auto-learn glossary from source texts ─────────────────────────────
+        all_source_texts = [text for _, _, _, _, text in cells_queue]
+        learnable = auto_learn_glossary_from_source(
+            all_source_texts, glossary, target_language, min_occurrences=2
+        )
+        if learnable:
+            for lt in learnable:
+                glossary["terms"].setdefault(lt["source_term"], lt["target_term"])
+            save_glossary(glossary, target_language)
+            stats["auto_learned_terms"] = len(learnable)
+
         # ── Signal separation ─────────────────────────────────────────────────
         # Three independent signals — only the first two may affect Excel color:
         #   original_excel_highlights : source cell fills → always preserved
@@ -3548,89 +3717,114 @@ def process_excel_with_progress(
                 cell.fill = original_excel_highlights[(row_num, col_idx)]
                 cells_original_highlight += 1
 
-        total_cells_for_passes = total_rows * len(to_translate)
-
-        # ── Phase 3: Residue check ────────────────────────────────────────────
+        # ── Phase 3: Residue check (fast local scan first, AI only for remaining) ──
+        # Only check cells that went through API translation + refinement
+        residue_candidates = {
+            (rn, ci)
+            for rn, ci in results
+            if (rn, ci) in api_translated_cells
+        }
+        # Also include cells refined via AI (they may have changed)
+        total_residue_cells = max(len(residue_candidates), 1)
         checked = 0
-        for row_num in range(data_start_row, worksheet.max_row + 1):
-            for col_header, (col_idx, canonical) in to_translate.items():
-                checked += 1
-                elapsed  = time.time() - start_time
-                progress = 0.65 + (checked / max(total_cells_for_passes, 1)) * 0.25
-                pct      = int(progress * 100)
 
-                progress_bar.progress(progress)
-                progress_container.markdown(
-                    _progress_html(
-                        "Phase 2 — Residue Check", sheet_name, col_header,
-                        row_num - 1, total_rows, pct, elapsed, 0,
-                        stats["cells_translated"], stats["cells_skipped"],
-                        stats["residue_corrections"],
-                    ),
-                    unsafe_allow_html=True,
-                )
+        col_canonical_map = {ci: can for _, (ci, can) in to_translate.items()}
+        col_header_for_ci = {ci: h for h, (ci, _) in to_translate.items()}
 
-                cell = worksheet.cell(row=row_num, column=col_idx)
-                if cell.value is None or str(cell.value).strip() == "":
-                    continue
+        for (row_num, col_idx) in residue_candidates:
+            checked += 1
+            canonical  = col_canonical_map.get(col_idx, "other")
+            col_header = col_header_for_ci.get(col_idx, str(col_idx))
+            elapsed    = time.time() - start_time
+            progress   = 0.68 + (checked / total_residue_cells) * 0.22
+            pct        = int(progress * 100)
 
-                text = str(cell.value)
-                for _ in range(3):
-                    detected = detect_german_residue(text, target_language)
-                    if not detected:
-                        break
-                    text = fix_german_residue(client, text, canonical, token_counter, target_language)
-                    stats["residue_corrections"] += 1
-                else:
-                    detected = detect_german_residue(text, target_language)
-                    if detected:
-                        stats["unresolved_warnings"] += 1
-                        stats["warning_details"].append({
-                            "row":     row_num,
-                            "column":  col_header,
-                            "text":    text[:50] + "..." if len(text) > 50 else text,
-                            "residue": detected[:3],
-                        })
+            progress_bar.progress(progress)
+            progress_container.markdown(
+                _progress_html(
+                    "Phase 3 — Residue Check", sheet_name, col_header,
+                    checked, total_residue_cells, pct, elapsed, 0,
+                    stats["cells_translated"], stats["cells_skipped"],
+                    stats["residue_corrections"],
+                ),
+                unsafe_allow_html=True,
+            )
 
+            cell = worksheet.cell(row=row_num, column=col_idx)
+            if cell.value is None or str(cell.value).strip() == "":
+                continue
+
+            text = str(cell.value)
+
+            # Step 1: Fast local furniture term replacement (no API)
+            locally_fixed = apply_furniture_terms(text, target_language)
+            if locally_fixed != text:
+                text = locally_fixed
                 cell.value = text
+                stats["residue_corrections"] += 1
 
-        # ── Phase 4: Final pass ───────────────────────────────────────────────
-        progress_bar.progress(0.98)
+            # Step 2: Quick residue scan — if clean, done
+            detected = detect_german_residue(text, target_language)
+            if not detected:
+                continue
+
+            # Step 3: AI fix for persistent residue (max 2 attempts, stronger prompt)
+            for attempt in range(2):
+                text = fix_german_residue(client, text, canonical, token_counter, target_language)
+                stats["residue_corrections"] += 1
+                detected = detect_german_residue(text, target_language)
+                if not detected:
+                    break
+
+            if detected:
+                stats["unresolved_warnings"] += 1
+                stats["warning_details"].append({
+                    "row":     row_num,
+                    "column":  col_header,
+                    "text":    text[:50] + "..." if len(text) > 50 else text,
+                    "residue": detected[:3],
+                })
+
+            cell.value = text
+
+        # ── Phase 4: Final verification pass ─────────────────────────────────
+        progress_bar.progress(0.94)
         elapsed = time.time() - start_time
         progress_container.markdown(
             _progress_html(
-                "Phase 3 — Final Verification", sheet_name, "all columns",
-                total_rows, total_rows, 98, elapsed, 0,
+                "Phase 4 — Final Verification", sheet_name, "all columns",
+                total_rows, total_rows, 94, elapsed, 0,
                 stats["cells_translated"], stats["cells_skipped"],
                 stats["residue_corrections"],
             ),
             unsafe_allow_html=True,
         )
 
-        for row_num in range(data_start_row, worksheet.max_row + 1):
-            for col_header, (col_idx, canonical) in to_translate.items():
-                cell = worksheet.cell(row=row_num, column=col_idx)
-                if cell.value is None or str(cell.value).strip() == "":
-                    continue
-                text     = str(cell.value)
-                detected = detect_german_residue(text, target_language)
-                if detected:
-                    corrected = fix_german_residue(client, text, canonical, token_counter, target_language)
-                    stats["residue_corrections"] += 1
-                    if detect_german_residue(corrected, target_language):
-                        already = any(
-                            w["row"] == row_num and w["column"] == col_header
-                            for w in stats["warning_details"]
-                        )
-                        if not already:
-                            stats["unresolved_warnings"] += 1
-                            stats["warning_details"].append({
-                                "row":     row_num,
-                                "column":  col_header,
-                                "text":    corrected[:50] + "..." if len(corrected) > 50 else corrected,
-                                "residue": detect_german_residue(corrected)[:3],
-                            })
-                    cell.value = corrected
+        for (row_num, col_idx) in residue_candidates:
+            canonical  = col_canonical_map.get(col_idx, "other")
+            col_header = col_header_for_ci.get(col_idx, str(col_idx))
+            cell       = worksheet.cell(row=row_num, column=col_idx)
+            if cell.value is None or str(cell.value).strip() == "":
+                continue
+            text     = str(cell.value)
+            detected = detect_german_residue(text, target_language)
+            if detected:
+                corrected = fix_german_residue(client, text, canonical, token_counter, target_language)
+                stats["residue_corrections"] += 1
+                if detect_german_residue(corrected, target_language):
+                    already = any(
+                        w["row"] == row_num and w["column"] == col_header
+                        for w in stats["warning_details"]
+                    )
+                    if not already:
+                        stats["unresolved_warnings"] += 1
+                        stats["warning_details"].append({
+                            "row":     row_num,
+                            "column":  col_header,
+                            "text":    corrected[:50] + "..." if len(corrected) > 50 else corrected,
+                            "residue": detect_german_residue(corrected)[:3],
+                        })
+                cell.value = corrected
 
         # ── Merge confirmed unresolved residue into all_warnings ─────────────────
         ts_fin = datetime.now().isoformat(timespec="seconds")
@@ -3936,7 +4130,36 @@ def translator_page():
         classification["header_row"] = header_row
         classification["ws_info"]    = _ws_info
 
-        render_column_report(classification)
+        # ── Column detection summary (clean minimal view) ─────────────────────
+        _to_tr   = classification.get("to_translate", {})
+        _missed  = classification.get("possible_missed", [])
+        _role    = st.session_state.get("user_role", "")
+
+        if _to_tr:
+            _col_names = ", ".join(f"<strong>{h}</strong>" for h in _to_tr.keys())
+            _hdr_note  = (
+                f" (headers in row {header_row})" if header_row != 1 else ""
+            )
+            st.markdown(
+                f'<div class="alert alert-info">'
+                f'<span class="alert-icon">✓</span>'
+                f'<span>{len(_to_tr)} column(s) ready{_hdr_note}: {_col_names}</span>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+            if _missed:
+                st.markdown(
+                    f'<div class="alert alert-warn">'
+                    f'<span class="alert-icon">⚠</span>'
+                    f'<span><strong>Possible missed columns:</strong> {", ".join(_missed)}</span>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+            if _role == "admin":
+                with st.expander("Column detection details", expanded=False):
+                    render_column_report(classification)
+        else:
+            render_column_report(classification)
 
         # Manual fallback when automatic detection found nothing
         if not classification["to_translate"]:
@@ -4970,34 +5193,66 @@ def glossary_page():
         st.success(f"{target_col_label} glossary reset to defaults.")
         st.rerun()
 
-    # ── AI-Assisted Glossary Suggestions ────────────────────────────────────
-    st.markdown('<div class="section-label">AI Glossary Suggestions</div>', unsafe_allow_html=True)
-    suggestions = db_load_glossary_suggestions(target_language=active_lang, status="pending")
+    # ── Auto-learned furniture terms ─────────────────────────────────────────
+    st.markdown('<div class="section-label">Auto-learned Terminology</div>', unsafe_allow_html=True)
+    furniture_map = FURNITURE_TERM_MAP_FR if active_lang == "French" else FURNITURE_TERM_MAP_NL
+    auto_in_glossary = {
+        de: tr for de, tr in furniture_map.items()
+        if de in terms
+    }
+    auto_missing = {
+        de: tr for de, tr in furniture_map.items()
+        if de not in terms
+    }
 
-    if not suggestions:
-        st.markdown("""
-        <div class="alert alert-info">
-            <span class="alert-icon">ℹ</span>
-            <span>No pending suggestions for this language. Suggestions are auto-generated
-            after each translation job and appear here for review.</span>
-        </div>
-        """, unsafe_allow_html=True)
-    else:
+    if auto_in_glossary:
         st.markdown(
-            f'<div class="alert alert-warn"><span class="alert-icon">💡</span>'
-            f'<span><strong>{len(suggestions)} suggestion(s)</strong> detected from recent jobs. '
-            f'Review and accept or reject each term.</span></div>',
+            f'<div class="alert alert-success">'
+            f'<span class="alert-icon">✓</span>'
+            f'<span><strong>{len(auto_in_glossary)} furniture term(s) active</strong> — '
+            f'learned automatically from translation jobs.</span></div>',
             unsafe_allow_html=True,
         )
-        for s in suggestions:
-            sid    = s["id"]
-            term   = s["term"]
-            occ    = s["occurrences"]
-            ctx    = s.get("example_context", "")[:80]
+
+    if auto_missing:
+        st.markdown(
+            f'<div class="alert alert-info">'
+            f'<span class="alert-icon">ℹ</span>'
+            f'<span>{len(auto_missing)} furniture term(s) will be added automatically '
+            f'when they appear in source files (min. 2 occurrences).</span></div>',
+            unsafe_allow_html=True,
+        )
+        if st.button(f"Add all {len(auto_missing)} furniture terms now", key="add_all_furniture"):
+            for de, tr in auto_missing.items():
+                glossary["terms"].setdefault(de, tr)
+            save_glossary(glossary, active_lang)
+            st.success(f"Added {len(auto_missing)} furniture terms to glossary.")
+            st.rerun()
+
+    # ── Unknown term suggestions (for terms not in furniture map) ────────────
+    suggestions = db_load_glossary_suggestions(target_language=active_lang, status="pending")
+    unknown_suggestions = [
+        s for s in suggestions
+        if s["term"] not in furniture_map
+    ]
+
+    if unknown_suggestions:
+        st.markdown('<div class="section-label">Unknown Terms — Review Required</div>', unsafe_allow_html=True)
+        st.markdown(
+            f'<div class="alert alert-warn"><span class="alert-icon">💡</span>'
+            f'<span><strong>{len(unknown_suggestions)} unknown term(s)</strong> detected from recent jobs. '
+            f'These are not in the furniture vocabulary — review and add if needed.</span></div>',
+            unsafe_allow_html=True,
+        )
+        for s in unknown_suggestions:
+            sid  = s["id"]
+            term = s["term"]
+            occ  = s["occurrences"]
+            ctx  = s.get("example_context", "")[:80]
             col_a, col_b, col_c = st.columns([3, 1, 1])
             with col_a:
                 proposed = st.text_input(
-                    f"**{term}** ({occ}× in source) — propose {target_col_label}:",
+                    f"**{term}** ({occ}× in source):",
                     key=f"sug_input_{sid}",
                     placeholder=f"Type {target_col_label} translation…",
                     help=f"Context: {ctx}" if ctx else "",

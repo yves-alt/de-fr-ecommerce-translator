@@ -299,6 +299,11 @@ _PRODUCT_KEYWORDS: dict[str, list[str]] = {
     ],
     "outdoor": [
         "gartenstuhl", "gartentisch", "terrassenmöbel", "gartenmöbel",
+        "gartenessgruppe", "gartengruppe", "gartenset", "gartensofa",
+        "loungeset", "loungesofa", "loungesessel", "sofaelement", "sofamodul",
+        "terrassenset", "gartenliege", "gartenbank",
+        "polyrattan", "geflecht", "kunststoffgeflecht",
+        "pulverbeschichtet",
     ],
     "lighting": [
         "lampe", "leuchte", "pendelleuchte", "tischlampe",
@@ -340,7 +345,7 @@ _CATEGORY_FR_HINTS: dict[str, str] = {
     "bathroom": "Product: BATHROOM — prefer: meuble vasque, miroir, colonne de rangement.",
     "office":   "Product: OFFICE — prefer: bureau, caisson, réglable en hauteur.",
     "textile":  "Product: TEXTILE — prefer: housse, garnissage, lavable.",
-    "outdoor":  "Product: OUTDOOR — prefer: résistant aux UV, aluminium laqué, empilable.",
+    "outdoor":  "Product: OUTDOOR FURNITURE — prefer: salon de jardin, mobilier de jardin, résine tressée, thermolaqué, résistant aux UV, ensemble composé de, module de canapé.",
     "lighting": "Product: LIGHTING — prefer: ampoule incluse, culot E27, intensité réglable.",
 }
 
@@ -424,3 +429,142 @@ def extract_glossary_suggestions(
             break
 
     return results
+
+
+# =============================================================================
+# FURNITURE LOCALIZATION ENGINE
+# =============================================================================
+
+# Curated DE→FR furniture term map — applied as fast local pass before/after AI
+FURNITURE_TERM_MAP_FR: dict[str, str] = {
+    # Outdoor / garden sets
+    "Gartenessgruppe":    "ensemble de jardin",
+    "Gartengruppe":       "salon de jardin",
+    "Gartenset":          "salon de jardin",
+    "Loungeset":          "salon de jardin",
+    "Loungesofa":         "canapé de jardin",
+    "Loungesessel":       "fauteuil de jardin",
+    "Terrassenset":       "ensemble de terrasse",
+    "Sofaelement":        "module de canapé",
+    "Sofamodul":          "module de canapé",
+    "Gartenstuhl":        "chaise de jardin",
+    "Gartentisch":        "table de jardin",
+    "Gartenbank":         "banc de jardin",
+    "Gartenliege":        "chaise longue de jardin",
+    "Gartensofa":         "canapé de jardin",
+    "Gartenmöbel":        "mobilier de jardin",
+    "Terrassenmöbel":     "mobilier de terrasse",
+    # Materials / finishes
+    "pulverbeschichtet":  "thermolaqué",
+    "Pulverbeschichtung": "revêtement thermolaqué",
+    "thermobeschichtet":  "thermolaqué",
+    "Geflecht":           "résine tressée",
+    "Kunststoffgeflecht": "résine tressée",
+    "Flechtwerk":         "résine tressée",
+    "Polyrattan":         "résine tressée",
+    "Rattan":             "rotin",
+    # Frame / structure
+    "Tischgestell":       "piètement de table",
+    "Untergestell":       "structure inférieure",
+    "Zargen":             "traverses",
+    "Zarge":              "traverse",
+    # Phrases (longest first so multi-word replaces before single words)
+    "Set bestehend aus":  "ensemble composé de",
+    "bestehend aus":      "composé de",
+    "ohne Dekoration":    "sans décoration",
+    "inkl. Dekoration":   "décoration incluse",
+    # Adjectives / descriptors
+    "Ausziehbar":         "extensible",
+    "Absetzung":          "bordure contrastante",
+    "Abhebung":           "bordure contrastante",
+    "Dekoration":         "décoration",
+}
+
+FURNITURE_TERM_MAP_NL: dict[str, str] = {
+    "Gartenessgruppe":    "tuinset",
+    "Gartengruppe":       "tuinset",
+    "Gartenset":          "tuinset",
+    "Loungeset":          "loungeset",
+    "Sofaelement":        "canapémodule",
+    "Sofamodul":          "canapémodule",
+    "Gartenstuhl":        "tuinstoel",
+    "Gartentisch":        "tuintafel",
+    "Gartenbank":         "tuinbank",
+    "Gartenliege":        "tuinligstoel",
+    "Gartenmöbel":        "tuinmeubelen",
+    "Terrassenmöbel":     "terrasmeubilair",
+    "Terrassenset":       "tuinset",
+    "pulverbeschichtet":  "gepoedercoat",
+    "Pulverbeschichtung": "poedercoating",
+    "Geflecht":           "vlechtwerk",
+    "Kunststoffgeflecht": "kunststof vlechtwerk",
+    "Polyrattan":         "kunststof vlechtwerk",
+    "Rattan":             "rotan",
+    "Tischgestell":       "tafelpoten",
+    "Untergestell":       "onderframe",
+    "Zargen":             "verbindingsstukken",
+    "Set bestehend aus":  "set bestaande uit",
+    "bestehend aus":      "bestaande uit",
+    "ohne Dekoration":    "zonder decoratie",
+    "Ausziehbar":         "uitschuifbaar",
+    "Absetzung":          "contrasterende rand",
+    "Dekoration":         "decoratie",
+}
+
+# Sorted once by length descending so multi-word phrases replace before substrings
+_FURNITURE_TERMS_FR_SORTED = sorted(FURNITURE_TERM_MAP_FR.keys(), key=len, reverse=True)
+_FURNITURE_TERMS_NL_SORTED = sorted(FURNITURE_TERM_MAP_NL.keys(), key=len, reverse=True)
+
+
+def apply_furniture_terms(text: str, target_language: str = "French") -> str:
+    """Replace known German furniture terms with target-language equivalents (fast, no API)."""
+    if not text:
+        return text
+    if target_language == "Dutch":
+        term_map = FURNITURE_TERM_MAP_NL
+        sorted_keys = _FURNITURE_TERMS_NL_SORTED
+    else:
+        term_map = FURNITURE_TERM_MAP_FR
+        sorted_keys = _FURNITURE_TERMS_FR_SORTED
+
+    for de_term in sorted_keys:
+        if de_term.lower() not in text.lower():
+            continue
+        pattern = re.compile(r'(?<!\w)' + re.escape(de_term) + r'(?!\w)', re.IGNORECASE | re.UNICODE)
+        text = pattern.sub(term_map[de_term], text)
+    return text
+
+
+def auto_learn_glossary_from_source(
+    source_texts: list[str],
+    glossary: dict,
+    target_language: str = "French",
+    min_occurrences: int = 2,
+) -> list[dict]:
+    """
+    Scan source texts for known furniture terms not yet in the glossary.
+    Returns list of {source_term, target_term, occurrences} dicts for auto-adding.
+    """
+    term_map = FURNITURE_TERM_MAP_FR if target_language == "French" else FURNITURE_TERM_MAP_NL
+    existing_lower = {k.lower() for k in glossary.get("terms", {}).keys()}
+
+    freq: Counter = Counter()
+    for text in source_texts:
+        if not text:
+            continue
+        for de_term in term_map:
+            if de_term.lower() in existing_lower:
+                continue
+            if re.search(r'(?<!\w)' + re.escape(de_term) + r'(?!\w)', text, re.IGNORECASE | re.UNICODE):
+                freq[de_term] += 1
+
+    learnable = []
+    for term, count in freq.most_common():
+        if count < min_occurrences:
+            continue
+        learnable.append({
+            "source_term": term,
+            "target_term": term_map[term],
+            "occurrences": count,
+        })
+    return learnable
