@@ -813,9 +813,9 @@ def compute_quality_score(warnings: list) -> int:
 def quality_verdict(score: int) -> tuple[str, str]:
     """Return (verdict_text, color_token) for the score."""
     if score >= 95:
-        return "Excellent — ready to use", "#10b981"
+        return "Excellent — ready to use", "#22C55E"
     if score >= 85:
-        return "Good — minor review recommended", "#7c5cfc"
+        return "Good — minor review recommended", "#0369A1"
     if score >= 70:
         return "Needs review before use", "#f59e0b"
     return "Do not publish without manual review", "#ef4444"
@@ -865,36 +865,36 @@ def _normalize_col_header(raw) -> str:
 
 def inject_custom_css():
     # ── Background tokens ──────────────────────────────────────────────────────
-    bg_app    = "#f4f4fa"
-    bg_sb     = "#eceaf6"
-    bg_card   = "#ffffff"
-    bg_input  = "#f0f0f8"
-    bg_hover  = "rgba(0,0,0,0.025)"
-    bg_subtle = "rgba(0,0,0,0.03)"
+    bg_app    = "#F8FAFC"
+    bg_sb     = "#F1F5F9"
+    bg_card   = "#FFFFFF"
+    bg_input  = "#F8FAFC"
+    bg_hover  = "rgba(15,61,94,0.03)"
+    bg_subtle = "rgba(15,61,94,0.04)"
     # ── Border / divider tokens ────────────────────────────────────────────────
-    divider   = "rgba(0,0,0,0.08)"
-    divider_s = "rgba(0,0,0,0.06)"
-    border    = "rgba(0,0,0,0.10)"
-    border_sm = "rgba(0,0,0,0.10)"
-    border_md = "rgba(0,0,0,0.12)"
-    border_dsh= "rgba(0,0,0,0.14)"
-    border_hv = "rgba(0,0,0,0.20)"
-    hover_rb  = "rgba(0,0,0,0.06)"
+    divider   = "#E2E8F0"
+    divider_s = "#EFF3F7"
+    border    = "#E2E8F0"
+    border_sm = "#E2E8F0"
+    border_md = "#CBD5E1"
+    border_dsh= "#CBD5E1"
+    border_hv = "#94A3B8"
+    hover_rb  = "rgba(15,61,94,0.05)"
     # ── Text tokens ───────────────────────────────────────────────────────────
-    text      = "#1a1a2e"
-    text2     = "#5a5a7a"
-    text2b    = "#6a6a8a"
-    text3     = "#7070a0"
-    text4     = "#9090b8"
-    text5     = "#aaaacc"
-    text6     = "#b0b0cc"
+    text      = "#0F172A"
+    text2     = "#334155"
+    text2b    = "#475569"
+    text3     = "#64748B"
+    text4     = "#94A3B8"
+    text5     = "#CBD5E1"
+    text6     = "#94A3B8"
     # ── Component-specific tokens ──────────────────────────────────────────────
-    sb_btn    = "#8888aa"
-    code_bg   = "rgba(0,0,0,0.06)"
-    code_clr  = "#6060a0"
-    prog_trk  = "rgba(0,0,0,0.08)"
-    chip_bg   = "rgba(0,0,0,0.04)"
-    chip_bdr  = "rgba(0,0,0,0.09)"
+    sb_btn    = "#64748B"
+    code_bg   = "rgba(15,61,94,0.06)"
+    code_clr  = "#0F3D5E"
+    prog_trk  = "#E2E8F0"
+    chip_bg   = "rgba(15,61,94,0.05)"
+    chip_bdr  = "#E2E8F0"
 
     st.markdown(f"""
     <style>
@@ -931,8 +931,8 @@ def inject_custom_css():
         to   {{ opacity: 1; transform: translateY(0); }}
     }}
     @keyframes glow-pulse {{
-        0%, 100% {{ box-shadow: 0 0 0 0 rgba(124,92,252,0.5); }}
-        50%       {{ box-shadow: 0 0 0 7px rgba(124,92,252,0); }}
+        0%, 100% {{ box-shadow: 0 0 0 0 rgba(34,197,94,0.4); }}
+        50%       {{ box-shadow: 0 0 0 7px rgba(34,197,94,0); }}
     }}
     @keyframes dot-pulse {{
         0%, 100% {{ opacity: 1; transform: scale(1); }}
@@ -1002,9 +1002,9 @@ def inject_custom_css():
         transition: color 0.15s, border-color 0.15s, background 0.15s !important;
     }}
     [data-testid="stSidebar"] .stButton > button:hover {{
-        color: #f87171 !important;
-        border-color: rgba(248,113,113,0.25) !important;
-        background: rgba(248,113,113,0.06) !important;
+        color: #EF4444 !important;
+        border-color: rgba(239,68,68,0.25) !important;
+        background: rgba(239,68,68,0.06) !important;
         transform: none !important;
         box-shadow: none !important;
     }}
@@ -1017,11 +1017,11 @@ def inject_custom_css():
     }}
     .sb-dot {{
         width: 7px; height: 7px; border-radius: 50%;
-        background: #7c5cfc; flex-shrink: 0;
+        background: #22C55E; flex-shrink: 0;
     }}
     .sb-org {{
         font-size: 10px; font-weight: 600; text-transform: uppercase;
-        letter-spacing: 0.09em; color: {text5} !important;
+        letter-spacing: 0.09em; color: {text4} !important;
         margin-top: 3px; padding-left: 16px;
     }}
     .sb-nav-label {{
@@ -1055,9 +1055,9 @@ def inject_custom_css():
         letter-spacing: 0.07em; text-transform: uppercase;
         margin-bottom: 36px;
     }}
-    .login-lockup-dot {{ width: 7px; height: 7px; border-radius: 50%; background: #7c5cfc; }}
+    .login-lockup-dot {{ width: 7px; height: 7px; border-radius: 50%; background: #22C55E; }}
     .login-title {{
-        font-size: 34px; font-weight: 800; color: {text};
+        font-size: 36px; font-weight: 800; color: #0F3D5E;
         letter-spacing: -0.04em; margin: 0 0 10px; line-height: 1.1;
     }}
     .login-subtitle {{ font-size: 14px; color: {text3}; font-weight: 400; }}
@@ -1076,8 +1076,9 @@ def inject_custom_css():
     [data-testid="stForm"] {{
         background: {bg_card} !important;
         border: 1px solid {border_sm} !important;
-        border-radius: 14px !important;
-        padding: 32px 36px !important;
+        border-radius: 16px !important;
+        padding: 36px 40px !important;
+        box-shadow: 0 4px 24px rgba(15,61,94,0.06) !important;
         animation: fadeUp 0.45s ease 0.08s both;
     }}
 
@@ -1085,14 +1086,14 @@ def inject_custom_css():
     .page-hd {{
         padding: 2px 0 26px;
         border-bottom: 1px solid {divider};
-        margin-bottom: 28px;
+        margin-bottom: 32px;
         animation: fadeUp 0.3s ease;
     }}
     .page-hd-title {{
-        font-size: 22px; font-weight: 700; color: {text};
-        letter-spacing: -0.03em; line-height: 1.2;
+        font-size: 26px; font-weight: 800; color: #0F3D5E;
+        letter-spacing: -0.04em; line-height: 1.2;
     }}
-    .page-hd-sub {{ font-size: 13px; color: {text3}; margin-top: 4px; font-weight: 400; }}
+    .page-hd-sub {{ font-size: 14px; color: {text3}; margin-top: 6px; font-weight: 400; }}
 
     /* ── Section label ────────────────────────────────────────── */
     .section-label {{
@@ -1105,14 +1106,15 @@ def inject_custom_css():
     .card {{
         background: {bg_card};
         border: 1px solid {border};
-        border-radius: 12px; padding: 24px; margin: 10px 0;
+        border-radius: 14px; padding: 28px; margin: 12px 0;
+        box-shadow: 0 2px 12px rgba(15,61,94,0.05);
         animation: fadeUp 0.3s ease;
-        transition: border-color 0.2s;
+        transition: border-color 0.2s, box-shadow 0.2s;
     }}
-    .card:hover {{ border-color: {border_hv}; }}
+    .card:hover {{ border-color: {border_hv}; box-shadow: 0 4px 20px rgba(15,61,94,0.09); }}
     .card-title {{
-        font-size: 12px; font-weight: 700; color: {text3};
-        text-transform: uppercase; letter-spacing: 0.09em;
+        font-size: 11px; font-weight: 700; color: {text4};
+        text-transform: uppercase; letter-spacing: 0.1em;
         margin-bottom: 18px; padding-bottom: 14px;
         border-bottom: 1px solid {divider};
     }}
@@ -1125,9 +1127,9 @@ def inject_custom_css():
         animation: fadeUp 0.3s ease;
     }}
     .alert-icon {{ font-size: 14px; flex-shrink: 0; margin-top: 1px; }}
-    .alert-info  {{ background: rgba(90,140,248,0.07); border: 1px solid rgba(90,140,248,0.14); color: #7a9ff5; }}
-    .alert-success {{ background: rgba(16,185,129,0.07); border: 1px solid rgba(16,185,129,0.14); color: #4fcba4; }}
-    .alert-warn  {{ background: rgba(245,158,11,0.07); border: 1px solid rgba(245,158,11,0.14); color: #c89a44; }}
+    .alert-info  {{ background: #E0F2FE; border: 1px solid #BAE6FD; color: #0369A1; }}
+    .alert-success {{ background: #DCFCE7; border: 1px solid #BBF7D0; color: #16A34A; }}
+    .alert-warn  {{ background: #FEF3C7; border: 1px solid #FDE68A; color: #92400E; }}
     .alert strong {{ color: {text}; font-weight: 600; }}
     .alert code {{
         font-family: Menlo, Monaco, monospace; font-size: 11px;
@@ -1136,38 +1138,39 @@ def inject_custom_css():
     }}
 
     /* ── Stat result cards ────────────────────────────────────── */
-    .result-grid {{ display: grid; grid-template-columns: repeat(4,1fr); gap: 10px; margin: 18px 0; }}
+    .result-grid {{ display: grid; grid-template-columns: repeat(4,1fr); gap: 12px; margin: 18px 0; }}
     .result-card {{
         background: {bg_card}; border: 1px solid {border};
-        border-radius: 11px; padding: 18px 16px;
-        transition: border-color 0.2s, transform 0.2s;
+        border-radius: 14px; padding: 22px 20px;
+        box-shadow: 0 2px 10px rgba(15,61,94,0.05);
+        transition: border-color 0.2s, transform 0.2s, box-shadow 0.2s;
         animation: fadeUp 0.35s ease;
     }}
-    .result-card:hover {{ border-color: {border_hv}; transform: translateY(-2px); }}
+    .result-card:hover {{ border-color: {border_hv}; transform: translateY(-2px); box-shadow: 0 6px 20px rgba(15,61,94,0.08); }}
     .result-card-label {{
-        font-size: 10px; font-weight: 700; color: {text4};
-        text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 10px;
+        font-size: 11px; font-weight: 600; color: {text4};
+        text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 12px;
     }}
     .result-card-value {{
-        font-size: 28px; font-weight: 800; letter-spacing: -0.04em;
+        font-size: 30px; font-weight: 800; letter-spacing: -0.04em;
         font-variant-numeric: tabular-nums; color: {text};
     }}
-    .result-card-value.accent  {{ color: #7c5cfc; }}
-    .result-card-value.success {{ color: #10b981; }}
-    .result-card-value.warn    {{ color: #f59e0b; }}
+    .result-card-value.accent  {{ color: #0F3D5E; }}
+    .result-card-value.success {{ color: #22C55E; }}
+    .result-card-value.warn    {{ color: #F59E0B; }}
 
     /* ── Column chips ─────────────────────────────────────────── */
     .chip {{
         display: inline-flex; align-items: center; gap: 5px;
-        padding: 3px 10px; border-radius: 5px;
+        padding: 3px 10px; border-radius: 6px;
         font-size: 11px; font-weight: 600;
         font-family: Menlo, Monaco, 'Cascadia Code', monospace;
         margin: 3px 3px 3px 0;
     }}
     .chip-accent {{
-        background: rgba(124,92,252,0.1);
-        border: 1px solid rgba(124,92,252,0.18);
-        color: #9b7fff;
+        background: #DCFCE7;
+        border: 1px solid #BBF7D0;
+        color: #16A34A;
     }}
     .chip-muted {{
         background: {chip_bg};
@@ -1179,9 +1182,9 @@ def inject_custom_css():
     /* ── File chip ────────────────────────────────────────────── */
     .file-chip {{
         display: inline-flex; align-items: center; gap: 8px;
-        background: rgba(124,92,252,0.08);
-        border: 1px solid rgba(124,92,252,0.18);
-        color: #9b7fff; padding: 6px 14px; border-radius: 20px;
+        background: #E0F2FE;
+        border: 1px solid #BAE6FD;
+        color: #0369A1; padding: 6px 16px; border-radius: 20px;
         font-size: 12px; font-weight: 600; margin: 8px 0;
         font-family: Menlo, Monaco, 'Cascadia Code', monospace;
         animation: slide-in 0.25s ease;
@@ -1207,12 +1210,12 @@ def inject_custom_css():
         display: inline-flex; align-items: center; gap: 5px;
         padding: 3px 10px; border-radius: 20px;
         font-size: 10px; font-weight: 700; letter-spacing: 0.06em;
-        background: rgba(124,92,252,0.12);
-        border: 1px solid rgba(124,92,252,0.22);
-        color: #9b7fff;
+        background: #DCFCE7;
+        border: 1px solid #BBF7D0;
+        color: #16A34A;
     }}
     .prog-badge-dot {{
-        width: 5px; height: 5px; border-radius: 50%; background: #7c5cfc;
+        width: 5px; height: 5px; border-radius: 50%; background: #22C55E;
         animation: dot-pulse 1.4s ease infinite;
     }}
     .prog-track {{
@@ -1223,12 +1226,12 @@ def inject_custom_css():
     }}
     .prog-bar {{
         height: 3px; border-radius: 2px;
-        background: linear-gradient(90deg, #7c5cfc 0%, #5a8cf8 100%);
+        background: linear-gradient(90deg, #22C55E 0%, #16A34A 100%);
         transition: width 0.4s ease; position: relative;
     }}
     .prog-bar::after {{
         content: ''; position: absolute; right: -1px; top: -2px;
-        width: 7px; height: 7px; background: #9b7fff;
+        width: 7px; height: 7px; background: #22C55E;
         border-radius: 50%; animation: glow-pulse 1.6s ease infinite;
     }}
     .prog-item {{
@@ -1237,10 +1240,10 @@ def inject_custom_css():
         font-family: Menlo, Monaco, 'Cascadia Code', monospace;
     }}
     .prog-item-dot {{
-        width: 5px; height: 5px; border-radius: 50%; background: #7c5cfc; flex-shrink: 0;
+        width: 5px; height: 5px; border-radius: 50%; background: #22C55E; flex-shrink: 0;
         animation: dot-pulse 1.4s ease infinite;
     }}
-    .prog-item-col {{ color: #9b7fff; }}
+    .prog-item-col {{ color: #16A34A; }}
     .prog-item-row {{ color: {text4}; margin-left: 6px; }}
     .prog-stats {{
         display: flex; gap: 28px; margin-top: 18px; padding-top: 14px;
@@ -1295,20 +1298,20 @@ def inject_custom_css():
     .success-banner {{
         display: flex; align-items: center; gap: 16px;
         padding: 20px 24px;
-        background: rgba(16,185,129,0.06);
-        border: 1px solid rgba(16,185,129,0.14);
-        border-radius: 11px; margin: 16px 0;
+        background: #DCFCE7;
+        border: 1px solid #BBF7D0;
+        border-radius: 14px; margin: 16px 0;
         animation: fadeUp 0.3s ease;
     }}
     .success-banner-icon {{
-        width: 36px; height: 36px; border-radius: 50%;
-        background: rgba(16,185,129,0.15);
-        border: 1px solid rgba(16,185,129,0.25);
+        width: 40px; height: 40px; border-radius: 50%;
+        background: #BBF7D0;
+        border: 1px solid #86EFAC;
         display: flex; align-items: center; justify-content: center;
-        font-size: 16px; flex-shrink: 0;
+        font-size: 18px; flex-shrink: 0;
     }}
-    .success-banner-title {{ font-size: 14px; font-weight: 700; color: #10b981; }}
-    .success-banner-sub   {{ font-size: 11px; color: #2e4a40; margin-top: 3px; }}
+    .success-banner-title {{ font-size: 15px; font-weight: 700; color: #15803D; }}
+    .success-banner-sub   {{ font-size: 12px; color: #166534; margin-top: 3px; }}
 
     .warn-banner {{
         padding: 18px 22px;
@@ -1321,44 +1324,46 @@ def inject_custom_css():
     .warn-banner-sub   {{ font-size: 11px; color: #3a2e1a; margin-top: 3px; }}
 
     /* ── Metric cards ─────────────────────────────────────────── */
-    .kpi-row   {{ display: grid; grid-template-columns: repeat(4,1fr); gap: 10px; margin: 18px 0; }}
-    .kpi-row-3 {{ display: grid; grid-template-columns: repeat(3,1fr); gap: 10px; margin: 18px 0; }}
+    .kpi-row   {{ display: grid; grid-template-columns: repeat(4,1fr); gap: 12px; margin: 20px 0; }}
+    .kpi-row-3 {{ display: grid; grid-template-columns: repeat(3,1fr); gap: 12px; margin: 20px 0; }}
     .kpi {{
         background: {bg_card};
         border: 1px solid {border};
-        border-radius: 11px; padding: 20px 18px;
-        transition: border-color 0.2s, transform 0.2s;
+        border-radius: 14px; padding: 24px 20px;
+        box-shadow: 0 2px 10px rgba(15,61,94,0.05);
+        transition: border-color 0.2s, transform 0.2s, box-shadow 0.2s;
         animation: fadeUp 0.35s ease;
     }}
-    .kpi:hover {{ border-color: {border_hv}; transform: translateY(-2px); }}
+    .kpi:hover {{ border-color: {border_hv}; transform: translateY(-2px); box-shadow: 0 6px 20px rgba(15,61,94,0.08); }}
     .kpi-label {{
-        font-size: 10px; font-weight: 700; color: {text4};
-        text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 10px;
+        font-size: 11px; font-weight: 600; color: {text4};
+        text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 12px;
     }}
     .kpi-value {{
-        font-size: 28px; font-weight: 800; letter-spacing: -0.04em;
+        font-size: 30px; font-weight: 800; letter-spacing: -0.04em;
         color: {text}; font-variant-numeric: tabular-nums;
     }}
-    .kpi-value.accent  {{ color: #7c5cfc; }}
-    .kpi-value.success {{ color: #10b981; }}
-    .kpi-value.warn    {{ color: #f59e0b; }}
-    .kpi-sub {{ font-size: 11px; color: {text4}; margin-top: 5px; }}
+    .kpi-value.accent  {{ color: #0F3D5E; }}
+    .kpi-value.success {{ color: #22C55E; }}
+    .kpi-value.warn    {{ color: #F59E0B; }}
+    .kpi-value.muted   {{ color: {text4}; }}
+    .kpi-sub {{ font-size: 11px; color: {text4}; margin-top: 6px; }}
 
     /* ── Hero metric ──────────────────────────────────────────── */
     .hero-kpi {{
-        text-align: center; padding: 52px 32px; border-radius: 14px;
-        background: linear-gradient(135deg, rgba(124,92,252,0.07) 0%, rgba(90,140,248,0.07) 100%);
-        border: 1px solid rgba(124,92,252,0.16); margin: 20px 0;
+        text-align: center; padding: 56px 32px; border-radius: 16px;
+        background: linear-gradient(135deg, #E0F2FE 0%, #DCFCE7 100%);
+        border: 1px solid #BAE6FD; margin: 20px 0;
         animation: fadeUp 0.4s ease;
     }}
     .hero-kpi-value {{
         font-size: 80px; font-weight: 800; letter-spacing: -0.05em; line-height: 1;
-        background: linear-gradient(135deg, #7c5cfc 0%, #5a8cf8 100%);
+        background: linear-gradient(135deg, #0F3D5E 0%, #0369A1 100%);
         -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;
         margin: 0;
     }}
     .hero-kpi-label {{ font-size: 15px; color: {text3}; margin: 14px 0 0; font-weight: 500; }}
-    .hero-kpi-sub   {{ font-size: 12px; color: {text5}; margin: 6px 0 0; }}
+    .hero-kpi-sub   {{ font-size: 12px; color: {text4}; margin: 6px 0 0; }}
 
     /* ── History ──────────────────────────────────────────────── */
     .history-empty {{
@@ -1368,11 +1373,11 @@ def inject_custom_css():
     .history-empty-sub {{ font-size: 12px; color: {text5}; }}
     .history-empty-sub strong {{ color: {text4}; }}
     .cloud-note {{
-        padding: 11px 15px; border-radius: 8px; margin: 14px 0;
+        padding: 11px 15px; border-radius: 10px; margin: 14px 0;
         font-size: 11px; line-height: 1.5;
-        background: rgba(90,140,248,0.06);
-        border: 1px solid rgba(90,140,248,0.12);
-        color: #4a6899;
+        background: #E0F2FE;
+        border: 1px solid #BAE6FD;
+        color: #0369A1;
     }}
 
     /* ── Footer ───────────────────────────────────────────────── */
@@ -1383,14 +1388,14 @@ def inject_custom_css():
     [data-testid="stTextInput"] input {{
         background: {bg_input} !important;
         border: 1px solid {border_md} !important;
-        border-radius: 8px !important;
+        border-radius: 9px !important;
         color: {text} !important;
         font-size: 13px !important;
-        caret-color: #7c5cfc !important;
+        caret-color: #22C55E !important;
     }}
     [data-testid="stTextInput"] input:focus {{
-        border-color: rgba(124,92,252,0.45) !important;
-        box-shadow: 0 0 0 3px rgba(124,92,252,0.1) !important;
+        border-color: rgba(34,197,94,0.5) !important;
+        box-shadow: 0 0 0 3px rgba(34,197,94,0.12) !important;
         outline: none !important;
     }}
     [data-testid="stTextInput"] label p {{ color: {text2b} !important; font-size: 12px !important; font-weight: 500 !important; }}
@@ -1415,34 +1420,34 @@ def inject_custom_css():
 
     .stProgress {{ padding: 6px 0 !important; }}
     .stProgress > div > div > div {{
-        background: linear-gradient(90deg, #7c5cfc 0%, #5a8cf8 100%) !important;
+        background: linear-gradient(90deg, #22C55E 0%, #16A34A 100%) !important;
         border-radius: 2px !important;
     }}
 
     .stButton > button {{
-        background: #7c5cfc !important;
+        background: #22C55E !important;
         color: #fff !important;
         border: none !important;
-        border-radius: 9px !important;
+        border-radius: 10px !important;
         padding: 11px 26px !important;
         font-weight: 600 !important;
         font-size: 13px !important;
         letter-spacing: 0.01em !important;
         transition: background 0.15s, transform 0.15s, box-shadow 0.15s !important;
-        box-shadow: 0 2px 10px rgba(124,92,252,0.35) !important;
+        box-shadow: 0 2px 12px rgba(34,197,94,0.30) !important;
     }}
     .stButton > button:hover {{
-        background: #8f71ff !important;
+        background: #16A34A !important;
         transform: translateY(-1px) !important;
-        box-shadow: 0 5px 18px rgba(124,92,252,0.45) !important;
+        box-shadow: 0 5px 18px rgba(34,197,94,0.40) !important;
     }}
     .stButton > button:active {{ transform: translateY(0) !important; }}
 
     .stDownloadButton > button {{
-        background: rgba(16,185,129,0.1) !important;
-        color: #10b981 !important;
-        border: 1px solid rgba(16,185,129,0.22) !important;
-        border-radius: 9px !important;
+        background: #FFFFFF !important;
+        color: #0F3D5E !important;
+        border: 1.5px solid #0F3D5E !important;
+        border-radius: 10px !important;
         padding: 12px 26px !important;
         font-weight: 600 !important;
         font-size: 13px !important;
@@ -1450,8 +1455,8 @@ def inject_custom_css():
         transition: background 0.15s, border-color 0.15s, transform 0.15s !important;
     }}
     .stDownloadButton > button:hover {{
-        background: rgba(16,185,129,0.16) !important;
-        border-color: rgba(16,185,129,0.38) !important;
+        background: #E0F2FE !important;
+        border-color: #0369A1 !important;
         transform: translateY(-1px) !important;
     }}
 
@@ -1464,17 +1469,17 @@ def inject_custom_css():
     }}
     [data-testid="stFileUploader"] section:hover,
     [data-testid="stFileUploader"] > div:hover {{
-        border-color: rgba(124,92,252,0.38) !important;
-        background: rgba(124,92,252,0.03) !important;
+        border-color: rgba(34,197,94,0.4) !important;
+        background: rgba(34,197,94,0.03) !important;
     }}
     [data-testid="stFileUploader"] span,
     [data-testid="stFileUploader"] p {{ color: {text3} !important; font-size: 13px !important; }}
     [data-testid="stFileUploader"] small {{ color: {text5} !important; }}
     [data-testid="stFileUploader"] button {{
-        background: rgba(124,92,252,0.1) !important;
-        color: #9b7fff !important;
-        border: 1px solid rgba(124,92,252,0.2) !important;
-        border-radius: 7px !important;
+        background: #DCFCE7 !important;
+        color: #16A34A !important;
+        border: 1px solid #BBF7D0 !important;
+        border-radius: 8px !important;
         font-size: 12px !important;
         font-weight: 600 !important;
     }}
@@ -1533,9 +1538,9 @@ def inject_custom_css():
         color: #818cf8;
     }}
     .alert-success {{
-        background: rgba(16,185,129,0.07);
-        border: 1px solid rgba(16,185,129,0.14);
-        color: #4fcba4;
+        background: #DCFCE7;
+        border: 1px solid #BBF7D0;
+        color: #16A34A;
     }}
 
     @media (max-width: 780px) {{
@@ -1556,10 +1561,10 @@ def render_header():
     <div class="login-hero">
         <div class="login-lockup">
             <div class="login-lockup-dot"></div>
-            DE→FR Translator
+            Home24 AI Localization
         </div>
         <h1 class="login-title">Welcome back</h1>
-        <p class="login-subtitle">Sign in to access the translation workspace</p>
+        <p class="login-subtitle">Sign in to access your localization workspace</p>
     </div>
     """, unsafe_allow_html=True)
 
@@ -1714,13 +1719,13 @@ def render_column_report(classification: dict):
             <div>
                 <strong>Possible missed columns:</strong><br>
                 <div style="margin-top:6px;">{missed_chips}</div>
-                <div style="font-size:11px;color:#5a4020;margin-top:5px;">
+                <div style="font-size:11px;color:#92400E;margin-top:5px;">
                     These look like translatable columns but didn't match any known pattern.
                 </div>
             </div>
         </div>"""
 
-    row_note = f' <span style="font-size:11px;color:#686880;">(headers detected in row {header_row})</span>' if header_row != 1 else ""
+    row_note = f' <span style="font-size:11px;color:#64748B;">(headers detected in row {header_row})</span>' if header_row != 1 else ""
 
     st.markdown(f"""
     <div class="card">
@@ -1799,13 +1804,15 @@ def render_sidebar() -> str:
         """, unsafe_allow_html=True)
 
         # Target language badge
-        badge_color = "#e8523a" if target_language == "Dutch" else "#7c5cfc"
+        badge_bg    = "#FEF9C3" if target_language == "Dutch" else "#DCFCE7"
+        badge_bdr   = "#FDE047" if target_language == "Dutch" else "#BBF7D0"
+        badge_color = "#713F12" if target_language == "Dutch" else "#15803D"
         st.markdown(
             f'<div style="display:inline-flex;align-items:center;gap:6px;'
-            f'padding:4px 10px;border-radius:6px;background:rgba({("232,82,58" if target_language=="Dutch" else "124,92,252")},0.1);'
-            f'border:1px solid rgba({("232,82,58" if target_language=="Dutch" else "124,92,252")},0.22);'
+            f'padding:4px 12px;border-radius:20px;background:{badge_bg};'
+            f'border:1px solid {badge_bdr};'
             f'font-size:11px;font-weight:700;color:{badge_color};margin-bottom:8px;">'
-            f'{lang_flag} Target: {target_language} ({lang_code})'
+            f'{lang_flag} {target_language} ({lang_code})'
             f'</div>',
             unsafe_allow_html=True,
         )
@@ -1847,7 +1854,7 @@ def render_sidebar() -> str:
         <div class="sb-user">
             <span class="sb-user-label">Signed in as</span>
             <span class="sb-user-email">{email}</span>
-            {"<span style='display:block;font-size:0.68rem;color:#9b8fe0;margin-top:2px;'>" + role_label + "</span>" if role_label else ""}
+            {"<span style='display:block;font-size:0.68rem;color:#22C55E;margin-top:2px;'>" + role_label + "</span>" if role_label else ""}
         </div>
         """, unsafe_allow_html=True)
 
@@ -1863,8 +1870,8 @@ def render_sidebar() -> str:
         dot   = "🟢" if db_status["connected"] else "🔴"
         label = "SQLite · connected" if db_status["connected"] else "SQLite · error"
         st.markdown(
-            f'<div style="font-size:0.72rem;color:#9090b8;margin-top:2px;">'
-            f'{dot} <strong style="color:#5a5a7a;">{label}</strong><br>'
+            f'<div style="font-size:0.72rem;color:#94A3B8;margin-top:2px;">'
+            f'{dot} <strong style="color:#64748B;">{label}</strong><br>'
             f'Jobs: {db_status["jobs"]} &nbsp;·&nbsp; '
             f'TM: {db_status["tm_entries"]} &nbsp;·&nbsp; '
             f'Glossary: {db_status["glossary_terms"]}'
@@ -4384,15 +4391,15 @@ def login_page():
     with col:
         with st.form("login_form"):
             st.markdown("""
-            <div style="text-align:center;margin-bottom:24px;">
-                <div class="login-form-title">Sign in</div>
-                <div class="login-form-sub">Internal access · Home24 e-commerce tools</div>
+            <div style="text-align:center;margin-bottom:28px;">
+                <div class="login-form-title" style="color:#0F3D5E;">Sign in to Home24</div>
+                <div class="login-form-sub">Internal access · AI localization workspace</div>
             </div>
             """, unsafe_allow_html=True)
 
-            email_input    = st.text_input("Email", placeholder="you@home24.de")
+            email_input    = st.text_input("Email address", placeholder="you@home24.de")
             password_input = st.text_input("Password", type="password", placeholder="••••••••")
-            submitted      = st.form_submit_button("Continue →", use_container_width=True)
+            submitted      = st.form_submit_button("Sign in →", use_container_width=True)
 
         st.markdown(
             '<p style="text-align:center;font-size:0.75rem;color:#b0b0c8;margin-top:10px;">'
@@ -4431,10 +4438,26 @@ def translator_page():
     target_language = st.session_state.get("target_language", "French")
     lang_code       = "NL" if target_language == "Dutch" else "FR"
     lang_label      = "Dutch (NL)" if target_language == "Dutch" else "French (FR)"
-    render_page_header(
-        f"German → {lang_label} Translator",
-        "Upload a German Excel file to begin translation",
-    )
+
+    st.markdown(f"""
+    <div style="background:linear-gradient(135deg,#E0F2FE 0%,#DCFCE7 100%);
+                border:1px solid #BAE6FD;border-radius:16px;
+                padding:40px 40px 36px;margin-bottom:36px;
+                animation:fadeUp 0.35s ease;">
+        <div style="font-size:11px;font-weight:700;text-transform:uppercase;
+                    letter-spacing:0.1em;color:#0369A1;margin-bottom:10px;">
+            DE → {lang_code} · AI-Powered
+        </div>
+        <h1 style="font-size:28px;font-weight:800;color:#0F3D5E;
+                   letter-spacing:-0.03em;margin:0 0 10px;line-height:1.2;">
+            AI Localization Platform
+        </h1>
+        <p style="font-size:15px;color:#475569;margin:0;font-weight:400;max-width:540px;">
+            Translate German product data into {lang_label.split(" ")[0]} with verified
+            e-commerce terminology, translation memory, and quality assurance.
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
 
     if not _get_api_key():
         st.markdown("""
@@ -5273,7 +5296,7 @@ def analytics_page():
         total_low      = sum(r.get("low_warnings", 0) for r in history)
         files_critical = sum(1 for r in history if r.get("critical_warnings", 0) > 0)
 
-        score_color = "#10b981" if avg_score >= 85 else ("#f59e0b" if avg_score >= 70 else "#ef4444")
+        score_color = "#22C55E" if avg_score >= 85 else ("#F59E0B" if avg_score >= 70 else "#EF4444")
         st.markdown('<div class="section-label">Quality Score</div>', unsafe_allow_html=True)
         st.markdown(f"""
         <div class="kpi-row">
@@ -5764,7 +5787,7 @@ def translation_memory_page():
         f"""<div class="qg-row">
             <span class="qg-label" style="width:40%;word-break:break-word;">{de}</span>
             <span class="qg-value" style="width:40%;word-break:break-word;">{val.get("translation","")}</span>
-            <span style="font-size:11px;color:#9090b8;min-width:60px;text-align:right;">
+            <span style="font-size:11px;color:#94A3B8;min-width:60px;text-align:right;">
                 {val.get("hit_count",0)}× &nbsp;·&nbsp; {val.get("col_type","other")}
             </span>
         </div>"""
@@ -5774,7 +5797,7 @@ def translation_memory_page():
 
     if len(sorted_entries) > 200:
         st.markdown(
-            f'<div style="font-size:12px;color:#9090b8;margin-top:8px;">'
+            f'<div style="font-size:12px;color:#94A3B8;margin-top:8px;">'
             f'Showing top 200 of {len(sorted_entries):,} entries.</div>',
             unsafe_allow_html=True,
         )
@@ -5789,10 +5812,10 @@ def language_selection_page():
     <div class="login-hero">
         <div class="login-lockup">
             <div class="login-lockup-dot"></div>
-            Home24 Localization Platform
+            Home24 AI Localization
         </div>
-        <h1 class="login-title">Select target language</h1>
-        <p class="login-subtitle">Choose the language for this translation session</p>
+        <h1 class="login-title">Choose your target language</h1>
+        <p class="login-subtitle">Select the language for this translation session</p>
     </div>
     """, unsafe_allow_html=True)
 
@@ -5809,7 +5832,7 @@ def language_selection_page():
                 st.session_state["language_selected"] = True
                 st.rerun()
             st.markdown("""
-            <div style="text-align:center;font-size:11px;color:#9090b8;margin-top:4px;">
+            <div style="text-align:center;font-size:11px;color:#94A3B8;margin-top:4px;">
                 German → French<br>FR- prefix
             </div>
             """, unsafe_allow_html=True)
@@ -5820,7 +5843,7 @@ def language_selection_page():
                 st.session_state["language_selected"] = True
                 st.rerun()
             st.markdown("""
-            <div style="text-align:center;font-size:11px;color:#9090b8;margin-top:4px;">
+            <div style="text-align:center;font-size:11px;color:#94A3B8;margin-top:4px;">
                 German → Dutch<br>NL- prefix
             </div>
             """, unsafe_allow_html=True)
@@ -5861,7 +5884,7 @@ def admin_dashboard_page():
         </div>
         <div class="kpi">
             <div class="kpi-label">NL Jobs</div>
-            <div class="kpi-value" style="color:#e8523a;">{stats["nl_jobs"]}</div>
+            <div class="kpi-value" style="color:#D97706;">{stats["nl_jobs"]}</div>
             <div class="kpi-sub">Dutch translations</div>
         </div>
     </div>
@@ -5953,8 +5976,8 @@ def admin_dashboard_page():
 
 def main():
     st.set_page_config(
-        page_title="DE Translator",
-        page_icon="🌐",
+        page_title="Home24 AI Localization",
+        page_icon="🌿",
         layout="wide",
         initial_sidebar_state="expanded",
     )
