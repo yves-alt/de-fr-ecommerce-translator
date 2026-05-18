@@ -286,9 +286,14 @@ _PRODUCT_KEYWORDS: dict[str, list[str]] = {
         "kleiderschrank", "kommode", "sideboard", "highboard",
         "vitrine", "aktenschrank",
     ],
+    "kitchen": [
+        "küchenzeile", "küche", "einbauküche", "küchenblock", "küchenfront",
+        "gsp", "geschirrspüler", "spüle", "spülenschrank", "arbeitsplatte",
+        "hängeschrank", "oberschrank", "apothekerschrank",
+    ],
     "bathroom": [
         "waschbecken", "waschtisch", "badezimmer", "spiegelschrank",
-        "badmöbel", "wastafel",
+        "badmöbel", "wastafel", "unterflurauszug", "badmöbel",
     ],
     "office": [
         "schreibtisch", "bürostuhl", "rollcontainer", "computertisch",
@@ -348,6 +353,7 @@ _CATEGORY_FR_HINTS: dict[str, str] = {
     "bed":      "Product: BED — prefer: tête de lit, sommier, cadre de lit, lattes, pieds de lit.",
     "table":    "Product: TABLE — prefer: plateau, piétement, rallonge, extensible.",
     "wardrobe": "Product: STORAGE — prefer: penderie, tiroir, tablette, porte battante/coulissante.",
+    "kitchen":  "Product: CUISINE — prefer: plan de travail, meuble bas, meuble haut, colonne, façade, sans poignée, lave-vaisselle.",
     "bathroom": "Product: BATHROOM — prefer: meuble vasque, miroir, colonne de rangement.",
     "office":   "Product: OFFICE — prefer: bureau, caisson, réglable en hauteur.",
     "textile":  "Product: TEXTILE — prefer: housse, garnissage, lavable.",
@@ -366,7 +372,19 @@ _CATEGORY_NL_HINTS: dict[str, str] = {
     "bed":      "Product: BED — prefer: hoofdbord, lattenbodem, bedframe, poten.",
     "table":    "Product: TAFEL — prefer: tafelblad, onderstel, uitschuifbaar, verlengstuk.",
     "wardrobe": "Product: OPBERGEN — prefer: kledingkast, lade, legplank, draaideuren.",
-    "bathroom": "Product: BADKAMER — prefer: wastafelkast, spiegel, opbergkast.",
+    "kitchen": (
+        "Product: KEUKEN — gebruik: keukenblok, inbouwkeuken, werkblad, spoelbak, spoelkast, "
+        "onderkast, hangkast, bovenkast, hoge kast, apothekerskast, frontpaneel, plint. "
+        "GSP / GSP-Blende / Geschirrspüler-Blende → vaatwasserfront (ALTIJD). "
+        "BHT / BxHxT / B x H x T → B x H x D. Grifflos → greeploos. "
+        "Unterflurauszug → onderliggende ladegeleider."
+    ),
+    "bathroom": (
+        "Product: BADKAMER — gebruik: wastafelmeubel, wastafel, wastafelonderkast, spiegel, opbergkast. "
+        "Einzelwaschtisch → enkele wastafel. Doppelwaschtisch → dubbele wastafel. "
+        "Unterflurauszug → onderliggende ladegeleider. Armatur → kraan. "
+        "Soft-Close / Softclose → soft-close. Dämpfung → demping."
+    ),
     "office":   "Product: KANTOOR — prefer: bureau, ladeblok, in hoogte verstelbaar.",
     "textile":  "Product: TEXTIEL — prefer: hoes, vulling, wasbaar.",
     "outdoor":  "Product: BUITEN — prefer: UV-bestendig, weerbestendig, stapelbaar.",
@@ -510,6 +528,7 @@ FURNITURE_TERM_MAP_FR: dict[str, str] = {
 }
 
 FURNITURE_TERM_MAP_NL: dict[str, str] = {
+    # Garden / outdoor
     "Gartenessgruppe":    "tuinset",
     "Gartengruppe":       "tuinset",
     "Gartenset":          "tuinset",
@@ -551,6 +570,57 @@ FURNITURE_TERM_MAP_NL: dict[str, str] = {
     "Doppeltuch":                       "dubbeldoek",
     "Reißverschluss":                   "ritssluiting",
     "Matratze":                         "matras",
+    # Dishwasher / GSP — longest compound forms first
+    "Geschirrspülerblende":             "vaatwasserfront",
+    "Geschirrspüler-Blende":            "vaatwasserfront",
+    "Geschirrspüler Blende":            "vaatwasserfront",
+    "GSP-Blende":                       "vaatwasserfront",
+    "GSP Blende":                       "vaatwasserfront",
+    "Geschirrspüler":                   "vaatwasser",
+    # Drawer runners — longest first
+    "Waschbeckenunterschrank":          "wastafelonderkast",
+    "Unterflurführung":                 "onderliggende ladegeleider",
+    "Unterflur-Auszug":                 "onderliggende ladegeleider",
+    "Unterflurauszug":                  "onderliggende ladegeleider",
+    # Dimensions
+    "Breite x Höhe x Tiefe":            "breedte x hoogte x diepte",
+    "B x H x T":                        "B x H x D",
+    "BxHxT":                            "B x H x D",
+    "BHT":                              "B x H x D",
+    # Handles
+    "Grifflos":                         "greeploos",
+    # Kitchen furniture — compound forms before simple ones
+    "Doppelwaschtisch":                 "dubbele wastafel",
+    "Einzelwaschtisch":                 "enkele wastafel",
+    "Spülenschrank":                    "spoelkast",
+    "Apothekerschrank":                 "apothekerskast",
+    "Einbauküche":                      "inbouwkeuken",
+    "Küchenzeile":                      "keukenblok",
+    "Oberschrank":                      "bovenkast",
+    "Hängeschrank":                     "hangkast",
+    "Unterschrank":                     "onderkast",
+    "Hochschrank":                      "hoge kast",
+    "Arbeitsplatte":                    "werkblad",
+    "Waschtisch":                       "wastafelmeubel",
+    "Waschbecken":                      "wastafel",
+    "Schubkasten":                      "lade",
+    "Schubladen":                       "lades",
+    "Schublade":                        "lade",
+    "Auszug":                           "lade",
+    "Spüle":                            "spoelbak",
+    "Blende":                           "frontpaneel",
+    "Korpus":                           "romp",
+    "Sockel":                           "plint",
+    "Griffe":                           "grepen",
+    "Griff":                            "greep",
+    # Bathroom fittings
+    "Armatur":                          "kraan",
+    "Siphon":                           "sifon",
+    "Überlauf":                         "overloop",
+    "Soft-Close":                       "soft-close",
+    "Softclose":                        "soft-close",
+    "Dämpfung":                         "demping",
+    "Ablage":                           "legplank",
 }
 
 # Sorted once by length descending so multi-word phrases replace before substrings
@@ -629,11 +699,20 @@ CONSISTENCY_VARIANTS_FR: dict[str, str] = {
 
 # Wrong AI-generated Dutch variants → preferred canonical
 CONSISTENCY_VARIANTS_NL: dict[str, str] = {
-    "synthetisch rotan":  "kunststof vlechtwerk",
-    "kunststof rotan":    "kunststof vlechtwerk",
-    "poedercoating":      "gepoedercoat",
-    "bevat":              "bestaande uit",
-    "omvat":              "bestaande uit",
+    "synthetisch rotan":          "kunststof vlechtwerk",
+    "kunststof rotan":            "kunststof vlechtwerk",
+    "poedercoating":              "gepoedercoat",
+    "bevat":                      "bestaande uit",
+    "omvat":                      "bestaande uit",
+    # Kitchen/bathroom wrong variants
+    "vaatwasser front":           "vaatwasserfront",
+    "vaatwasserpaneel":           "vaatwasserfront",
+    "lade geleider":              "onderliggende ladegeleider",
+    "onderliggende lader":        "onderliggende ladegeleider",
+    "breedte x hoogte x diepte":  "B x H x D",
+    "zonder greep":               "greeploos",
+    "zonder grepen":              "greeploos",
+    "gootsteen":                  "spoelbak",
 }
 
 _CONSISTENCY_KEYS_FR = sorted(CONSISTENCY_VARIANTS_FR.keys(), key=len, reverse=True)

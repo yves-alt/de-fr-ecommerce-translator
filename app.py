@@ -257,6 +257,55 @@ DEFAULT_NL_GLOSSARY_TERMS = {
     "Reißverschluss":                  "ritssluiting",
     "4-seitiger Reißverschluss":       "ritssluiting aan 4 zijden",
     "Abnehmbarer Bezug":               "afneembare hoes",
+    # Dishwasher / GSP
+    "GSP-Blende":                      "vaatwasserfront",
+    "GSP Blende":                      "vaatwasserfront",
+    "Geschirrspüler-Blende":           "vaatwasserfront",
+    "Geschirrspülerblende":            "vaatwasserfront",
+    "Geschirrspüler":                  "vaatwasser",
+    # Dimensions
+    "BHT":                             "B x H x D",
+    "BxHxT":                           "B x H x D",
+    "B x H x T":                       "B x H x D",
+    "Breite x Höhe x Tiefe":           "breedte x hoogte x diepte",
+    # Handles
+    "Grifflos":                        "greeploos",
+    "grifflos":                        "greeploos",
+    # Drawer runners
+    "Unterflurauszug":                 "onderliggende ladegeleider",
+    "Unterflur-Auszug":                "onderliggende ladegeleider",
+    "Unterflurführung":                "onderliggende ladegeleider",
+    "Auszug":                          "lade",
+    "Schubkasten":                     "lade",
+    "Schubladen":                      "lades",
+    # Kitchen furniture
+    "Küchenzeile":                     "keukenblok",
+    "Einbauküche":                     "inbouwkeuken",
+    "Arbeitsplatte":                   "werkblad",
+    "Spüle":                           "spoelbak",
+    "Spülenschrank":                   "spoelkast",
+    "Unterschrank":                    "onderkast",
+    "Hängeschrank":                    "hangkast",
+    "Oberschrank":                     "bovenkast",
+    "Hochschrank":                     "hoge kast",
+    "Apothekerschrank":                "apothekerskast",
+    "Blende":                          "frontpaneel",
+    "Sockel":                          "plint",
+    "Griff":                           "greep",
+    "Griffe":                          "grepen",
+    # Bathroom
+    "Einzelwaschtisch":                "enkele wastafel",
+    "Doppelwaschtisch":                "dubbele wastafel",
+    "Waschtisch":                      "wastafelmeubel",
+    "Waschbecken":                     "wastafel",
+    "Waschbeckenunterschrank":         "wastafelonderkast",
+    "Ablage":                          "legplank",
+    "Armatur":                         "kraan",
+    "Siphon":                          "sifon",
+    "Überlauf":                        "overloop",
+    "Soft-Close":                      "soft-close",
+    "Softclose":                       "soft-close",
+    "Dämpfung":                        "demping",
 }
 
 GERMAN_RESIDUE_WORDS = [
@@ -308,6 +357,15 @@ GERMAN_RESIDUE_WORDS = [
     "Kokosmatte", "Kokosschicht",
     "Doppeltuch",
     "Reißverschluss", "Reissverschluss",
+    # Kitchen / GSP / abbreviations
+    "GSP", "Geschirrspüler", "Geschirrspülerblende",
+    "Grifflos", "grifflos",
+    "Unterflurauszug", "Unterflurführung",
+    "Küchenzeile", "Einbauküche", "Arbeitsplatte",
+    "Spülenschrank", "Apothekerschrank",
+    "Einzelwaschtisch", "Doppelwaschtisch", "Waschbeckenunterschrank",
+    "Softclose", "Dämpfung",
+    "BHT", "BxHxT",
 ]
 
 FRENCH_ACCEPTABLE_WORDS = [
@@ -2095,6 +2153,23 @@ def _build_system_prompt(canonical: str, glossary_block: str, target_language: s
         )
 
 
+_NL_SHARED_RULES = (
+    "- GSP / GSP-Blende / Geschirrspüler-Blende → \"vaatwasserfront\" (NEVER leave GSP untranslated)\n"
+    "- BHT / BxHxT / \"B x H x T\" → \"B x H x D\"\n"
+    "- Grifflos → \"greeploos\"\n"
+    "- Unterflurauszug / Unterflurführung → \"onderliggende ladegeleider\"\n"
+    "- Küchenzeile → \"keukenblok\", Einbauküche → \"inbouwkeuken\", Arbeitsplatte → \"werkblad\"\n"
+    "- Spüle → \"spoelbak\", Unterschrank → \"onderkast\", Hängeschrank → \"hangkast\"\n"
+    "- Oberschrank → \"bovenkast\", Hochschrank → \"hoge kast\", Apothekerschrank → \"apothekerskast\"\n"
+    "- Einzelwaschtisch → \"enkele wastafel\", Doppelwaschtisch → \"dubbele wastafel\"\n"
+    "- Waschtisch → \"wastafelmeubel\", Waschbecken → \"wastafel\"\n"
+    "- Griff → \"greep\", Griffe → \"grepen\", Blende → \"frontpaneel\", Sockel → \"plint\"\n"
+    "- Soft-Close / Softclose → \"soft-close\", Dämpfung → \"demping\"\n"
+    "- Percentage formatting: write \"100%\" not \"100 %\" (no space before %). "
+    "Lowercase material after %: \"100% polyester\" not \"100% Polyester\""
+)
+
+
 def _build_nl_system_prompt(canonical: str, glossary_block: str) -> str:
     """Dutch-specific system prompts for each column type."""
     if canonical == "name":
@@ -2105,12 +2180,13 @@ def _build_nl_system_prompt(canonical: str, glossary_block: str) -> str:
             "- No commas allowed\n"
             "- No brackets or parentheses allowed\n"
             "- Natural, commercial Dutch product name for furniture e-commerce\n"
-            "- \"Sofa\" → \"bank\"\n"
-            "- \"Sessel\" → \"fauteuil\"\n"
-            "- \"Ecksofa\" → \"hoekbank\"\n"
-            "- \"Schlafsofa\" → \"slaapbank\"\n"
-            "- \"Sitzer\" → \"zits\" (e.g., \"3-Sitzer\" = \"3-zits\")\n"
-            "- Preserve model/collection names: Arin, Bocca, Level36, Sonoma\n"
+            "- \"Sofa\" → \"bank\", \"Sessel\" → \"fauteuil\"\n"
+            "- \"Ecksofa\" → \"hoekbank\", \"Schlafsofa\" → \"slaapbank\"\n"
+            "- \"Sitzer\" → \"zits\" (e.g. \"3-Sitzer\" = \"3-zits\")\n"
+            "- GSP-Blende → \"vaatwasserfront\"\n"
+            "- Einzelwaschtisch → \"enkele wastafel\", Doppelwaschtisch → \"dubbele wastafel\"\n"
+            "- Grifflos → \"greeploos\"\n"
+            "- Preserve model/collection names: Arin, Bocca, Level36, Sonoma, Asely\n"
             "- Use natural Dutch furniture terminology, not literal German"
             f"{glossary_block}\n"
             "Return ONLY the translated text, nothing else."
@@ -2132,15 +2208,17 @@ def _build_nl_system_prompt(canonical: str, glossary_block: str) -> str:
     elif canonical == "materialDetail":
         return (
             "You are a professional Dutch translator for Home24 Netherlands e-commerce.\n"
-            "Translate the German material description to natural Dutch:\n"
+            "Translate the German material description to natural Dutch.\n\n"
+            "STRICT rules:\n"
             "- Bezug → bekleding, Gestell → onderstel, Füße → poten\n"
-            "- Korpus → romp, Schublade → lade, Türen → deuren\n"
+            "- Korpus → romp, Schublade → lade, Schubladen → lades, Türen → deuren\n"
             "- Holzwerkstoff → houtmateriaal, Spanplatte → spaanplaat\n"
             "- Massivholz → massief hout, Holz → hout\n"
             "- Eiche → eiken, Buche → beuk, Kiefer → grenen\n"
+            + _NL_SHARED_RULES + "\n"
             "- Preserve <br> tags exactly — NEVER replace them with semicolons\n"
             "- NEVER use semicolons (;) as property separators\n"
-            "- Natural Dutch furniture/material terminology"
+            "- Natural Dutch kitchen/bathroom/furniture terminology"
             f"{glossary_block}\n"
             "Return ONLY the translated text, nothing else."
         )
@@ -2151,8 +2229,9 @@ def _build_nl_system_prompt(canonical: str, glossary_block: str) -> str:
             "- Baumwolle → katoen, Polyester → polyester\n"
             "- Wolle → wol, Leinen → linnen, Viskose → viscose\n"
             "- Seide → zijde, Acryl → acryl, Elasthan → elastaan\n"
-            "- Preserve all percentage numbers exactly (e.g. 80% katoen)\n"
-            "- Use lowercase for fiber names after percentages"
+            "- Preserve all percentage numbers exactly\n"
+            "- Write percentages WITHOUT space before %: \"80% katoen\" not \"80 % katoen\"\n"
+            "- Use lowercase for fiber names after percentages: \"80% katoen\" not \"80% Katoen\""
             f"{glossary_block}\n"
             "Return ONLY the translated text, nothing else."
         )
@@ -2163,7 +2242,12 @@ def _build_nl_system_prompt(canonical: str, glossary_block: str) -> str:
             "- Lieferumfang → leveringsomvang\n"
             "- Lieferung → levering\n"
             "- inklusive/inkl. → inclusief/incl.\n"
-            "- Natural Dutch e-commerce language"
+            "- bestehend aus → bestaande uit\n"
+            "- Set bestehend aus → set bestaande uit\n"
+            "- ohne Dekoration → zonder decoratie\n"
+            + _NL_SHARED_RULES + "\n"
+            "- Natural Dutch e-commerce language\n"
+            "- Preserve <br> tags exactly"
             f"{glossary_block}\n"
             "Return ONLY the translated text, nothing else."
         )
@@ -2173,6 +2257,8 @@ def _build_nl_system_prompt(canonical: str, glossary_block: str) -> str:
             "Translate German measurements/dimensions to Dutch:\n"
             "- Maße/Abmessungen → afmetingen\n"
             "- Breite → breedte, Höhe → hoogte, Tiefe → diepte, Länge → lengte\n"
+            "- BHT / BxHxT / \"B x H x T\" → \"B x H x D\"\n"
+            "  Example: \"BHT: 100 x 80 x 45 cm\" → \"B x H x D: 100 x 80 x 45 cm\"\n"
             "- Preserve ALL numbers, units, and symbols exactly\n"
             "- Do not invent or change any dimension values"
             f"{glossary_block}\n"
@@ -2182,8 +2268,9 @@ def _build_nl_system_prompt(canonical: str, glossary_block: str) -> str:
         return (
             "You are a professional Dutch translator for Home24 Netherlands e-commerce.\n"
             "Translate German quality details to natural Dutch:\n"
-            "- Professional Dutch furniture e-commerce language\n"
+            "- Professional Dutch furniture/kitchen/bathroom e-commerce language\n"
             "- Fluent and commercial but not exaggerated\n"
+            + _NL_SHARED_RULES + "\n"
             "- Preserve <br> tags exactly as they appear\n"
             "- Do not invent product information"
             f"{glossary_block}\n"
@@ -2194,6 +2281,7 @@ def _build_nl_system_prompt(canonical: str, glossary_block: str) -> str:
             "You are a professional Dutch translator for Home24 Netherlands e-commerce.\n"
             "Translate German variant names to Dutch:\n"
             "- Natural Dutch\n"
+            "- GSP-Blende → \"vaatwasserfront\", Grifflos → \"greeploos\"\n"
             "- Preserve model numbers and collection names\n"
             "- Short and commercial"
             f"{glossary_block}\n"
@@ -2205,8 +2293,9 @@ def _build_nl_system_prompt(canonical: str, glossary_block: str) -> str:
             "Translate the German text to natural Dutch:\n"
             "- Use natural Dutch, not literal German translation\n"
             "- Remove all German traces\n"
+            + _NL_SHARED_RULES + "\n"
             "- Preserve <br> tags exactly as they appear\n"
-            "- Preserve numbers, percentages and dimensions exactly"
+            "- Preserve numbers and dimensions exactly"
             f"{glossary_block}\n"
             "Return ONLY the translated text, nothing else."
         )
@@ -2246,26 +2335,51 @@ def translate_batch(
                 "Rules for each product name:\n"
                 "- Maximum 40 characters, no commas, no brackets\n"
                 "- ALL German words MUST be translated — zero German residue\n"
-                "- Natural commercial Dutch furniture e-commerce\n"
+                "- Natural commercial Dutch furniture/kitchen/bathroom e-commerce\n"
                 "- \"Sofa\"→\"bank\", \"Sessel\"→\"fauteuil\", "
                 "\"Ecksofa\"→\"hoekbank\", \"Schlafsofa\"→\"slaapbank\", \"Sitzer\"→\"zits\"\n"
-                "- \"Taschenfederkernmatratze\"→\"pocketveringmatras\", "
-                "\"7-Zonen-Taschenfederkernmatratze\"→\"7-zones pocketveringmatras\"\n"
+                "- \"Taschenfederkernmatratze\"→\"pocketveringmatras\"\n"
+                "- \"GSP-Blende\"→\"vaatwasserfront\"\n"
+                "- \"Einzelwaschtisch\"→\"enkele wastafel\", \"Doppelwaschtisch\"→\"dubbele wastafel\"\n"
+                "- \"Grifflos\"→\"greeploos\"\n"
                 "- Preserve model/collection names exactly (Asely, Arin, Bocca, Level36, etc.)"
             )
         elif canonical == "materialDetail":
             batch_rules = (
                 "- Preserve <br> tags exactly — NEVER replace with semicolons\n"
                 "- NEVER use semicolons (;) as property separators\n"
-                "- Natural Dutch furniture/material terminology\n"
-                "- Bezug→bekleding, Gestell→onderstel, Füße→poten"
+                "- Natural Dutch furniture/kitchen/bathroom terminology\n"
+                "- Bezug→bekleding, Gestell→onderstel, Füße→poten\n"
+                "- GSP-Blende→vaatwasserfront, BHT→\"B x H x D\", Grifflos→greeploos\n"
+                "- Unterflurauszug→onderliggende ladegeleider\n"
+                "- Küchenzeile→keukenblok, Arbeitsplatte→werkblad, Spüle→spoelbak\n"
+                "- Unterschrank→onderkast, Hängeschrank→hangkast\n"
+                "- Waschtisch→wastafelmeubel, Waschbecken→wastafel\n"
+                "- Percentages: write \"80%\" not \"80 %\"; lowercase after %"
+            )
+        elif canonical == "qualityDetail":
+            batch_rules = (
+                "- Natural Dutch kitchen/bathroom/furniture e-commerce language\n"
+                "- GSP-Blende→vaatwasserfront, BHT→\"B x H x D\", Grifflos→greeploos\n"
+                "- Unterflurauszug→onderliggende ladegeleider\n"
+                "- Preserve <br> tags exactly\n"
+                "- Percentages: write \"80%\" not \"80 %\"; lowercase after %"
+            )
+        elif canonical == "deliveryScope":
+            batch_rules = (
+                "- Natural Dutch e-commerce language\n"
+                "- bestehend aus→bestaande uit, ohne Dekoration→zonder decoratie\n"
+                "- GSP-Blende→vaatwasserfront, Grifflos→greeploos\n"
+                "- Preserve <br> tags exactly"
             )
         else:
             batch_rules = (
                 "- Natural Dutch, not literal German\n"
                 "- Remove all German traces\n"
+                "- GSP-Blende→vaatwasserfront, BHT→\"B x H x D\", Grifflos→greeploos\n"
+                "- Unterflurauszug→onderliggende ladegeleider\n"
                 "- Preserve <br> tags exactly\n"
-                "- Preserve numbers, percentages and dimensions"
+                "- Percentages: write \"80%\" not \"80 %\"; lowercase after %"
             )
         store_label = "Home24 Netherlands"
         target_label = "Dutch"
@@ -2478,15 +2592,43 @@ def fix_german_residue(
             extra_rules = (
                 "\n- Maximum 40 characters, no commas or brackets"
                 "\n- \"Sofa\" → \"bank\" / \"Sessel\" → \"fauteuil\" / \"Sitzer\" → \"zits\""
+                "\n- GSP-Blende → \"vaatwasserfront\""
+                "\n- Einzelwaschtisch → \"enkele wastafel\" / Doppelwaschtisch → \"dubbele wastafel\""
+                "\n- Grifflos → \"greeploos\""
             )
         elif column_name == "materialDetail":
             extra_rules = (
                 "\n- Bezug → bekleding / Füße → poten / Gestell → onderstel"
+                "\n- GSP-Blende → \"vaatwasserfront\" (NEVER leave GSP untranslated)"
+                "\n- BHT / BxHxT / \"B x H x T\" → \"B x H x D\""
+                "\n- Grifflos → \"greeploos\""
+                "\n- Unterflurauszug → \"onderliggende ladegeleider\""
+                "\n- Küchenzeile → \"keukenblok\" / Arbeitsplatte → \"werkblad\" / Spüle → \"spoelbak\""
+                "\n- Waschtisch → \"wastafelmeubel\" / Waschbecken → \"wastafel\""
+                "\n- Unterschrank → \"onderkast\" / Hängeschrank → \"hangkast\""
                 "\n- Preserve <br> tags exactly — NEVER replace them with semicolons"
                 "\n- NEVER use semicolons (;) as property separators"
+                "\n- Percentages: \"100 %\" → \"100%\" (no space before %); lowercase after %"
+            )
+        elif column_name in ("qualityDetail", "deliveryScope"):
+            extra_rules = (
+                "\n- GSP-Blende → \"vaatwasserfront\""
+                "\n- BHT / BxHxT → \"B x H x D\""
+                "\n- Grifflos → \"greeploos\""
+                "\n- Unterflurauszug → \"onderliggende ladegeleider\""
+                "\n- Küchenzeile → \"keukenblok\" / Arbeitsplatte → \"werkblad\""
+                "\n- Waschtisch → \"wastafelmeubel\" / Waschbecken → \"wastafel\""
+                "\n- Preserve <br> tags exactly"
+                "\n- Percentages: \"100 %\" → \"100%\"; lowercase after %"
             )
         else:
-            extra_rules = ""
+            extra_rules = (
+                "\n- GSP-Blende → \"vaatwasserfront\""
+                "\n- BHT / BxHxT → \"B x H x D\""
+                "\n- Grifflos → \"greeploos\""
+                "\n- Unterflurauszug → \"onderliggende ladegeleider\""
+                "\n- Percentages: \"100 %\" → \"100%\"; lowercase after %"
+            )
         fix_prompt = (
             f"This Dutch text still contains German words.\n"
             f"Rewrite it as clean, natural Dutch for Home24 Netherlands.\n"
@@ -2494,7 +2636,11 @@ def fix_german_residue(
             f"Text: {text}\n\n"
             f"Return ONLY the corrected Dutch text."
         )
-        sys_msg = "You remove German words from Dutch texts for Home24 Netherlands e-commerce."
+        sys_msg = (
+            "You are a professional Dutch editor for Home24 Netherlands e-commerce. "
+            "You eliminate all German words from Dutch texts and rewrite them in natural, "
+            "correct Dutch using proper kitchen and bathroom furniture terminology."
+        )
     else:
         if column_name == "name":
             extra_rules = (
@@ -2847,6 +2993,52 @@ def apply_french_capitalization_rules(
         # Step 1: structural slash caps (before start-cap avoids missed right-side words)
         part = _apply_slash_caps(part)
         # Step 2: percentage lowercase
+        part = _apply_percent_lowercase(part)
+        # Step 3: capitalise start of segment
+        if capitalize_next and part.strip():
+            part = _cap_first(part)
+            capitalize_next = False
+        # Step 4: restore brand names
+        part = _restore_brand_caps(part)
+        result.append(part)
+
+    return "".join(result)
+
+
+# Dutch: remove space between number and % ("100 %" → "100%")
+_NL_PCT_SPACE_RE = re.compile(r'(\d+)\s+%', re.UNICODE)
+
+
+def apply_dutch_capitalization_rules(
+    text: str, canonical: str, glossary: dict | None = None
+) -> str:
+    """Apply Dutch e-commerce formatting rules to a translated cell value.
+
+    Per segment (split on <br>):
+      1. Remove space before % ("100 %" → "100%")
+      2. Lowercase capitalised word after % ("100% Polyester" → "100% polyester")
+      3. Capitalise start of segment
+      4. Restore known brand/model names
+    """
+    if not text or not text.strip():
+        return text
+
+    parts = _CAP_BR_RE.split(text)
+    result: list[str] = []
+    capitalize_next = True
+
+    for part in parts:
+        if _CAP_BR_RE.match(part):
+            result.append("<br>")
+            capitalize_next = True
+            continue
+        if not part:
+            result.append(part)
+            continue
+
+        # Step 1: "100 %" → "100%"
+        part = _NL_PCT_SPACE_RE.sub(r'\1%', part)
+        # Step 2: "100% Polyester" → "100% polyester"
         part = _apply_percent_lowercase(part)
         # Step 3: capitalise start of segment
         if capitalize_next and part.strip():
@@ -3955,13 +4147,21 @@ def process_excel_with_progress(
         stats["warning_categories"] = dict(_cat_counts)
         stats["review_count"]       = len(all_warnings)
 
-        # ── Final capitalisation pass (French only) ───────────────────────────
+        # ── Final capitalisation / formatting pass ────────────────────────────
         if target_language == "French":
             for row_num in range(data_start_row, worksheet.max_row + 1):
                 for col_header, (col_idx, canonical) in to_translate.items():
                     cell = worksheet.cell(row=row_num, column=col_idx)
                     if cell.value and str(cell.value).strip():
                         cell.value = apply_french_capitalization_rules(
+                            str(cell.value), canonical, glossary
+                        )
+        elif target_language == "Dutch":
+            for row_num in range(data_start_row, worksheet.max_row + 1):
+                for col_header, (col_idx, canonical) in to_translate.items():
+                    cell = worksheet.cell(row=row_num, column=col_idx)
+                    if cell.value and str(cell.value).strip():
+                        cell.value = apply_dutch_capitalization_rules(
                             str(cell.value), canonical, glossary
                         )
 
