@@ -3709,9 +3709,130 @@ def detect_target_sheet(sheet_names: list) -> str | None:
     return None
 
 
+def _score_sheet_for_picking(ws, max_rows: int = 100) -> dict:
+    """Lightweight 100-row scan for sheet selection scoring (one pass, read_only safe)."""
+    row_buffer: dict[int, list[tuple[int, object]]] = {}
+    non_empty_cells = 0
+    real_max_col = 0
+
+    try:
+        for row_tuple in ws.iter_rows(min_row=1):
+            if not row_tuple:
+                continue
+            row_num = getattr(row_tuple[0], "row", None)
+            if row_num is None:
+                continue
+            if row_num > max_rows:
+                break
+            for cell in row_tuple:
+                val = getattr(cell, "value", None)
+                if val is None or not str(val).strip():
+                    continue
+                c = getattr(cell, "column", None) or 0
+                if not c:
+                    continue
+                non_empty_cells += 1
+                if c > real_max_col:
+                    real_max_col = c
+                row_buffer.setdefault(row_num, []).append((c, val))
+    except Exception:
+        pass
+
+    best_score = -1
+    header_row = 1
+    peek_headers: dict[str, int] = {}
+
+    for row_num in sorted(row_buffer.keys()):
+        score = 0
+        candidate_headers: dict[str, int] = {}
+        for col_idx, value in row_buffer[row_num]:
+            text = str(value).strip()
+            if not text:
+                continue
+            try:
+                float(text)
+                score -= 3
+                continue
+            except (ValueError, TypeError):
+                pass
+            candidate_headers[text] = col_idx
+            norm = _normalize_col_header(text)
+            norm_c = norm.replace(' ', '')
+            if norm in HOME24_TRANSLATABLE_NORMALIZED or norm_c in HOME24_TRANSLATABLE_NORMALIZED:
+                score += 10
+            elif any(kw in norm for kw in HEADER_SCORE_KEYWORDS):
+                score += 3
+            if _is_protected(norm, text):
+                score += 5
+        if score > best_score:
+            best_score = score
+            header_row = row_num
+            peek_headers = candidate_headers
+
+    h24_headers: list[str] = []
+    protected_headers: list[str] = []
+    for raw_h in peek_headers:
+        norm = _normalize_col_header(raw_h)
+        norm_c = norm.replace(' ', '')
+        if norm in HOME24_TRANSLATABLE_NORMALIZED or norm_c in HOME24_TRANSLATABLE_NORMALIZED:
+            h24_headers.append(raw_h)
+        elif _is_protected(norm, raw_h):
+            protected_headers.append(raw_h)
+
+    has_article_number = any(
+        "articlenumber" in _normalize_col_header(h).replace(' ', '')
+        or "artikelnummer" in _normalize_col_header(h).replace(' ', '')
+        for h in peek_headers
+    )
+
+    selection_score = (
+        len(h24_headers) * 10
+        + len(protected_headers) * 5
+        + min(non_empty_cells // 10, 50)
+        + (8 if has_article_number else 0)
+    )
+
+    return {
+        "selection_score":   selection_score,
+        "h24_headers":       h24_headers,
+        "protected_headers": protected_headers,
+        "peek_headers":      peek_headers,
+        "header_row":        header_row,
+        "non_empty_cells":   non_empty_cells,
+        "real_max_col":      real_max_col,
+    }
+
+
+def score_all_sheets(wb, max_rows: int = 100) -> dict[str, dict]:
+    """Score every sheet in *wb* for translation suitability."""
+    results: dict[str, dict] = {}
+    for name in wb.sheetnames:
+        ws = wb[name]
+        state = getattr(ws, "sheet_state", "visible")
+        if state in ("hidden", "veryHidden"):
+            results[name] = {
+                "selection_score": -1000, "hidden": True,
+                "h24_headers": [], "protected_headers": [],
+                "peek_headers": {}, "header_row": 1,
+                "non_empty_cells": 0, "real_max_col": 0,
+            }
+            continue
+        score_dict = _score_sheet_for_picking(ws, max_rows=max_rows)
+        score_dict["hidden"] = False
+        if name in CANDIDATE_SHEETS:
+            score_dict["selection_score"] += 2
+        results[name] = score_dict
+    return results
+
+
+def pick_best_sheet(all_scores: dict[str, dict]) -> str:
+    """Return the sheet name with the highest selection_score."""
+    return max(all_scores, key=lambda n: all_scores[n]["selection_score"])
+
+
 def scan_sheet(
     ws,
-    header_scan_rows: int = 20,
+    header_scan_rows: int = 50,
     row_hard_limit: int = 5000,
 ) -> tuple[int, int, int, dict]:
     """
@@ -5103,56 +5224,105 @@ def translator_page():
     )
 
     if uploaded_file is not None:
-        # Clear stale result when user switches to a different file
+        # Clear stale results when the user switches to a different file
         if st.session_state.get("_tr_result_file") != uploaded_file.name:
             st.session_state.pop("_tr_result", None)
+            for _stale_key in [k for k in st.session_state if k.startswith("_sheet_")]:
+                del st.session_state[_stale_key]
             st.session_state["_tr_result_file"] = uploaded_file.name
 
         st.markdown(f'<div class="file-chip">📄 {uploaded_file.name}</div>', unsafe_allow_html=True)
 
-        output_filename  = f"{lang_code}-{uploaded_file.name}"
-        wb_peek          = load_workbook(BytesIO(uploaded_file.getvalue()), read_only=True, data_only=True)
-        available_sheets = wb_peek.sheetnames
-        auto_sheet       = detect_target_sheet(available_sheets)
+        output_filename = f"{lang_code}-{uploaded_file.name}"
+        _file_key       = f"{uploaded_file.name}_{uploaded_file.size}"
 
-        if auto_sheet is not None:
-            selected_sheet = auto_sheet
-            st.markdown(f"""
-            <div class="alert alert-info">
-                <span class="alert-icon">ℹ</span>
-                <span>Auto-selected sheet: <strong>{selected_sheet}</strong></span>
-            </div>
-            """, unsafe_allow_html=True)
+        # ── Score all sheets once per file, cache in session_state ────────────
+        _scores_key = f"_sheet_scores_{_file_key}"
+        if _scores_key not in st.session_state:
+            _wb_score = load_workbook(BytesIO(uploaded_file.getvalue()), read_only=True, data_only=True)
+            st.session_state[_scores_key] = score_all_sheets(_wb_score)
+            _wb_score.close()
+        all_sheet_scores: dict[str, dict] = st.session_state[_scores_key]
+        available_sheets = list(all_sheet_scores.keys())
+        best_sheet       = pick_best_sheet(all_sheet_scores)
+
+        # Confidence: best sheet must beat the next-best by at least 5 pts
+        _other_scores   = [v["selection_score"] for k, v in all_sheet_scores.items() if k != best_sheet]
+        _second_best    = max(_other_scores, default=-1000)
+        _is_confident   = all_sheet_scores[best_sheet]["selection_score"] >= _second_best + 5
+
+        # ── Sheet selector — always visible when >1 sheet, pre-set to best ───
+        if len(available_sheets) == 1:
+            selected_sheet = available_sheets[0]
+            st.markdown(
+                f'<div class="alert alert-info">'
+                f'<span class="alert-icon">ℹ</span>'
+                f'<span>Sheet: <strong>{selected_sheet}</strong></span>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
         else:
+            _best_idx = available_sheets.index(best_sheet) if best_sheet in available_sheets else 0
+            _select_label = (
+                "Sheet to translate (auto-detected):" if _is_confident
+                else "Multiple sheets found — please verify the correct sheet:"
+            )
             selected_sheet = st.selectbox(
-                "Multiple sheets found — select the one to translate:",
+                _select_label,
                 available_sheets,
+                index=_best_idx,
                 key="sheet_selector",
             )
+            if _is_confident and selected_sheet == best_sheet:
+                _pts = all_sheet_scores[best_sheet]["selection_score"]
+                st.markdown(
+                    f'<div class="alert alert-info">'
+                    f'<span class="alert-icon">✓</span>'
+                    f'<span>Auto-selected <strong>{selected_sheet}</strong> '
+                    f'({_pts} pts). Change the selector above if needed.</span>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
 
-        # Single-pass scan: real dimensions + header detection (read_only safe)
-        _peek_ws = wb_peek[selected_sheet]
-        _openpyxl_max_row = _peek_ws.max_row
-        _openpyxl_max_col = _peek_ws.max_column
-        real_max_row, real_max_col, header_row, peek_headers = scan_sheet(_peek_ws)
-        wb_peek.close()
+        # ── Full scan of selected sheet — cached per sheet ────────────────────
+        _scan_cache_key = f"_sheet_scan_{_file_key}_{selected_sheet}"
+        if _scan_cache_key not in st.session_state:
+            _wb_full = load_workbook(BytesIO(uploaded_file.getvalue()), read_only=True, data_only=True)
+            _full_ws = _wb_full[selected_sheet]
+            _fmr, _fmc, _fhr, _fph = scan_sheet(_full_ws)
+            _opx_mr  = _full_ws.max_row
+            _opx_mc  = _full_ws.max_column
+            _wb_full.close()
+            st.session_state[_scan_cache_key] = {
+                "real_max_row":      _fmr,
+                "real_max_col":      _fmc,
+                "header_row":        _fhr,
+                "peek_headers":      _fph,
+                "openpyxl_max_row":  _opx_mr,
+                "openpyxl_max_col":  _opx_mc,
+            }
+        _cached = st.session_state[_scan_cache_key]
+        real_max_row = _cached["real_max_row"]
+        real_max_col = _cached["real_max_col"]
+        header_row   = _cached["header_row"]
+        peek_headers = _cached["peek_headers"]
 
         _ws_info = {
-            "openpyxl_max_row":  _openpyxl_max_row,
-            "openpyxl_max_col":  _openpyxl_max_col,
-            "real_max_row":      real_max_row,
-            "real_max_col":      real_max_col,
-            "columns_found":     len(peek_headers),
+            "openpyxl_max_row": _cached["openpyxl_max_row"],
+            "openpyxl_max_col": _cached["openpyxl_max_col"],
+            "real_max_row":     real_max_row,
+            "real_max_col":     real_max_col,
+            "columns_found":    len(peek_headers),
         }
 
         classification = classify_columns(peek_headers)
         classification["header_row"] = header_row
         classification["ws_info"]    = _ws_info
 
-        # ── Column detection summary (clean minimal view) ─────────────────────
-        _to_tr   = classification.get("to_translate", {})
-        _missed  = classification.get("possible_missed", [])
-        _role    = st.session_state.get("user_role", "")
+        # ── Column detection summary ──────────────────────────────────────────
+        _to_tr  = classification.get("to_translate", {})
+        _missed = classification.get("possible_missed", [])
+        _role   = st.session_state.get("user_role", "")
 
         if _to_tr:
             _col_names = ", ".join(f"<strong>{h}</strong>" for h in _to_tr.keys())
@@ -5180,7 +5350,28 @@ def translator_page():
         else:
             render_column_report(classification)
 
-        # Manual fallback when automatic detection found nothing
+        # ── Admin: multi-sheet diagnostics ────────────────────────────────────
+        if _role == "admin" and len(available_sheets) > 1:
+            with st.expander("Multi-sheet diagnostics", expanded=False):
+                _diag_rows = []
+                for _sn, _sd in all_sheet_scores.items():
+                    _diag_rows.append({
+                        "Sheet":        _sn,
+                        "Score":        _sd["selection_score"],
+                        "H24 headers":  len(_sd.get("h24_headers", [])),
+                        "Protected":    len(_sd.get("protected_headers", [])),
+                        "Non-empty cells (≤100 rows)": _sd.get("non_empty_cells", 0),
+                        "Header row":   _sd.get("header_row", 1),
+                        "Hidden":       _sd.get("hidden", False),
+                        "Selected":     "✓" if _sn == selected_sheet else "",
+                    })
+                import pandas as _pd_diag
+                st.dataframe(
+                    _pd_diag.DataFrame(_diag_rows).sort_values("Score", ascending=False),
+                    hide_index=True, use_container_width=True,
+                )
+
+        # ── Manual fallback when automatic detection found nothing ────────────
         if not classification["to_translate"]:
             st.markdown("""
             <div class="alert alert-warn" style="margin-top:0;">
@@ -5188,13 +5379,13 @@ def translator_page():
                 <div>
                     <strong>Automatic detection failed.</strong>
                     Please select the columns you want to translate below.
+                    If the wrong sheet is selected, change it in the selector above.
                     Protected columns (articleNumber, SKU, ID) will never be translated.
                 </div>
             </div>
             """, unsafe_allow_html=True)
 
             # Build candidate list — headers first, column letters as final fallback.
-            # This must always produce a non-empty options list.
             candidates: list[str] = []
             candidate_col_map: dict[str, int] = {}
             if peek_headers:
@@ -5202,9 +5393,7 @@ def translator_page():
                 candidates = [h for h in peek_headers if h not in protected_keys]
                 candidate_col_map = {h: peek_headers[h] for h in candidates}
             if not candidates:
-                # No usable headers (none found, or all were protected) — fall back to
-                # column letters so there are always options available.
-                _letters = list(string.ascii_uppercase)
+                _letters  = list(string.ascii_uppercase)
                 _extended = _letters + [f"A{l}" for l in _letters]
                 col_count = max(real_max_col, 1)
                 candidates = [_extended[i] for i in range(min(col_count, len(_extended)))]
