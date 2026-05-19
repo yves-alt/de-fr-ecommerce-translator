@@ -117,6 +117,32 @@ CREATE TABLE IF NOT EXISTS glossary_suggestions (
     job_id          TEXT,
     created_at      TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS home24_corpus_entries (
+    id                TEXT PRIMARY KEY,
+    source_language   TEXT NOT NULL DEFAULT 'DE',
+    target_language   TEXT NOT NULL DEFAULT 'FR',
+    source_text       TEXT NOT NULL,
+    translated_text   TEXT NOT NULL,
+    category          TEXT,
+    product_type      TEXT,
+    terminology_tags  TEXT,
+    confidence_score  REAL DEFAULT 1.0,
+    approved          INTEGER DEFAULT 1,
+    created_at        TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS forbidden_translation_patterns (
+    id               TEXT PRIMARY KEY,
+    forbidden_text   TEXT NOT NULL,
+    replacement_text TEXT NOT NULL,
+    category         TEXT,
+    severity         TEXT DEFAULT 'HIGH',
+    language         TEXT NOT NULL DEFAULT 'FR',
+    notes            TEXT,
+    auto_replace     INTEGER DEFAULT 1,
+    created_at       TEXT NOT NULL
+);
 """
 
 
@@ -150,6 +176,7 @@ def init_db(
     _ensure_v3_migration()
     _ensure_v4_migration()
     _ensure_v5_migration()
+    _ensure_v6_migration()
     _migrate_json_if_needed()
     if default_glossary:
         _seed_glossary_if_empty(default_glossary, "French")
@@ -789,6 +816,179 @@ def db_get_status() -> dict:
 
 
 # =============================================================================
+# V6 MIGRATION — Corpus & Forbidden Patterns
+# =============================================================================
+
+def _ensure_v6_migration() -> None:
+    """Add home24_corpus_entries and forbidden_translation_patterns tables."""
+    if _get_schema_version() >= 6:
+        return
+    try:
+        with _db() as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS home24_corpus_entries (
+                    id                TEXT PRIMARY KEY,
+                    source_language   TEXT NOT NULL DEFAULT 'DE',
+                    target_language   TEXT NOT NULL DEFAULT 'FR',
+                    source_text       TEXT NOT NULL,
+                    translated_text   TEXT NOT NULL,
+                    category          TEXT,
+                    product_type      TEXT,
+                    terminology_tags  TEXT,
+                    confidence_score  REAL DEFAULT 1.0,
+                    approved          INTEGER DEFAULT 1,
+                    created_at        TEXT NOT NULL
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS forbidden_translation_patterns (
+                    id               TEXT PRIMARY KEY,
+                    forbidden_text   TEXT NOT NULL,
+                    replacement_text TEXT NOT NULL,
+                    category         TEXT,
+                    severity         TEXT DEFAULT 'HIGH',
+                    language         TEXT NOT NULL DEFAULT 'FR',
+                    notes            TEXT,
+                    auto_replace     INTEGER DEFAULT 1,
+                    created_at       TEXT NOT NULL
+                )
+            """)
+        _seed_forbidden_patterns_if_empty()
+        _seed_corpus_if_empty()
+        _set_schema_version(6)
+    except Exception:
+        pass
+
+
+_INITIAL_FORBIDDEN_FR = [
+    ("cuisine autonome",          "cuisine équipée",           "kitchen",   "CRITICAL", "Literal translation of 'autark'"),
+    ("chaiselongue",              "chaise longue",             "seating",   "CRITICAL", "Must always be two words"),
+    ("assiettes à manger",        "assiettes",                 "tableware", "CRITICAL", "Not natural French e-commerce"),
+    ("assiette à manger",         "assiette",                  "tableware", "CRITICAL", "Not natural French e-commerce"),
+    ("boue",                      "argile",                    "colors",    "HIGH",     "Unattractive color name in product copy"),
+    ("table sans revêtement",     "table",                     "tables",    "HIGH",     "Unclear literal phrase from 'ohne Bezug'"),
+    ("revêtu de poudre",          "thermolaqué",               "materials", "CRITICAL", "Wrong powder coating term"),
+    ("revêtu par poudre",         "thermolaqué",               "materials", "CRITICAL", "Wrong powder coating term"),
+    ("revêtement de poudre",      "thermolaqué",               "materials", "CRITICAL", "Wrong powder coating term"),
+    ("laqué par poudre",          "thermolaqué",               "materials", "CRITICAL", "Wrong powder coating term"),
+    ("traitement en poudre",      "thermolaqué",               "materials", "HIGH",     "Wrong powder coating term"),
+    ("thermopoudré",              "thermolaqué",               "materials", "CRITICAL", "Incorrect portmanteau — not used in FR"),
+    ("set consistant de",         "ensemble composé de",       "sets",      "HIGH",     "Literal German sentence structure"),
+    ("ensemble consistant de",    "ensemble composé de",       "sets",      "HIGH",     "Literal German sentence structure"),
+    ("paillasson en coco",        "couche de coco",            "mattress",  "CRITICAL", "Wrong translation of Kokosmatte"),
+    ("paillasson de coco",        "couche de coco",            "mattress",  "CRITICAL", "Wrong translation of Kokosmatte"),
+    ("nattes en coco",            "couche de coco",            "mattress",  "HIGH",     "Wrong translation of Kokosmatte"),
+    ("décoration non comprise",   "accessoires non inclus",    "delivery",  "HIGH",     "Literal translation"),
+    ("chêne artisan décor",       "décor chêne artisan",       "materials", "HIGH",     "Wrong word order for home24.fr"),
+    ("artisan chêne décor",       "décor chêne artisan",       "materials", "HIGH",     "Wrong word order for home24.fr"),
+    ("chêne décor artisan",       "décor chêne artisan",       "materials", "HIGH",     "Wrong word order for home24.fr"),
+    ("table à manger extensible", "table extensible",          "tables",    "MEDIUM",   "Prefer shorter home24.fr form"),
+    ("cuisine autonome complète", "cuisine équipée complète",  "kitchen",   "CRITICAL", "Literal translation of 'autark'"),
+    ("pouf de pieds",             "repose-pieds",              "seating",   "MEDIUM",   "Wrong term in lounge context"),
+    ("support de pieds",          "repose-pieds",              "seating",   "MEDIUM",   "Wrong term in lounge context"),
+    ("housse amovible",           "revêtement amovible",       "materials", "MEDIUM",   "Use 'revêtement' for structured covers"),
+    ("sans revêtement",           "sans finition",             "materials", "LOW",      "Clarify meaning before using"),
+    ("meuble de télévision",      "meuble TV",                 "furniture", "MEDIUM",   "Prefer commercial short form"),
+    ("armoire de garde-robe",     "armoire",                   "furniture", "LOW",      "Redundant in French"),
+    ("structure en métal",        "structure métal",           "materials", "LOW",      "home24.fr drops 'en' in attribute lists"),
+]
+
+
+def _seed_forbidden_patterns_if_empty() -> None:
+    try:
+        with _db() as conn:
+            count = conn.execute(
+                "SELECT COUNT(*) FROM forbidden_translation_patterns WHERE language='FR'"
+            ).fetchone()[0]
+            if count > 0:
+                return
+        now = datetime.now().isoformat(timespec="seconds")
+        rows = []
+        for forbidden_text, replacement_text, category, severity, notes in _INITIAL_FORBIDDEN_FR:
+            rows.append((
+                str(uuid.uuid4()),
+                forbidden_text,
+                replacement_text,
+                category,
+                severity,
+                "FR",
+                notes,
+                1,
+                now,
+            ))
+        with _db() as conn:
+            conn.executemany(
+                """INSERT OR IGNORE INTO forbidden_translation_patterns
+                   (id, forbidden_text, replacement_text, category, severity, language, notes, auto_replace, created_at)
+                   VALUES (?,?,?,?,?,?,?,?,?)""",
+                rows,
+            )
+    except Exception:
+        pass
+
+
+_INITIAL_CORPUS_FR = [
+    # (source_text, translated_text, category, product_type, terminology_tags)
+    ("Geschirrservice 18-teilig Nature Collection", "Service de vaisselle Nature Collection — 18 pièces", "tableware", "tableware", "service,vaisselle,collection"),
+    ("Assiette de service 6er Set", "Assiettes de service — lot de 6", "tableware", "tableware", "assiettes,lot,service"),
+    ("Gartenlounge Set 5-teilig", "Salon de jardin — 5 pièces", "outdoor", "outdoor", "salon,jardin,ensemble"),
+    ("Loungeset bestehend aus Sofa, 2 Sesseln und Tisch", "Salon de jardin composé de : 1 canapé, 2 fauteuils et 1 table basse", "outdoor", "outdoor", "lounge,composé,ensemble"),
+    ("Chaiselongue Gartenliege", "Chaise longue de jardin", "outdoor", "outdoor", "chaise,longue,jardin"),
+    ("Fußhocker passend zum Loungesessel", "Repose-pieds assorti au fauteuil lounge", "outdoor", "outdoor", "repose-pieds,fauteuil,lounge"),
+    ("Artisan Eiche Dekor Küchenzeile", "Cuisine décor chêne artisan", "kitchen", "kitchen", "décor,chêne,artisan,cuisine"),
+    ("Einbauküche autark", "Cuisine équipée", "kitchen", "kitchen", "cuisine,équipée"),
+    ("Hängeschrank Meuble haut", "Meuble haut de cuisine", "kitchen", "kitchen", "meuble,haut"),
+    ("Taschenfederkernmatratze 7 Zonen", "Matelas à ressorts ensachés 7 zones", "mattress", "mattress", "matelas,ressorts,zones"),
+    ("Einseitige Kokosmatte Matratze", "Matelas avec couche de coco sur une face", "mattress", "mattress", "coco,matelas"),
+    ("Schlafsofa mit Bettkasten", "Canapé convertible avec coffre de rangement", "seating", "seating", "canapé,convertible,rangement"),
+    ("Esstisch ausziehbar Artisan Eiche", "Table extensible décor chêne artisan", "tables", "table", "table,extensible,chêne"),
+    ("Meuble TV Lowboard mit LED", "Meuble TV bas lumineux", "furniture", "generic", "meuble,TV,lumineux"),
+    ("Badezimmer Waschtischunterschrank", "Meuble sous-vasque", "bathroom", "bathroom", "meuble,vasque,salle"),
+    ("Set bestehend aus 6 Teilen", "Ensemble composé de 6 éléments", "sets", "generic", "ensemble,composé,éléments"),
+    ("pulverbeschichtet Aluminium", "aluminium thermolaqué", "materials", "outdoor", "thermolaqué,aluminium"),
+    ("Bezug abnehmbar Matratze", "Revêtement amovible", "mattress", "mattress", "revêtement,amovible"),
+    ("Gestell Metall schwarz", "Structure métal noir", "materials", "generic", "structure,métal,noir"),
+    ("Füße Massivholz Eiche", "Pieds en chêne massif", "materials", "generic", "pieds,chêne,massif"),
+]
+
+
+def _seed_corpus_if_empty() -> None:
+    try:
+        with _db() as conn:
+            count = conn.execute(
+                "SELECT COUNT(*) FROM home24_corpus_entries WHERE target_language='FR'"
+            ).fetchone()[0]
+            if count > 0:
+                return
+        now = datetime.now().isoformat(timespec="seconds")
+        rows = []
+        for source_text, translated_text, category, product_type, terminology_tags in _INITIAL_CORPUS_FR:
+            rows.append((
+                str(uuid.uuid4()),
+                "DE",
+                "FR",
+                source_text,
+                translated_text,
+                category,
+                product_type,
+                terminology_tags,
+                1.0,
+                1,
+                now,
+            ))
+        with _db() as conn:
+            conn.executemany(
+                """INSERT OR IGNORE INTO home24_corpus_entries
+                   (id, source_language, target_language, source_text, translated_text,
+                    category, product_type, terminology_tags, confidence_score, approved, created_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                rows,
+            )
+    except Exception:
+        pass
+
+
+# =============================================================================
 # SEEDING
 # =============================================================================
 
@@ -962,3 +1162,134 @@ def db_update_suggestion_status(suggestion_id: str, status: str) -> None:
             )
     except Exception:
         pass
+
+
+# =============================================================================
+# CORPUS & FORBIDDEN PATTERNS — CRUD
+# =============================================================================
+
+def db_load_forbidden_patterns(language: str = "FR") -> list[dict]:
+    """Load all active forbidden patterns for a language."""
+    try:
+        with _db() as conn:
+            rows = conn.execute(
+                "SELECT * FROM forbidden_translation_patterns "
+                "WHERE language=? AND auto_replace=1 "
+                "ORDER BY CASE severity WHEN 'CRITICAL' THEN 1 WHEN 'HIGH' THEN 2 WHEN 'MEDIUM' THEN 3 ELSE 4 END ASC, "
+                "LENGTH(forbidden_text) DESC",
+                (language,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+    except Exception:
+        return []
+
+
+def db_save_forbidden_pattern(
+    forbidden_text: str,
+    replacement_text: str,
+    category: str = "",
+    severity: str = "HIGH",
+    language: str = "FR",
+    notes: str = "",
+) -> bool:
+    """Add a new forbidden pattern. Returns True on success."""
+    now = datetime.now().isoformat(timespec="seconds")
+    try:
+        with _db() as conn:
+            conn.execute(
+                """INSERT OR IGNORE INTO forbidden_translation_patterns
+                   (id, forbidden_text, replacement_text, category, severity, language, notes, auto_replace, created_at)
+                   VALUES (?,?,?,?,?,?,?,1,?)""",
+                (str(uuid.uuid4()), forbidden_text.strip(), replacement_text.strip(),
+                 category, severity, language, notes, now),
+            )
+        return True
+    except Exception:
+        return False
+
+
+def db_delete_forbidden_pattern(pattern_id: str) -> bool:
+    try:
+        with _db() as conn:
+            conn.execute("DELETE FROM forbidden_translation_patterns WHERE id=?", (pattern_id,))
+        return True
+    except Exception:
+        return False
+
+
+def db_load_corpus_entries(
+    product_type: str | None = None,
+    language: str = "FR",
+    limit: int = 10,
+) -> list[dict]:
+    """Load corpus entries, optionally filtered by product type."""
+    try:
+        with _db() as conn:
+            if product_type and product_type != "generic":
+                rows = conn.execute(
+                    "SELECT * FROM home24_corpus_entries "
+                    "WHERE target_language=? AND approved=1 AND product_type=? "
+                    "ORDER BY confidence_score DESC LIMIT ?",
+                    (language, product_type, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM home24_corpus_entries "
+                    "WHERE target_language=? AND approved=1 "
+                    "ORDER BY confidence_score DESC LIMIT ?",
+                    (language, limit),
+                ).fetchall()
+        return [dict(r) for r in rows]
+    except Exception:
+        return []
+
+
+def db_add_corpus_entry(
+    source_text: str,
+    translated_text: str,
+    category: str = "",
+    product_type: str = "generic",
+    terminology_tags: str = "",
+    confidence_score: float = 1.0,
+    source_language: str = "DE",
+    target_language: str = "FR",
+) -> bool:
+    now = datetime.now().isoformat(timespec="seconds")
+    try:
+        with _db() as conn:
+            conn.execute(
+                """INSERT OR IGNORE INTO home24_corpus_entries
+                   (id, source_language, target_language, source_text, translated_text,
+                    category, product_type, terminology_tags, confidence_score, approved, created_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,1,?)""",
+                (str(uuid.uuid4()), source_language, target_language,
+                 source_text.strip(), translated_text.strip(),
+                 category, product_type, terminology_tags, confidence_score, now),
+            )
+        return True
+    except Exception:
+        return False
+
+
+def db_get_corpus_count() -> dict:
+    """Return corpus entry counts by language."""
+    try:
+        with _db() as conn:
+            rows = conn.execute(
+                "SELECT target_language, COUNT(*) as cnt FROM home24_corpus_entries GROUP BY target_language"
+            ).fetchall()
+        return {r["target_language"]: r["cnt"] for r in rows}
+    except Exception:
+        return {}
+
+
+def db_get_forbidden_count() -> dict:
+    """Return forbidden pattern counts by language."""
+    try:
+        with _db() as conn:
+            rows = conn.execute(
+                "SELECT language, COUNT(*) as cnt FROM forbidden_translation_patterns GROUP BY language"
+            ).fetchall()
+        return {r["language"]: r["cnt"] for r in rows}
+    except Exception:
+        return {}

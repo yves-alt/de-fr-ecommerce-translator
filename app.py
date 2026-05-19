@@ -45,6 +45,13 @@ from database import (
     db_save_glossary_suggestions,
     db_load_glossary_suggestions,
     db_update_suggestion_status,
+    db_load_forbidden_patterns,
+    db_save_forbidden_pattern,
+    db_delete_forbidden_pattern,
+    db_load_corpus_entries,
+    db_add_corpus_entry,
+    db_get_corpus_count,
+    db_get_forbidden_count,
 )
 from intelligence import (
     normalize_text,
@@ -62,6 +69,11 @@ from intelligence import (
     apply_french_typography_rules,
     FURNITURE_TERM_MAP_FR,
     FURNITURE_TERM_MAP_NL,
+    build_row_context,
+    apply_context_terminology_fr,
+    get_context_prompt_hint,
+    get_corpus_style_hint,
+    apply_forbidden_patterns,
 )
 
 load_dotenv()
@@ -1667,6 +1679,25 @@ def render_intelligence_stats(stats: dict):
         </div>
     </div>
     """, unsafe_allow_html=True)
+
+    forbidden = stats.get("forbidden_corrections", 0)
+    ctx_recs  = stats.get("context_reconstructions", 0)
+
+    if forbidden > 0 or ctx_recs > 0:
+        st.markdown(f"""
+        <div class="kpi-row" style="margin-top:8px;">
+            <div class="kpi">
+                <div class="kpi-label">Forbidden Patterns Fixed</div>
+                <div class="kpi-value {'accent' if forbidden else 'muted'}">{forbidden}</div>
+                <div class="kpi-sub">Quality corrections applied</div>
+            </div>
+            <div class="kpi">
+                <div class="kpi-label">Context Reconstructions</div>
+                <div class="kpi-value">{ctx_recs}</div>
+                <div class="kpi-sub">Row contexts built</div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
 
 
 def format_time(seconds: float) -> str:
@@ -3611,11 +3642,17 @@ def process_excel_with_progress(
         "terms_harmonized":         0,
         # Final QA
         "qa_issues_found":          0,
+        # Localization quality engine
+        "forbidden_corrections":   0,
+        "context_reconstructions": 0,
+        "corpus_matches":          0,
         # Pipeline tracking
         "pipeline_refinement":      enable_refinement,
         "pipeline_consistency":     enable_consistency,
         "pipeline_final_qa":        enable_final_qa,
     }
+
+    _forbidden_patterns: list = []
 
     with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
         tmp.write(uploaded_file.getvalue())
@@ -3659,11 +3696,32 @@ def process_excel_with_progress(
         if total_to_process == 0:
             raise ValueError("All translatable cells are empty — nothing to translate.")
 
+        # ── Context Reconstruction: build per-row context from all visible columns ──
+        row_contexts: dict[int, dict] = {}
+        if target_language == "French":
+            all_col_indices = list(range(1, worksheet.max_column + 1))
+            for row_num in range(data_start_row, _ws_max_row + 1):
+                row_data: dict[str, str] = {}
+                for ci in all_col_indices:
+                    v = worksheet.cell(row=row_num, column=ci).value
+                    if v:
+                        row_data[str(ci)] = str(v)
+                if row_data:
+                    ctx = build_row_context(row_data)
+                    if ctx["product_type"] != "generic":
+                        row_contexts[row_num] = ctx
+                        stats["context_reconstructions"] += 1
+
         # ── Intelligence: Product Type Detection ─────────────────────────────
         name_samples = [text for _, _, _, can, text in cells_queue if can == "name"][:20]
         ctx_samples  = [text for _, _, _, can, text in cells_queue if can == "materialDetail"][:5]
         product_type = detect_product_type(name_samples, ctx_samples)
         product_hint = get_product_type_hint(product_type, target_language)
+
+        # Enrich with home24.fr corpus style examples
+        if target_language == "French":
+            product_hint += get_corpus_style_hint(product_type, target_language)
+            stats["corpus_matches"] += 1 if product_hint.strip() else 0
 
         # TIE stats tracking
         tie_stats = {
@@ -4081,6 +4139,10 @@ def process_excel_with_progress(
                 cell.fill = original_excel_highlights[(row_num, col_idx)]
                 cells_original_highlight += 1
 
+        # Load forbidden patterns for this language (fast DB read, cached in pipeline)
+        _forbidden_lang = "FR" if target_language == "French" else "NL"
+        _forbidden_patterns = db_load_forbidden_patterns(_forbidden_lang) if target_language == "French" else []
+
         # ── Phase 3: Residue check (fast local scan first, AI only for remaining) ──
         # Only check cells that went through API translation + refinement
         residue_candidates = {
@@ -4133,6 +4195,21 @@ def process_excel_with_progress(
                 if normalized != text:
                     text = normalized
                     cell.value = text
+
+            # Step 1c: Context-aware terminology (uses row context if available)
+            if target_language == "French" and row_num in row_contexts:
+                ctx_fixed = apply_context_terminology_fr(text, row_contexts[row_num])
+                if ctx_fixed != text:
+                    text = ctx_fixed
+                    cell.value = text
+
+            # Step 1d: Forbidden pattern corrections (DB-backed)
+            if target_language == "French" and _forbidden_patterns:
+                fp_fixed, fp_count = apply_forbidden_patterns(text, _forbidden_patterns)
+                if fp_count > 0:
+                    text = fp_fixed
+                    cell.value = text
+                    stats["forbidden_corrections"] += fp_count
 
             # Step 2: Quick residue scan — if clean, done
             detected = detect_german_residue(text, target_language)
@@ -4235,6 +4312,10 @@ def process_excel_with_progress(
                     cell = worksheet.cell(row=row_num, column=col_idx)
                     if cell.value and str(cell.value).strip():
                         val = str(cell.value)
+                        if _forbidden_patterns:
+                            val, _fc = apply_forbidden_patterns(val, _forbidden_patterns)
+                            if _fc > 0:
+                                stats["forbidden_corrections"] += _fc
                         val = apply_french_semantic_normalization(val)
                         val = apply_french_capitalization_rules(val, canonical, glossary)
                         val = apply_french_typography_rules(val)

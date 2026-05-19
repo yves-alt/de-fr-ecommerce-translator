@@ -960,3 +960,232 @@ def apply_french_typography_rules(text: str) -> str:
         text = text.replace(k, v)
 
     return text
+
+
+# =============================================================================
+# CONTEXT RECONSTRUCTION ENGINE
+# =============================================================================
+
+_CTX_SEATING_KW = frozenset([
+    "fauteuil", "canapé", "sofa", "lounge", "sessel", "sitz", "polster",
+    "ottomane", "relaxsessel", "schlafsofa", "ecksofa", "couch", "liege",
+    "stuhl", "hocker", "sitzelement",
+])
+_CTX_OUTDOOR_KW = frozenset([
+    "garten", "outdoor", "terrasse", "loungeset", "gartenset", "rattan",
+    "polyrattan", "geflecht", "kunststoffgeflecht",
+])
+_CTX_KITCHEN_KW = frozenset([
+    "küche", "küchenzeile", "einbauküche", "arbeitsplatte", "unterschrank",
+    "hängeschrank", "oberschrank", "hochschrank", "geschirrspüler", "gsp",
+    "spüle", "apothekerschrank",
+])
+_CTX_BATHROOM_KW = frozenset([
+    "bad", "waschtisch", "waschbecken", "spiegel", "badmöbel", "badezimmer",
+    "spiegelschrank",
+])
+_CTX_MATTRESS_KW = frozenset([
+    "matratze", "taschenfederkern", "kaltschaum", "kokos", "latexmatratze",
+    "kaltschaummatratze", "bonellfeder",
+])
+_CTX_TABLEWARE_KW = frozenset([
+    "geschirr", "teller", "schüssel", "besteck", "service", "porzellan",
+    "keramik", "geschirrset", "tafelgeschirr",
+])
+_CTX_TABLE_KW = frozenset([
+    "esstisch", "couchtisch", "beistelltisch",
+])
+
+
+def build_row_context(row_data: dict[str, str]) -> dict:
+    """
+    Build a lightweight context dict from all visible column values in a product row.
+    Used for context-aware terminology selection and AI prompt enrichment.
+    """
+    combined = " ".join(str(v) for v in row_data.values() if v).lower()
+
+    is_seating  = any(kw in combined for kw in _CTX_SEATING_KW)
+    is_outdoor  = any(kw in combined for kw in _CTX_OUTDOOR_KW)
+    is_kitchen  = any(kw in combined for kw in _CTX_KITCHEN_KW)
+    is_bathroom = any(kw in combined for kw in _CTX_BATHROOM_KW)
+    is_mattress = any(kw in combined for kw in _CTX_MATTRESS_KW)
+    is_tableware= any(kw in combined for kw in _CTX_TABLEWARE_KW)
+    is_table    = any(kw in combined for kw in _CTX_TABLE_KW)
+
+    m = re.search(r'\b(\d+)[- ]?(?:teilig|stück|pièces?|pieces?|teile)\b', combined, re.IGNORECASE)
+    quantity = int(m.group(1)) if m else None
+    is_set = quantity is not None or bool(re.search(
+        r'\b(?:set|lot|gruppe|garnitur|komplett)\b', combined, re.IGNORECASE
+    ))
+
+    if is_outdoor:
+        ptype = "outdoor"
+    elif is_kitchen:
+        ptype = "kitchen"
+    elif is_bathroom:
+        ptype = "bathroom"
+    elif is_mattress:
+        ptype = "mattress"
+    elif is_tableware:
+        ptype = "tableware"
+    elif is_seating:
+        ptype = "seating"
+    elif is_table:
+        ptype = "table"
+    else:
+        ptype = "generic"
+
+    return {
+        "product_type":  ptype,
+        "is_seating":    is_seating,
+        "is_outdoor":    is_outdoor,
+        "is_kitchen":    is_kitchen,
+        "is_bathroom":   is_bathroom,
+        "is_mattress":   is_mattress,
+        "is_tableware":  is_tableware,
+        "is_table":      is_table,
+        "is_set":        is_set,
+        "quantity":      quantity,
+    }
+
+
+# Context-aware disambiguation: DE term → FR choice depending on product_type
+_CONTEXT_TERMINOLOGY_FR: dict[str, dict[str, str]] = {
+    "fußhocker": {"seating": "repose-pieds", "outdoor": "repose-pieds", "default": "pouf"},
+    "fusshocker": {"seating": "repose-pieds", "outdoor": "repose-pieds", "default": "pouf"},
+    "bezug": {"mattress": "coutil", "default": "revêtement"},
+    "gestell": {"table": "piètement", "default": "structure"},
+    "autark": {"kitchen": "équipée", "default": "autonome"},
+}
+
+
+def apply_context_terminology_fr(text: str, context: dict) -> str:
+    """Apply context-aware German→French terminology choices to residual German terms."""
+    ptype = context.get("product_type", "generic")
+    for de_term, variants in _CONTEXT_TERMINOLOGY_FR.items():
+        if de_term.lower() not in text.lower():
+            continue
+        fr_term = variants.get(ptype) or variants.get("default", "")
+        if not fr_term:
+            continue
+        pat = re.compile(r'(?<!\w)' + re.escape(de_term) + r'(?!\w)', re.IGNORECASE | re.UNICODE)
+        text = pat.sub(fr_term, text)
+    return text
+
+
+def get_context_prompt_hint(context: dict, target_language: str = "French") -> str:
+    """Return a short context hint for the AI prompt based on detected row context."""
+    if target_language != "French":
+        return ""
+    ptype = context.get("product_type", "generic")
+    hints = {
+        "outdoor":   "CONTEXT: Outdoor/garden furniture. Prefer: résine tressée, thermolaqué, repose-pieds, ensemble composé de.",
+        "kitchen":   "CONTEXT: Kitchen furniture. Prefer: cuisine équipée, meuble haut, meuble bas, plan de travail, sans poignées.",
+        "bathroom":  "CONTEXT: Bathroom. Prefer: meuble vasque, miroir, colonne de rangement, meuble sous-vasque.",
+        "mattress":  "CONTEXT: Mattress. Prefer: matelas à ressorts ensachés, coutil, couche de coco, revêtement amovible.",
+        "tableware": "CONTEXT: Tableware. Prefer: service de vaisselle, service de table, assiettes. NEVER 'assiettes à manger'.",
+        "seating":   "CONTEXT: Seating. Fußhocker → repose-pieds. Prefer: assise, dossier, accoudoir, revêtement.",
+        "table":     "CONTEXT: Table. Prefer: table, table extensible, piètement. Use 'table à manger' only if explicitly dining.",
+    }
+    hint = hints.get(ptype, "")
+    return f"\n{hint}" if hint else ""
+
+
+# =============================================================================
+# HOME24 FR CORPUS — Curated style examples by product type
+# =============================================================================
+
+HOME24_FR_STYLE_EXAMPLES: dict[str, list[str]] = {
+    "tableware": [
+        "Service de vaisselle Nature Collection",
+        "Assiettes de service — lot de 6",
+        "Service de table 18 pièces",
+        "Assiettes creuses Nature Collection",
+    ],
+    "outdoor": [
+        "Salon de jardin composé de : 1 canapé, 2 fauteuils et 1 table basse",
+        "Ensemble de jardin en résine tressée thermolaquée",
+        "Chaise longue de jardin",
+        "Repose-pieds assorti au fauteuil lounge",
+    ],
+    "kitchen": [
+        "Cuisine équipée",
+        "Meuble haut de cuisine",
+        "Cuisine décor chêne artisan",
+        "Meuble TV bas lumineux",
+    ],
+    "mattress": [
+        "Matelas à ressorts ensachés 7 zones",
+        "Couche de coco sur une face",
+        "Revêtement amovible — fermeture éclair sur 4 côtés",
+    ],
+    "seating": [
+        "Canapé 3 places",
+        "Fauteuil lounge avec repose-pieds",
+        "Revêtement tissu structuré",
+    ],
+    "materials": [
+        "Décor chêne artisan",
+        "Imitation chêne artisan",
+        "Structure métal thermolaqué",
+        "Résine tressée",
+    ],
+    "bathroom": [
+        "Meuble sous-vasque",
+        "Colonne de rangement",
+        "Miroir de salle de bain",
+    ],
+}
+
+
+def get_corpus_style_hint(product_type: str, target_language: str = "French") -> str:
+    """
+    Return a brief home24.fr style reference for the AI prompt.
+    Injected as style guidance to improve output naturalness.
+    """
+    if target_language != "French":
+        return ""
+    examples = HOME24_FR_STYLE_EXAMPLES.get(product_type, [])
+    if not examples:
+        examples = HOME24_FR_STYLE_EXAMPLES.get("materials", [])[:2]
+    if not examples:
+        return ""
+    lines = "\n".join(f"  • {e}" for e in examples[:4])
+    return f"\nHome24.fr style reference:\n{lines}"
+
+
+# =============================================================================
+# FORBIDDEN PATTERN APPLICATION
+# =============================================================================
+
+def apply_forbidden_patterns(
+    text: str,
+    patterns: list[dict],
+    target_language: str = "French",
+) -> tuple[str, int]:
+    """
+    Apply a list of forbidden pattern dicts (from DB) to the text.
+    Returns (corrected_text, number_of_replacements).
+    patterns: list of {forbidden_text, replacement_text, severity, auto_replace}
+    """
+    if not text or not patterns:
+        return text, 0
+
+    corrections = 0
+    for p in patterns:
+        forbidden = p.get("forbidden_text", "")
+        replacement = p.get("replacement_text", "")
+        if not forbidden or not replacement:
+            continue
+        if forbidden.lower() not in text.lower():
+            continue
+        pat = re.compile(
+            r'(?<!\w)' + re.escape(forbidden) + r'(?!\w)',
+            re.IGNORECASE | re.UNICODE,
+        )
+        new_text = pat.sub(replacement, text)
+        if new_text != text:
+            text = new_text
+            corrections += 1
+
+    return text, corrections
