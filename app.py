@@ -17,6 +17,7 @@ import string
 import tempfile
 import threading
 import time
+import logging
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from io import BytesIO, StringIO
@@ -553,6 +554,74 @@ CANONICAL_WORD_SETS: dict[str, set[str]] = {
         "variant", "ausfuhrung", "ausfuehrung", "variante", "ausführung",
     },
 }
+
+# =============================================================================
+# HOME24 KNOWN HEADER REGISTRY
+# Maps normalized (lowercase, space-separated) column names to their canonical.
+# This is the fast-path: if ANY of these appear in a file the file is accepted
+# immediately — no density check, no row-count check.
+# =============================================================================
+
+HOME24_TRANSLATABLE_CANONICAL: dict[str, str] = {
+    # name variants
+    "name":                              "name",
+    "productname":                       "name",
+    "product name":                      "name",
+    "artikelname":                       "name",
+    "bezeichnung":                       "name",
+    # materialDetail variants
+    "material detail":                   "materialDetail",
+    "materialdetail":                    "materialDetail",
+    "material details":                  "materialDetail",
+    "materialdetails":                   "materialDetail",
+    # colorDetail variants
+    "color detail":                      "colorDetail",
+    "colordetail":                       "colorDetail",
+    "colour detail":                     "colorDetail",
+    "colourdetail":                      "colorDetail",
+    "farbe":                             "colorDetail",
+    "farbdetail":                        "colorDetail",
+    # textileCompositionCover1 variants
+    "textile composition":               "textileCompositionCover1",
+    "textilecomposition":                "textileCompositionCover1",
+    "textile composition cover":         "textileCompositionCover1",
+    "textilecompositioncover":           "textileCompositionCover1",
+    "textile composition cover 1":       "textileCompositionCover1",
+    "textilecompositioncover 1":         "textileCompositionCover1",
+    "textilecompositioncover1":          "textileCompositionCover1",
+    "zusammensetzung":                   "textileCompositionCover1",
+    "textzusammensetzung":               "textileCompositionCover1",
+    "textilzusammensetzung":             "textileCompositionCover1",
+    # qualityDetail variants
+    "quality detail":                    "qualityDetail",
+    "qualitydetail":                     "qualityDetail",
+    "quality details":                   "qualityDetail",
+    "qualitydetails":                    "qualityDetail",
+    "qualitatsdetail":                   "qualityDetail",
+    "qualitat detail":                   "qualityDetail",
+    "qualitaet":                         "qualityDetail",
+    # deliveryScope variants
+    "delivery scope":                    "deliveryScope",
+    "deliveryscope":                     "deliveryScope",
+    "lieferumfang":                      "deliveryScope",
+    "deliverycontents":                  "deliveryScope",
+    "delivery contents":                 "deliveryScope",
+    # variantName variants
+    "variant name":                      "variantName",
+    "variantname":                       "variantName",
+    "variantenname":                     "variantName",
+    "varianten name":                    "variantName",
+    "ausfuhrung":                        "variantName",
+    "ausfuehrung":                       "variantName",
+    "ausführung":                        "variantName",
+}
+
+# Set of all known normalized Home24 translatable headers for O(1) lookup
+HOME24_TRANSLATABLE_NORMALIZED: frozenset[str] = frozenset(HOME24_TRANSLATABLE_CANONICAL.keys())
+
+# Detection logger — logs decisions at DEBUG level so they stay silent by default
+# but can be surfaced with `logging.basicConfig(level=logging.DEBUG)`.
+_DETECT_LOG = logging.getLogger("home24.detect")
 
 
 # =============================================================================
@@ -1803,18 +1872,25 @@ def render_column_report(classification: dict):
                 all_col_idx = {}
                 all_col_idx.update(protected)
                 all_col_idx.update(ignored)
+                match_tiers = classification.get("match_tiers", {})
                 rows = [
                     {
                         "Col #":        all_col_idx.get(h, ""),
                         "Raw header":   h,
                         "Normalized":   normalized_map.get(h, ""),
                         "Status":       "Protected" if h in protected else "Ignored",
+                        "Match tier":   match_tiers.get(h, ""),
                         "Reason":       "Protected column" if h in protected
                                         else classification.get("ignored_reasons", {}).get(h, ""),
                     }
                     for h in all_raw
                 ]
                 st.dataframe(rows, use_container_width=True, hide_index=True)
+                st.caption(
+                    "H24-exact / H24-collapsed = Home24 registry match. "
+                    "T1-exact = alias match. T2-substring = keyword match. "
+                    "T3-wordset = word-overlap match."
+                )
             else:
                 st.warning(
                     f"No headers found in row {header_row}. "
@@ -3324,8 +3400,8 @@ def scan_sheet(
                     real_max_col = c
                 if r <= header_scan_rows:
                     row_buffer.setdefault(r, []).append((c, val))
-    except Exception:
-        pass
+    except Exception as _scan_exc:
+        _DETECT_LOG.warning("scan_sheet: exception during row iteration — %s", _scan_exc)
 
     best_row    = 1
     best_score  = -1
@@ -3350,11 +3426,20 @@ def scan_sheet(
             norm = _normalize_col_header(text)
             if any(kw in norm for kw in HEADER_SCORE_KEYWORDS):
                 score += 3
+            # Home24 catalog headers get a strong bonus so they are never beaten
+            # by a data row that happens to score well on keywords.
+            if norm in HOME24_TRANSLATABLE_NORMALIZED or norm.replace(' ', '') in HOME24_TRANSLATABLE_NORMALIZED:
+                score += 5
+        _DETECT_LOG.debug("scan_sheet: row %d  score=%d  headers=%s", row_num, score, list(headers.keys()))
         if score > best_score:
             best_score   = score
             best_row     = row_num
             best_headers = headers
 
+    _DETECT_LOG.debug(
+        "scan_sheet: chosen header_row=%d  score=%d  real_max_row=%d  real_max_col=%d  headers=%s",
+        best_row, best_score, real_max_row, real_max_col, list(best_headers.keys()),
+    )
     return real_max_row, real_max_col, best_row, best_headers
 
 
@@ -3393,6 +3478,13 @@ def _classify_header(header: str) -> tuple[str | None, str, str]:
     norm   = _normalize_col_header(header)
     norm_c = norm.replace(' ', '')          # collapsed form
 
+    # Home24 fast-path — known catalog headers are accepted immediately.
+    # Checked before T1/T2/T3 so variant-style files never fall through.
+    if norm in HOME24_TRANSLATABLE_NORMALIZED:
+        return HOME24_TRANSLATABLE_CANONICAL[norm], norm, "H24-exact"
+    if norm_c in HOME24_TRANSLATABLE_NORMALIZED:
+        return HOME24_TRANSLATABLE_CANONICAL[norm_c], norm, "H24-collapsed"
+
     # T1 — exact match (try both spaced and collapsed)
     for can, aliases in TRANSLATE_ALIASES_T1.items():
         if norm in aliases or norm_c in aliases:
@@ -3427,6 +3519,10 @@ def classify_columns(all_columns: dict) -> dict:
     possible_missed: list[str]        = []
     normalized_map:  dict[str, str]   = {}
     ignored_reasons: dict[str, str]   = {}
+    match_tiers:     dict[str, str]   = {}
+
+    _DETECT_LOG.debug("classify_columns: evaluating %d headers: %s",
+                      len(all_columns), list(all_columns.keys()))
 
     for header, col_idx in all_columns.items():
         norm = _normalize_col_header(header)
@@ -3434,17 +3530,30 @@ def classify_columns(all_columns: dict) -> dict:
 
         if _is_protected(norm, header):
             protected[header] = col_idx
+            match_tiers[header] = "protected"
+            _DETECT_LOG.debug("  col=%d  %-30r  norm=%-30r  → PROTECTED", col_idx, header, norm)
             continue
 
         canonical, _, tier = _classify_header(header)
 
         if canonical is not None:
             to_translate[header] = (col_idx, canonical)
+            match_tiers[header] = tier
+            _DETECT_LOG.debug("  col=%d  %-30r  norm=%-30r  → TRANSLATE as %-25r  tier=%s",
+                              col_idx, header, norm, canonical, tier)
         else:
             ignored[header] = col_idx
-            ignored_reasons[header] = "No alias / keyword match"
+            reason = "No alias / keyword match"
+            ignored_reasons[header] = reason
+            match_tiers[header] = "ignored"
+            _DETECT_LOG.debug("  col=%d  %-30r  norm=%-30r  → IGNORED (%s)", col_idx, header, norm, reason)
             if any(ik in norm for ik in IMPORTANT_KEYWORDS):
                 possible_missed.append(header)
+
+    _DETECT_LOG.debug(
+        "classify_columns result: translatable=%d  protected=%d  ignored=%d  possible_missed=%s",
+        len(to_translate), len(protected), len(ignored), possible_missed,
+    )
 
     return {
         "to_translate":    to_translate,
@@ -3453,6 +3562,7 @@ def classify_columns(all_columns: dict) -> dict:
         "possible_missed": possible_missed,
         "normalized_map":  normalized_map,
         "ignored_reasons": ignored_reasons,
+        "match_tiers":     match_tiers,
     }
 
 
@@ -4725,13 +4835,17 @@ def translator_page():
             </div>
             """, unsafe_allow_html=True)
 
-            # Build candidate list — use headers if available, else column letters
-            protected_keys = set(classification["protected"].keys())
+            # Build candidate list — headers first, column letters as final fallback.
+            # This must always produce a non-empty options list.
+            candidates: list[str] = []
+            candidate_col_map: dict[str, int] = {}
             if peek_headers:
+                protected_keys = set(classification["protected"].keys())
                 candidates = [h for h in peek_headers if h not in protected_keys]
                 candidate_col_map = {h: peek_headers[h] for h in candidates}
-            else:
-                # No headers found at all — offer column letters A–Z up to real_max_col
+            if not candidates:
+                # No usable headers (none found, or all were protected) — fall back to
+                # column letters so there are always options available.
                 _letters = list(string.ascii_uppercase)
                 _extended = _letters + [f"A{l}" for l in _letters]
                 col_count = max(real_max_col, 1)
