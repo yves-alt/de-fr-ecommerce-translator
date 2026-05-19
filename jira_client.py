@@ -13,6 +13,9 @@ import os
 import requests
 from requests.auth import HTTPBasicAuth
 
+# Fields requested from Jira for every issue search.
+_ISSUE_FIELDS = "summary,status,assignee,created,updated,attachment,issuetype,priority"
+
 
 def _load_jira_config() -> dict | None:
     """
@@ -54,6 +57,10 @@ class JiraClient:
 
     All public methods return structured dicts and never raise to callers.
     Timeouts are set on every request so the UI never hangs indefinitely.
+
+    Search endpoint strategy (tried in order):
+      1. GET /rest/api/3/search/jql  — newer cursor-based endpoint
+      2. GET /rest/api/3/search      — classic start-at pagination, widely supported
     """
 
     _API = "/rest/api/3"
@@ -86,7 +93,7 @@ class JiraClient:
     ) -> requests.Response:
         return self._session.get(self._url(path), params=params, timeout=timeout)
 
-    def _post(
+    def _post_json(
         self,
         path: str,
         body: dict,
@@ -98,6 +105,41 @@ class JiraClient:
             headers={"Content-Type": "application/json"},
             timeout=timeout,
         )
+
+    @staticmethod
+    def _parse_issues(data: dict) -> tuple[list[dict], int, str | None]:
+        """
+        Extract (issues_list, total, next_page_token) from any search response.
+        Returns next_page_token=None when there are no more pages.
+        """
+        issues = []
+        for item in data.get("issues", []):
+            fields   = item.get("fields", {})
+            raw_atts = fields.get("attachment") or []
+            attachments = [
+                {
+                    "id":          att["id"],
+                    "filename":    att["filename"],
+                    "size":        att.get("size", 0),
+                    "content_url": att["content"],
+                    "mime_type":   att.get("mimeType", ""),
+                    "created":     (att.get("created") or "")[:10],
+                }
+                for att in raw_atts
+            ]
+            issues.append({
+                "key":              item["key"],
+                "summary":          fields.get("summary") or "",
+                "status":           (fields.get("status") or {}).get("name", ""),
+                "assignee":         ((fields.get("assignee") or {}).get("displayName") or "Unassigned"),
+                "created":          (fields.get("created") or "")[:10],
+                "updated":          (fields.get("updated") or "")[:10],
+                "attachment_count": len(attachments),
+                "attachments":      attachments,
+            })
+        total           = data.get("total", len(issues))
+        next_page_token = data.get("nextPageToken")  # present in /search/jql responses only
+        return issues, total, next_page_token
 
     # ------------------------------------------------------------------
     # Connection test
@@ -127,7 +169,7 @@ class JiraClient:
             return {"ok": False, "name": "", "email": "", "error": str(exc)}
 
     # ------------------------------------------------------------------
-    # Issue search
+    # Issue search  (robust multi-endpoint with fallback)
     # ------------------------------------------------------------------
 
     def search_issues(
@@ -135,71 +177,170 @@ class JiraClient:
         jql: str,
         max_results: int = 50,
         start_at: int = 0,
+        next_page_token: str | None = None,
     ) -> dict:
         """
-        Execute a JQL search.
+        Search Jira issues using JQL.
 
-        Returns:
-            {
-                "issues": list[dict],   # key, summary, status, assignee, dates, attachments
-                "total":  int,
-                "error":  str | None,
-            }
+        Tries endpoints in order until one succeeds:
+          1. GET /rest/api/3/search/jql  (cursor pagination via nextPageToken)
+          2. GET /rest/api/3/search      (integer pagination via startAt)
+
+        Returns {
+            "issues":          list[dict],
+            "total":           int,
+            "next_page_token": str | None,   # for /search/jql cursor paging
+            "start_at":        int,           # for /search integer paging
+            "endpoint":        str,           # which endpoint succeeded
+            "error":           str | None,
+        }
         """
+        errors: list[str] = []
+
+        # ── Attempt 1: GET /rest/api/3/search/jql ────────────────────────────
         try:
-            r = self._post(
-                "/issue/search",
-                body={
+            params: dict = {
+                "jql":        jql,
+                "maxResults": max_results,
+                "fields":     _ISSUE_FIELDS,
+            }
+            if next_page_token:
+                params["nextPageToken"] = next_page_token
+
+            r = self._get("/search/jql", params=params, timeout=20)
+            if r.status_code == 200:
+                issues, total, npt = self._parse_issues(r.json())
+                return {
+                    "issues":          issues,
+                    "total":           total,
+                    "next_page_token": npt,
+                    "start_at":        start_at + len(issues),
+                    "endpoint":        "/search/jql",
+                    "error":           None,
+                }
+            if r.status_code not in (404, 405, 410):
+                errors.append(f"/search/jql → HTTP {r.status_code}: {r.text[:300]}")
+            else:
+                errors.append(f"/search/jql → HTTP {r.status_code} (not supported)")
+        except Exception as exc:
+            errors.append(f"/search/jql → {exc}")
+
+        # ── Attempt 2: GET /rest/api/3/search ────────────────────────────────
+        try:
+            r = self._get(
+                "/search",
+                params={
                     "jql":        jql,
-                    "maxResults": max_results,
                     "startAt":    start_at,
-                    "fields": [
-                        "summary", "status", "assignee",
-                        "created", "updated", "attachment",
-                        "issuetype", "priority",
-                    ],
+                    "maxResults": max_results,
+                    "fields":     _ISSUE_FIELDS,
                 },
                 timeout=20,
             )
-            if r.status_code != 200:
+            if r.status_code == 200:
+                issues, total, _ = self._parse_issues(r.json())
                 return {
-                    "issues": [], "total": 0,
-                    "error": f"HTTP {r.status_code}: {r.text[:300]}",
+                    "issues":          issues,
+                    "total":           total,
+                    "next_page_token": None,
+                    "start_at":        start_at + len(issues),
+                    "endpoint":        "/search",
+                    "error":           None,
                 }
-
-            data     = r.json()
-            issues   = []
-            for item in data.get("issues", []):
-                fields   = item.get("fields", {})
-                raw_atts = fields.get("attachment") or []
-                attachments = [
-                    {
-                        "id":          att["id"],
-                        "filename":    att["filename"],
-                        "size":        att.get("size", 0),
-                        "content_url": att["content"],
-                        "mime_type":   att.get("mimeType", ""),
-                        "created":     (att.get("created") or "")[:10],
-                    }
-                    for att in raw_atts
-                ]
-                issues.append({
-                    "key":              item["key"],
-                    "summary":          fields.get("summary") or "",
-                    "status":           (fields.get("status") or {}).get("name", ""),
-                    "assignee":         ((fields.get("assignee") or {}).get("displayName") or "Unassigned"),
-                    "created":          (fields.get("created") or "")[:10],
-                    "updated":          (fields.get("updated") or "")[:10],
-                    "attachment_count": len(attachments),
-                    "attachments":      attachments,
-                })
-            return {
-                "issues": issues,
-                "total":  data.get("total", len(issues)),
-                "error":  None,
-            }
+            errors.append(f"/search → HTTP {r.status_code}: {r.text[:300]}")
         except Exception as exc:
-            return {"issues": [], "total": 0, "error": str(exc)}
+            errors.append(f"/search → {exc}")
+
+        return {
+            "issues":          [],
+            "total":           0,
+            "next_page_token": None,
+            "start_at":        start_at,
+            "endpoint":        "none",
+            "error":           " | ".join(errors),
+        }
+
+    # ------------------------------------------------------------------
+    # Saved filters
+    # ------------------------------------------------------------------
+
+    def search_filters(
+        self,
+        name_query: str,
+        max_results: int = 20,
+    ) -> list[dict]:
+        """
+        Search saved Jira filters by name.
+
+        Returns list of {"id": str, "name": str, "jql": str}.
+        """
+        try:
+            r = self._get(
+                "/filter/search",
+                params={
+                    "filterName": name_query,
+                    "maxResults":  max_results,
+                    "expand":      "jql",
+                },
+                timeout=10,
+            )
+            if r.status_code == 200:
+                data    = r.json()
+                filters = data.get("values", data.get("results", []))
+                return [
+                    {
+                        "id":   str(f.get("id", "")),
+                        "name": f.get("name", ""),
+                        "jql":  f.get("jql", ""),
+                    }
+                    for f in filters
+                ]
+            return []
+        except Exception:
+            return []
+
+    def get_filter(self, filter_id: str) -> dict | None:
+        """
+        Fetch a saved filter by ID.
+
+        Returns {"id": str, "name": str, "jql": str} or None on failure.
+        """
+        try:
+            r = self._get(f"/filter/{filter_id}", timeout=10)
+            if r.status_code == 200:
+                f = r.json()
+                return {
+                    "id":   str(f.get("id", "")),
+                    "name": f.get("name", ""),
+                    "jql":  f.get("jql", ""),
+                }
+            return None
+        except Exception:
+            return None
+
+    def search_issues_from_filter(
+        self,
+        filter_id: str,
+        max_results: int = 50,
+        start_at: int = 0,
+    ) -> dict:
+        """
+        Fetch the JQL from a saved filter, then run search_issues().
+
+        Returns the same dict as search_issues() plus "filter_name" and "filter_jql".
+        """
+        f = self.get_filter(filter_id)
+        if not f:
+            return {
+                "issues": [], "total": 0, "next_page_token": None,
+                "start_at": 0, "endpoint": "none",
+                "error": f"Filter {filter_id} not found or inaccessible.",
+                "filter_name": "", "filter_jql": "",
+            }
+        result = self.search_issues(f["jql"], max_results=max_results, start_at=start_at)
+        result["filter_name"] = f["name"]
+        result["filter_jql"]  = f["jql"]
+        return result
 
     # ------------------------------------------------------------------
     # Attachment download
@@ -229,8 +370,8 @@ class JiraClient:
         """
         Upload a file as an attachment to a Jira ticket.
 
-        Uses multipart/form-data with the X-Atlassian-Token: no-check header
-        as required by the Jira REST API.
+        Uses multipart/form-data with X-Atlassian-Token: no-check as
+        required by the Jira REST API. The field name must be "file".
 
         Returns {"ok": bool, "error": str}.
         """
@@ -240,8 +381,6 @@ class JiraClient:
             "Accept":            "application/json",
         }
         try:
-            # Must NOT pass Content-Type here — requests sets it automatically
-            # for multipart/form-data with the correct boundary.
             r = requests.post(
                 url,
                 auth=self._auth,
@@ -276,7 +415,7 @@ class JiraClient:
             for p in paragraphs
         ]
         try:
-            r = self._post(
+            r = self._post_json(
                 f"/issue/{ticket_key}/comment",
                 body={
                     "body": {
@@ -322,7 +461,7 @@ class JiraClient:
         204 No Content is the success status code for this endpoint.
         """
         try:
-            r = self._post(
+            r = self._post_json(
                 f"/issue/{ticket_key}/transitions",
                 body={"transition": {"id": transition_id}},
                 timeout=15,

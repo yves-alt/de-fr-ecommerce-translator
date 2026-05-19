@@ -2056,7 +2056,10 @@ def jira_tickets_page() -> None:
         )
         return
 
-    render_page_header("Jira Tickets", "Search tickets · download source files · upload translations")
+    render_page_header(
+        "Jira Tickets",
+        "Search tickets · download source files · upload translations",
+    )
 
     # ── Connection status ─────────────────────────────────────────────────────
     _conn_key = "_jira_conn_status"
@@ -2066,9 +2069,7 @@ def jira_tickets_page() -> None:
     if _conn_key not in st.session_state:
         if not jira_configured():
             st.session_state[_conn_key] = {
-                "ok":    False,
-                "name":  "",
-                "email": "",
+                "ok": False, "name": "", "email": "",
                 "error": (
                     "Jira credentials not configured. "
                     "Add JIRA_BASE_URL, JIRA_EMAIL, JIRA_API_TOKEN "
@@ -2076,13 +2077,11 @@ def jira_tickets_page() -> None:
                 ),
             }
         else:
-            _jc, _jerr = get_jira_client()
-            if _jc:
-                st.session_state[_conn_key] = _jc.test_connection()
-            else:
-                st.session_state[_conn_key] = {
-                    "ok": False, "name": "", "email": "", "error": _jerr
-                }
+            _jc0, _jerr0 = get_jira_client()
+            st.session_state[_conn_key] = (
+                _jc0.test_connection() if _jc0
+                else {"ok": False, "name": "", "email": "", "error": _jerr0}
+            )
 
     _conn = st.session_state[_conn_key]
     if _conn["ok"]:
@@ -2112,71 +2111,239 @@ JIRA_API_TOKEN=your-api-token-here
 ```
 **Streamlit Cloud** — add to Secrets panel:
 ```toml
-JIRA_BASE_URL = "https://your-company.atlassian.net"
-JIRA_EMAIL    = "your-email@home24.de"
+JIRA_BASE_URL  = "https://your-company.atlassian.net"
+JIRA_EMAIL     = "your-email@home24.de"
 JIRA_API_TOKEN = "your-api-token-here"
 ```
-Get your API token at: https://id.atlassian.com/manage-profile/security/api-tokens
+Get your API token at https://id.atlassian.com/manage-profile/security/api-tokens
             """)
         return
 
     st.markdown("---")
 
-    # ── JQL search ───────────────────────────────────────────────────────────
-    st.markdown('<div class="section-label">Search tickets</div>', unsafe_allow_html=True)
+    # Helper: run a JQL search and store results in session_state
+    def _run_search(jql: str, append: bool = False) -> None:
+        _jc_s, _jerr_s = get_jira_client()
+        if not _jc_s:
+            st.error(f"Connection failed: {_jerr_s}")
+            return
+        _start  = 0
+        _token  = None
+        if append and "_jira_search_results" in st.session_state:
+            _prev = st.session_state["_jira_search_results"]
+            _start = _prev.get("start_at", 0)
+            _token = _prev.get("next_page_token")
+        with st.spinner("Searching Jira..."):
+            _res = _jc_s.search_issues(
+                jql,
+                max_results=50,
+                start_at=_start,
+                next_page_token=_token,
+            )
+        _res["_jql"] = jql
+        if append and "_jira_search_results" in st.session_state:
+            _prev_issues = st.session_state["_jira_search_results"].get("issues", [])
+            _res["issues"] = _prev_issues + _res.get("issues", [])
+        st.session_state["_jira_search_results"] = _res
+        st.session_state["_jira_jql_saved"] = jql
+
+    # Helper: load a saved filter and search with its JQL
+    def _run_filter_search(filter_id: str, filter_name: str, append: bool = False) -> None:
+        _jc_f, _jerr_f = get_jira_client()
+        if not _jc_f:
+            st.error(f"Connection failed: {_jerr_f}")
+            return
+        _f = _jc_f.get_filter(filter_id)
+        if not _f:
+            st.error(f"Filter '{filter_name}' (ID {filter_id}) not found or inaccessible.")
+            return
+        _run_search(_f["jql"], append=append)
+
+    # ── Home24 saved filters ──────────────────────────────────────────────────
+    st.markdown(
+        '<div class="section-label">Home24 Jira Filters</div>',
+        unsafe_allow_html=True,
+    )
+
+    _filter_ready_id = _get_secret("JIRA_FILTER_READY_FR", "")
+    _filter_inprog_id = _get_secret("JIRA_FILTER_IN_PROGRESS_FR", "")
+
+    _FILTER_READY_NAME    = "FR product translation - ready for translation"
+    _FILTER_INPROG_NAME   = "FR product translation - in progress"
+
+    _fb1, _fb2, _fb3 = st.columns(3)
+
+    with _fb1:
+        if st.button(
+            "Load: Ready for translation",
+            key="jira_filter_ready_btn",
+            use_container_width=True,
+        ):
+            st.session_state.pop("_jira_search_results", None)
+            if _filter_ready_id:
+                _run_filter_search(_filter_ready_id, _FILTER_READY_NAME)
+            else:
+                # Search saved filters by name
+                _jc_f2, _ = get_jira_client()
+                if _jc_f2:
+                    _matches = _jc_f2.search_filters(_FILTER_READY_NAME)
+                    if _matches:
+                        _run_search(_matches[0]["jql"])
+                        st.session_state["_jira_filter_label"] = _matches[0]["name"]
+                    else:
+                        # Fallback JQL for Home24 FR translation workflow
+                        _run_search('summary ~ "FR -" AND status != Done ORDER BY updated DESC')
+                        st.session_state["_jira_filter_label"] = "JQL fallback (filter not found)"
+
+    with _fb2:
+        if st.button(
+            "Load: In progress",
+            key="jira_filter_inprog_btn",
+            use_container_width=True,
+        ):
+            st.session_state.pop("_jira_search_results", None)
+            if _filter_inprog_id:
+                _run_filter_search(_filter_inprog_id, _FILTER_INPROG_NAME)
+            else:
+                _jc_f3, _ = get_jira_client()
+                if _jc_f3:
+                    _matches2 = _jc_f3.search_filters(_FILTER_INPROG_NAME)
+                    if _matches2:
+                        _run_search(_matches2[0]["jql"])
+                        st.session_state["_jira_filter_label"] = _matches2[0]["name"]
+                    else:
+                        _run_search('summary ~ "FR -" AND status ~ "progress" ORDER BY updated DESC')
+                        st.session_state["_jira_filter_label"] = "JQL fallback (filter not found)"
+
+    with _fb3:
+        if st.button(
+            "Search filters by name…",
+            key="jira_filter_search_btn",
+            use_container_width=True,
+        ):
+            st.session_state["_jira_show_filter_search"] = True
+
+    # Filter name search (shown when user clicks "Search filters by name…")
+    if st.session_state.get("_jira_show_filter_search"):
+        _fname_q = st.text_input(
+            "Filter name to search:",
+            value="FR product translation",
+            key="jira_filter_name_input",
+        )
+        if st.button("Find filters", key="jira_find_filters_btn"):
+            _jc_fs, _ = get_jira_client()
+            if _jc_fs:
+                _found_filters = _jc_fs.search_filters(_fname_q, max_results=20)
+                st.session_state["_jira_found_filters"] = _found_filters
+        _found = st.session_state.get("_jira_found_filters", [])
+        if _found:
+            _filt_options = {f["name"]: f for f in _found}
+            _chosen_fname = st.selectbox(
+                "Select filter:", list(_filt_options.keys()), key="jira_filter_pick"
+            )
+            _chosen_f = _filt_options.get(_chosen_fname)
+            if _chosen_f and st.button("Use this filter", key="jira_use_filter_btn"):
+                st.session_state.pop("_jira_search_results", None)
+                _run_search(_chosen_f["jql"])
+                st.session_state["_jira_filter_label"] = _chosen_f["name"]
+                st.session_state["_jira_show_filter_search"] = False
+                st.rerun()
+        elif "jira_found_filters" in st.session_state:
+            st.info("No matching filters found.")
+
+    st.markdown("---")
+
+    # ── Manual JQL search ─────────────────────────────────────────────────────
+    st.markdown('<div class="section-label">Search by JQL</div>', unsafe_allow_html=True)
 
     _default_jql = _get_secret(
         "JIRA_TRANSLATION_JQL",
-        "project = LOCALIZATION AND status = 'To Do' ORDER BY created DESC",
+        'summary ~ "FR -" ORDER BY updated DESC',
     )
     _jql_input = st.text_input(
         "JQL query:",
         value=st.session_state.get("_jira_jql_saved", _default_jql),
         key="jira_jql_input",
-        help="Standard Jira Query Language. Example: project = XYZ AND summary ~ 'translation'",
+        help=(
+            'Examples:\n'
+            '  summary ~ "FR -" ORDER BY updated DESC\n'
+            '  summary ~ "FR" AND status ~ "ready" ORDER BY updated DESC\n'
+            '  key in (PC-20820, PC-20815)'
+        ),
     )
 
-    _search_col, _clear_col = st.columns([3, 1])
-    with _search_col:
+    _sc1, _sc2, _sc3 = st.columns([2, 1, 1])
+    with _sc1:
         _do_search = st.button("Search", key="jira_search_btn", use_container_width=True)
-    with _clear_col:
-        if st.button("Clear results", key="jira_clear_results_btn", use_container_width=True):
-            st.session_state.pop("_jira_search_results", None)
+    with _sc2:
+        if st.button("Clear", key="jira_clear_results_btn", use_container_width=True):
+            for _k in ["_jira_search_results", "_jira_filter_label", "_jira_jql_saved"]:
+                st.session_state.pop(_k, None)
+            st.rerun()
+    with _sc3:
+        _can_load_more = (
+            "_jira_search_results" in st.session_state
+            and len(st.session_state["_jira_search_results"].get("issues", []))
+            < st.session_state["_jira_search_results"].get("total", 0)
+        )
+        if st.button(
+            "Load more",
+            key="jira_load_more_btn",
+            disabled=not _can_load_more,
+            use_container_width=True,
+        ):
+            _prev_jql = st.session_state["_jira_search_results"].get("_jql", _jql_input)
+            _run_search(_prev_jql, append=True)
             st.rerun()
 
     if _do_search:
-        st.session_state["_jira_jql_saved"] = _jql_input
         st.session_state.pop("_jira_search_results", None)
-        _jc2, _jerr2 = get_jira_client()
-        if not _jc2:
-            st.error(f"Connection failed: {_jerr2}")
-        else:
-            with st.spinner("Searching Jira..."):
-                st.session_state["_jira_search_results"] = _jc2.search_issues(
-                    _jql_input, max_results=50
-                )
+        st.session_state.pop("_jira_filter_label", None)
+        _run_search(_jql_input)
 
-    # ── Results table ─────────────────────────────────────────────────────────
+    # ── Results ───────────────────────────────────────────────────────────────
     _results = st.session_state.get("_jira_search_results")
     if _results is None:
-        st.info("Enter a JQL query above and click Search.")
+        st.info(
+            "Use one of the Home24 filter buttons above, or enter a JQL query and click Search."
+        )
         return
 
+    # Show the active filter / JQL label
+    _active_label = st.session_state.get("_jira_filter_label", "")
+    _active_jql   = _results.get("_jql", "")
+    if _active_label:
+        st.caption(f"Filter: {_active_label}")
+    if _active_jql:
+        st.caption(f"JQL: `{_active_jql}`")
+
     if _results.get("error"):
-        st.error(f"Search failed: {_results['error']}")
+        _ep = _results.get("endpoint", "")
+        st.markdown(
+            f'<div class="alert alert-warn">'
+            f'<span class="alert-icon">⚠</span>'
+            f'<div><strong>Search failed</strong> (endpoint: {_ep})<br>'
+            f'<code>{_results["error"]}</code><br>'
+            f'Try using a saved filter above, or check your JQL syntax.</div>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
         return
 
     _issues = _results.get("issues", [])
     if not _issues:
-        st.info("No tickets found for this query.")
+        st.info("No tickets found. Try adjusting your JQL or use a saved filter.")
         return
 
     import pandas as _pd_jira
-    _total = _results.get("total", len(_issues))
+    _total   = _results.get("total", len(_issues))
+    _showing = len(_issues)
+    _ep_used = _results.get("endpoint", "")
     st.markdown(
         f'<div class="alert alert-info">'
         f'<span class="alert-icon">ℹ</span>'
-        f'<span>Showing {len(_issues)} of {_total} tickets</span>'
+        f'<span>Showing {_showing} of {_total} tickets'
+        f'{" — via " + _ep_used if _ep_used else ""}</span>'
         f'</div>',
         unsafe_allow_html=True,
     )
@@ -2198,16 +2365,26 @@ Get your API token at: https://id.atlassian.com/manage-profile/security/api-toke
         use_container_width=True,
     )
 
+    if _showing < _total:
+        st.caption(
+            f"{_total - _showing} more tickets available — click **Load more** above to fetch them."
+        )
+
     st.markdown("---")
 
     # ── Ticket selector ───────────────────────────────────────────────────────
     st.markdown('<div class="section-label">Select ticket</div>', unsafe_allow_html=True)
 
-    _ticket_keys = [i["key"] for i in _issues]
-    _selected_key = st.selectbox(
-        "Ticket:", _ticket_keys, key="jira_ticket_selector"
+    _ticket_display = [f'{i["key"]} — {i["summary"][:60]}' for i in _issues]
+    _ticket_keys    = [i["key"] for i in _issues]
+    _sel_idx = st.selectbox(
+        "Ticket:",
+        range(len(_ticket_display)),
+        format_func=lambda x: _ticket_display[x],
+        key="jira_ticket_selector",
     )
-    _selected_issue = next((i for i in _issues if i["key"] == _selected_key), None)
+    _selected_issue = _issues[_sel_idx] if _issues else None
+    _selected_key   = _ticket_keys[_sel_idx] if _issues else ""
 
     if not _selected_issue:
         return
@@ -2223,7 +2400,7 @@ Get your API token at: https://id.atlassian.com/manage-profile/security/api-toke
     )
 
     # ── Attachment list ───────────────────────────────────────────────────────
-    _all_atts  = _selected_issue.get("attachments", [])
+    _all_atts   = _selected_issue.get("attachments", [])
     _excel_atts = [
         a for a in _all_atts
         if a["filename"].lower().endswith(_EXCEL_EXTENSIONS)
@@ -2239,32 +2416,32 @@ Get your API token at: https://id.atlassian.com/manage-profile/security/api-toke
     if _other_atts:
         with st.expander(f"Non-Excel attachments ({len(_other_atts)})", expanded=False):
             for _att in _other_atts:
-                _size_kb = round(_att["size"] / 1024, 1)
-                st.markdown(f"- `{_att['filename']}` ({_size_kb} KB)")
+                _sz = round(_att["size"] / 1024, 1)
+                st.markdown(f"- `{_att['filename']}` ({_sz} KB)")
 
     if not _excel_atts:
         st.markdown(
             '<div class="alert alert-warn">'
             '<span class="alert-icon">⚠</span>'
-            '<span>No Excel attachments (.xlsx / .xls / .xlsm) found on this ticket.</span>'
+            '<span>No Excel attachments (.xlsx / .xls / .xlsm / .xlsb) on this ticket.</span>'
             '</div>',
             unsafe_allow_html=True,
         )
         return
 
-    _att_options    = [a["filename"] for a in _excel_atts]
+    _att_options     = [a["filename"] for a in _excel_atts]
     _selected_att_fn = st.selectbox(
         "Excel attachment to translate:", _att_options, key="jira_att_selector"
     )
     _selected_att = next((a for a in _excel_atts if a["filename"] == _selected_att_fn), None)
 
     if _selected_att:
-        _size_kb = round(_selected_att["size"] / 1024, 1)
+        _sz_kb = round(_selected_att["size"] / 1024, 1)
         st.markdown(
             f'<div class="alert alert-info">'
             f'<span class="alert-icon">📄</span>'
             f'<span><strong>{_selected_att["filename"]}</strong>'
-            f' — {_size_kb} KB · uploaded {_selected_att["created"]}</span>'
+            f' — {_sz_kb} KB · uploaded {_selected_att["created"]}</span>'
             f'</div>',
             unsafe_allow_html=True,
         )
@@ -2285,25 +2462,24 @@ Get your API token at: https://id.atlassian.com/manage-profile/security/api-toke
                 _file_bytes = _jc3.download_attachment(_selected_att["content_url"])
             if _file_bytes is None:
                 st.error(
-                    "Download failed. Check that your API token has attachment read access."
+                    "Download failed. Verify that your API token has attachment read access."
                 )
             else:
-                # Store in session_state — translator_page picks it up as uploaded_file
-                st.session_state["_jira_upload"]               = _JiraFileProxy(
+                st.session_state["_jira_upload"]              = _JiraFileProxy(
                     _selected_att_fn, _file_bytes
                 )
-                st.session_state["_jira_ticket_key"]           = _selected_key
-                st.session_state["_jira_ticket_summary"]       = _selected_issue["summary"]
-                st.session_state["_jira_attachment_id"]        = _selected_att["id"]
-                st.session_state["_jira_attachment_filename"]  = _selected_att_fn
-                # Clear any stale translation results
+                st.session_state["_jira_ticket_key"]          = _selected_key
+                st.session_state["_jira_ticket_summary"]      = _selected_issue["summary"]
+                st.session_state["_jira_attachment_id"]       = _selected_att["id"]
+                st.session_state["_jira_attachment_filename"] = _selected_att_fn
+                # Clear any stale translation results and sheet caches
                 st.session_state.pop("_tr_result", None)
                 for _sk in [k for k in st.session_state if k.startswith("_sheet_")]:
                     del st.session_state[_sk]
                 st.session_state["_tr_result_file"] = _selected_att_fn
                 # Navigate to Translator
                 st.session_state["nav_radio"] = "Translator"
-                st.success(f"Downloaded {_selected_att_fn}. Navigating to Translator...")
+                st.success(f"Downloaded {_selected_att_fn}. Opening Translator…")
                 st.rerun()
 
 
