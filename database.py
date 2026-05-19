@@ -143,6 +143,22 @@ CREATE TABLE IF NOT EXISTS forbidden_translation_patterns (
     auto_replace     INTEGER DEFAULT 1,
     created_at       TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS issue_reports (
+    id                  TEXT PRIMARY KEY,
+    user_email          TEXT NOT NULL DEFAULT '',
+    user_role           TEXT NOT NULL DEFAULT '',
+    category            TEXT NOT NULL,
+    severity            TEXT NOT NULL DEFAULT 'Medium',
+    target_language     TEXT NOT NULL DEFAULT 'Not language-related',
+    filename            TEXT DEFAULT '',
+    row_reference       TEXT DEFAULT '',
+    column_reference    TEXT DEFAULT '',
+    description         TEXT NOT NULL,
+    expected_correction TEXT DEFAULT '',
+    status              TEXT NOT NULL DEFAULT 'open',
+    created_at          TEXT NOT NULL
+);
 """
 
 
@@ -177,6 +193,7 @@ def init_db(
     _ensure_v4_migration()
     _ensure_v5_migration()
     _ensure_v6_migration()
+    _ensure_v7_migration()
     _migrate_json_if_needed()
     if default_glossary:
         _seed_glossary_if_empty(default_glossary, "French")
@@ -1291,5 +1308,132 @@ def db_get_forbidden_count() -> dict:
                 "SELECT language, COUNT(*) as cnt FROM forbidden_translation_patterns GROUP BY language"
             ).fetchall()
         return {r["language"]: r["cnt"] for r in rows}
+    except Exception:
+        return {}
+
+
+# =============================================================================
+# V7 MIGRATION — Issue Reports
+# =============================================================================
+
+def _ensure_v7_migration() -> None:
+    """Add issue_reports table (in-app bug / translation issue reporting)."""
+    if _get_schema_version() >= 7:
+        return
+    try:
+        with _db() as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS issue_reports (
+                    id                  TEXT PRIMARY KEY,
+                    user_email          TEXT NOT NULL DEFAULT '',
+                    user_role           TEXT NOT NULL DEFAULT '',
+                    category            TEXT NOT NULL,
+                    severity            TEXT NOT NULL DEFAULT 'Medium',
+                    target_language     TEXT NOT NULL DEFAULT 'Not language-related',
+                    filename            TEXT DEFAULT '',
+                    row_reference       TEXT DEFAULT '',
+                    column_reference    TEXT DEFAULT '',
+                    description         TEXT NOT NULL,
+                    expected_correction TEXT DEFAULT '',
+                    status              TEXT NOT NULL DEFAULT 'open',
+                    created_at          TEXT NOT NULL
+                )
+            """)
+        _set_schema_version(7)
+    except Exception:
+        pass
+
+
+# =============================================================================
+# ISSUE REPORTS — CRUD
+# =============================================================================
+
+def db_save_issue_report(report: dict) -> str:
+    """Persist a new issue report. Returns the new report id."""
+    report_id = str(uuid.uuid4())
+    now = datetime.now().isoformat(timespec="seconds")
+    try:
+        with _db() as conn:
+            conn.execute(
+                """
+                INSERT INTO issue_reports
+                    (id, user_email, user_role, category, severity, target_language,
+                     filename, row_reference, column_reference, description,
+                     expected_correction, status, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)
+                """,
+                (
+                    report_id,
+                    report.get("user_email", ""),
+                    report.get("user_role", ""),
+                    report.get("category", "Other"),
+                    report.get("severity", "Medium"),
+                    report.get("target_language", "Not language-related"),
+                    report.get("filename", ""),
+                    report.get("row_reference", ""),
+                    report.get("column_reference", ""),
+                    report.get("description", ""),
+                    report.get("expected_correction", ""),
+                    now,
+                ),
+            )
+    except Exception:
+        pass
+    return report_id
+
+
+def db_load_issue_reports(
+    status_filter: str | None = None,
+    severity_filter: str | None = None,
+    category_filter: str | None = None,
+    lang_filter: str | None = None,
+) -> list[dict]:
+    """Load issue reports with optional filters."""
+    try:
+        clauses: list[str] = []
+        params: list = []
+        if status_filter and status_filter != "All":
+            clauses.append("status = ?")
+            params.append(status_filter)
+        if severity_filter and severity_filter != "All":
+            clauses.append("severity = ?")
+            params.append(severity_filter)
+        if category_filter and category_filter != "All":
+            clauses.append("category = ?")
+            params.append(category_filter)
+        if lang_filter and lang_filter != "All":
+            clauses.append("target_language = ?")
+            params.append(lang_filter)
+        sql = "SELECT * FROM issue_reports"
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY created_at DESC"
+        with _db() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return [dict(r) for r in rows]
+    except Exception:
+        return []
+
+
+def db_update_issue_report_status(report_id: str, status: str) -> None:
+    """Update the status of an issue report."""
+    try:
+        with _db() as conn:
+            conn.execute(
+                "UPDATE issue_reports SET status = ? WHERE id = ?",
+                (status, report_id),
+            )
+    except Exception:
+        pass
+
+
+def db_get_issue_report_counts() -> dict:
+    """Return counts grouped by status."""
+    try:
+        with _db() as conn:
+            rows = conn.execute(
+                "SELECT status, COUNT(*) as cnt FROM issue_reports GROUP BY status"
+            ).fetchall()
+        return {r["status"]: r["cnt"] for r in rows}
     except Exception:
         return {}

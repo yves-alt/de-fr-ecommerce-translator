@@ -18,7 +18,10 @@ import tempfile
 import threading
 import time
 import logging
+import smtplib
 import unicodedata
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from io import BytesIO, StringIO
 from pathlib import Path
@@ -53,6 +56,10 @@ from database import (
     db_add_corpus_entry,
     db_get_corpus_count,
     db_get_forbidden_count,
+    db_save_issue_report,
+    db_load_issue_reports,
+    db_update_issue_report_status,
+    db_get_issue_report_counts,
 )
 from intelligence import (
     normalize_text,
@@ -664,6 +671,17 @@ def _get_justus_credentials() -> tuple[str, str]:
     return os.environ.get("JUSTUS_EMAIL", ""), os.environ.get("JUSTUS_PASSWORD", "")
 
 
+def _get_secret(key: str, default: str = "") -> str:
+    """Read a value from Streamlit secrets first, then env vars."""
+    try:
+        val = st.secrets.get(key, "")
+        if val:
+            return str(val)
+    except Exception:
+        pass
+    return os.environ.get(key, default)
+
+
 def verify_credentials(input_email: str, input_password: str) -> str | None:
     # Returns "admin", "standard_user", "guest", or None on failure
     email = input_email.strip().lower()
@@ -699,6 +717,97 @@ def load_history() -> list:
 
 def save_history_record(record: dict) -> None:
     db_save_history_record(record)
+
+
+# =============================================================================
+# ISSUE REPORTING — EMAIL
+# =============================================================================
+
+_ISSUE_CATEGORIES = [
+    "Translation error",
+    "German residue",
+    "Wrong terminology",
+    "Product name issue",
+    "Column detection issue",
+    "Excel export issue",
+    "CSV export issue",
+    "Login / access issue",
+    "UI/UX bug",
+    "Other",
+]
+
+_ISSUE_SEVERITIES = ["Low", "Medium", "High", "Critical"]
+
+_ISSUE_STATUSES = ["open", "in progress", "resolved", "ignored"]
+
+_ISSUE_LANGUAGES = ["French", "Dutch", "Both", "Not language-related"]
+
+
+def _send_issue_report_email(report: dict) -> bool:
+    """
+    Send issue report notification to the admin address.
+    Returns True if the email was sent successfully, False otherwise.
+    Missing SMTP config is not an error — the report is always saved to DB.
+    """
+    smtp_host = _get_secret("SMTP_HOST")
+    smtp_port = int(_get_secret("SMTP_PORT", "587"))
+    smtp_user = _get_secret("SMTP_USER")
+    smtp_pass = _get_secret("SMTP_PASSWORD")
+    smtp_from = _get_secret("SMTP_FROM") or smtp_user
+    report_to = _get_secret("REPORT_EMAIL_TO", "yves.banga@home24.de")
+
+    if not (smtp_host and smtp_user and smtp_pass):
+        return False
+
+    category = report.get("category", "Other")
+    severity = report.get("severity", "Medium")
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = f"[Localization Platform] New {severity} issue: {category}"
+    msg["From"]    = smtp_from
+    msg["To"]      = report_to
+
+    body_lines = [
+        "A new issue report has been submitted on the Home24 Localization Platform.",
+        "",
+        f"Reporter:           {report.get('user_email', '—')}",
+        f"Role:               {report.get('user_role', '—')}",
+        f"Category:           {category}",
+        f"Severity:           {severity}",
+        f"Target language:    {report.get('target_language', '—')}",
+        f"File:               {report.get('filename', '—') or '—'}",
+        f"Row reference:      {report.get('row_reference', '—') or '—'}",
+        f"Column reference:   {report.get('column_reference', '—') or '—'}",
+        f"Submitted at:       {report.get('created_at', '—')}",
+        "",
+        "─── Description ────────────────────────────────────────────────────",
+        report.get("description", ""),
+        "",
+    ]
+    correction = report.get("expected_correction", "").strip()
+    if correction:
+        body_lines += [
+            "─── Expected correction ─────────────────────────────────────────────",
+            correction,
+            "",
+        ]
+    body_lines += [
+        "────────────────────────────────────────────────────────────────────",
+        "Home24 AI Localization Platform — internal tool",
+    ]
+
+    msg.attach(MIMEText("\n".join(body_lines), "plain", "utf-8"))
+
+    try:
+        with smtplib.SMTP(smtp_host, smtp_port, timeout=10) as server:
+            server.ehlo()
+            server.starttls()
+            server.ehlo()
+            server.login(smtp_user, smtp_pass)
+            server.send_message(msg)
+        return True
+    except Exception:
+        return False
 
 
 # =============================================================================
@@ -1939,6 +2048,8 @@ def render_sidebar() -> str:
         nav_options = ["Translator", "Translation History", "Analytics", "Glossary", "Translation Memory"]
         if role == "admin":
             nav_options.append("Admin Dashboard")
+            nav_options.append("Issue Reports")
+        nav_options.append("Report an Issue")
 
         page = st.radio(
             "Navigation",
@@ -1998,6 +2109,253 @@ def render_footer():
         <span class="footer-version">DE Multilingual Translator · v6.0</span>
     </div>
     """, unsafe_allow_html=True)
+
+
+# =============================================================================
+# REPORT AN ISSUE — user-facing form
+# =============================================================================
+
+def report_issue_page():
+    render_page_header("Report an Issue", "Report a translation error, bug, or quality problem.")
+
+    user_email = st.session_state.get("user_email", "")
+    user_role  = st.session_state.get("user_role", "")
+
+    # Pre-fill filename from the last translated file if available
+    last_file = st.session_state.get("_tr_result_file", "")
+
+    st.markdown("""
+    <div class="alert alert-info" style="margin-bottom:20px;">
+        <span class="alert-icon">ℹ</span>
+        <span>Use this form to report any issue you encounter. Your report is saved immediately
+        and the admin will be notified by email.</span>
+    </div>
+    """, unsafe_allow_html=True)
+
+    with st.form("issue_report_form", clear_on_submit=True):
+        col_cat, col_sev = st.columns(2)
+        with col_cat:
+            category = st.selectbox(
+                "Issue category",
+                _ISSUE_CATEGORIES,
+                index=0,
+            )
+        with col_sev:
+            severity = st.selectbox(
+                "Severity",
+                _ISSUE_SEVERITIES,
+                index=1,
+            )
+
+        col_lang, col_file = st.columns(2)
+        with col_lang:
+            target_language = st.selectbox(
+                "Target language",
+                _ISSUE_LANGUAGES,
+                index=0,
+            )
+        with col_file:
+            filename = st.text_input(
+                "File name (optional)",
+                value=last_file,
+                placeholder="e.g. Translation_PC-20815.xlsx",
+            )
+
+        col_row, col_col = st.columns(2)
+        with col_row:
+            row_reference = st.text_input(
+                "Row reference (optional)",
+                placeholder="e.g. Row 14",
+            )
+        with col_col:
+            column_reference = st.text_input(
+                "Column reference (optional)",
+                placeholder="e.g. materialDetail",
+            )
+
+        description = st.text_area(
+            "Description",
+            placeholder="Describe the issue clearly. What happened? What did you expect?",
+            height=130,
+        )
+
+        expected_correction = st.text_area(
+            "Expected correction (optional)",
+            placeholder="If you know the correct translation or fix, write it here.",
+            height=80,
+        )
+
+        submitted = st.form_submit_button("Send Report", use_container_width=True, type="primary")
+
+    if submitted:
+        if not description.strip():
+            st.error("Please add a description before submitting.")
+            return
+
+        from datetime import datetime as _dt
+        report = {
+            "user_email":          user_email,
+            "user_role":           user_role,
+            "category":            category,
+            "severity":            severity,
+            "target_language":     target_language,
+            "filename":            filename.strip(),
+            "row_reference":       row_reference.strip(),
+            "column_reference":    column_reference.strip(),
+            "description":         description.strip(),
+            "expected_correction": expected_correction.strip(),
+            "created_at":          _dt.now().isoformat(timespec="seconds"),
+        }
+
+        db_save_issue_report(report)
+        email_sent = _send_issue_report_email(report)
+
+        if email_sent:
+            st.success("Thank you. Your report has been sent to the admin.")
+        else:
+            st.success("Report saved. Email notification is not configured — the admin will review it in the dashboard.")
+
+
+# =============================================================================
+# ADMIN ISSUE REPORTS — admin-only dashboard
+# =============================================================================
+
+_SEVERITY_BADGE: dict[str, str] = {
+    "Critical": "background:#FEE2E2;color:#991B1B;border:1px solid #FECACA;",
+    "High":     "background:#FEF3C7;color:#92400E;border:1px solid #FDE68A;",
+    "Medium":   "background:#DBEAFE;color:#1E40AF;border:1px solid #BFDBFE;",
+    "Low":      "background:#F0FDF4;color:#166534;border:1px solid #BBF7D0;",
+}
+
+_STATUS_BADGE: dict[str, str] = {
+    "open":        "background:#FEE2E2;color:#991B1B;border:1px solid #FECACA;",
+    "in progress": "background:#FEF3C7;color:#92400E;border:1px solid #FDE68A;",
+    "resolved":    "background:#DCFCE7;color:#166534;border:1px solid #BBF7D0;",
+    "ignored":     "background:#F1F5F9;color:#64748B;border:1px solid #E2E8F0;",
+}
+
+
+def admin_issue_reports_page():
+    if st.session_state.get("user_role") != "admin":
+        st.error("Access restricted to administrators.")
+        return
+
+    render_page_header("Issue Reports", "Bug reports and translation quality issues from users.")
+
+    counts = db_get_issue_report_counts()
+    total  = sum(counts.values())
+    open_  = counts.get("open", 0)
+    in_progress = counts.get("in progress", 0)
+    resolved    = counts.get("resolved", 0)
+    ignored     = counts.get("ignored", 0)
+
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Total", total)
+    c2.metric("Open", open_)
+    c3.metric("In progress", in_progress)
+    c4.metric("Resolved", resolved)
+    c5.metric("Ignored", ignored)
+
+    st.markdown("---")
+    st.markdown('<div class="section-label">Filters</div>', unsafe_allow_html=True)
+
+    fc1, fc2, fc3, fc4 = st.columns(4)
+    with fc1:
+        f_status = st.selectbox("Status", ["All"] + _ISSUE_STATUSES, key="ir_f_status")
+    with fc2:
+        f_severity = st.selectbox("Severity", ["All"] + _ISSUE_SEVERITIES, key="ir_f_severity")
+    with fc3:
+        f_category = st.selectbox("Category", ["All"] + _ISSUE_CATEGORIES, key="ir_f_category")
+    with fc4:
+        f_lang = st.selectbox("Language", ["All"] + _ISSUE_LANGUAGES, key="ir_f_lang")
+
+    reports = db_load_issue_reports(
+        status_filter=f_status,
+        severity_filter=f_severity,
+        category_filter=f_category,
+        lang_filter=f_lang,
+    )
+
+    st.markdown(f'<div class="section-label" style="margin-top:16px;">Reports — {len(reports)} found</div>', unsafe_allow_html=True)
+
+    if not reports:
+        st.markdown("""
+        <div class="alert alert-info">
+            <span class="alert-icon">ℹ</span>
+            <span>No reports match the current filters.</span>
+        </div>
+        """, unsafe_allow_html=True)
+        return
+
+    for rep in reports:
+        sev   = rep.get("severity", "Medium")
+        stat  = rep.get("status", "open")
+        sev_style  = _SEVERITY_BADGE.get(sev,  "background:#F1F5F9;color:#334155;")
+        stat_style = _STATUS_BADGE.get(stat, "background:#F1F5F9;color:#334155;")
+
+        with st.expander(
+            f"[{sev}] {rep.get('category','?')}  ·  {rep.get('user_email','?')}  ·  {rep.get('created_at','')[:16]}",
+            expanded=False,
+        ):
+            m1, m2, m3 = st.columns(3)
+            m1.markdown(
+                f'<span style="font-size:11px;font-weight:600;padding:2px 8px;border-radius:10px;{sev_style}">{sev}</span>',
+                unsafe_allow_html=True,
+            )
+            m2.markdown(
+                f'<span style="font-size:11px;font-weight:600;padding:2px 8px;border-radius:10px;{stat_style}">{stat}</span>',
+                unsafe_allow_html=True,
+            )
+            m3.write("")
+
+            info_rows = [
+                ("Reporter",        rep.get("user_email", "—")),
+                ("Role",            rep.get("user_role", "—")),
+                ("Category",        rep.get("category", "—")),
+                ("Target language", rep.get("target_language", "—")),
+                ("File",            rep.get("filename", "—") or "—"),
+                ("Row",             rep.get("row_reference", "—") or "—"),
+                ("Column",          rep.get("column_reference", "—") or "—"),
+                ("Submitted",       rep.get("created_at", "—")),
+            ]
+            for label, val in info_rows:
+                st.markdown(
+                    f'<div style="display:flex;gap:12px;font-size:13px;padding:2px 0;">'
+                    f'<span style="min-width:130px;color:#64748B;font-weight:500;">{label}</span>'
+                    f'<span style="color:#0F172A;">{val}</span></div>',
+                    unsafe_allow_html=True,
+                )
+
+            st.markdown("**Description**")
+            st.markdown(
+                f'<div style="background:#F8FAFC;border:1px solid #E2E8F0;border-radius:6px;'
+                f'padding:10px 14px;font-size:13px;color:#334155;white-space:pre-wrap;">'
+                f'{rep.get("description","")}</div>',
+                unsafe_allow_html=True,
+            )
+
+            correction = rep.get("expected_correction", "").strip()
+            if correction:
+                st.markdown("**Expected correction**")
+                st.markdown(
+                    f'<div style="background:#F0FDF4;border:1px solid #BBF7D0;border-radius:6px;'
+                    f'padding:10px 14px;font-size:13px;color:#166534;white-space:pre-wrap;">'
+                    f'{correction}</div>',
+                    unsafe_allow_html=True,
+                )
+
+            st.markdown("**Update status**")
+            new_status = st.selectbox(
+                "New status",
+                _ISSUE_STATUSES,
+                index=_ISSUE_STATUSES.index(stat) if stat in _ISSUE_STATUSES else 0,
+                key=f"status_sel_{rep['id']}",
+                label_visibility="collapsed",
+            )
+            if st.button("Save status", key=f"status_btn_{rep['id']}"):
+                db_update_issue_report_status(rep["id"], new_status)
+                st.success(f"Status updated to '{new_status}'.")
+                st.rerun()
 
 
 # =============================================================================
@@ -6294,6 +6652,10 @@ def main():
         glossary_page()
     elif page == "Translation Memory":
         translation_memory_page()
+    elif page == "Report an Issue":
+        report_issue_page()
+    elif page == "Issue Reports":
+        admin_issue_reports_page()
 
     render_footer()
 
