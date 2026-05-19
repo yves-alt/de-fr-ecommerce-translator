@@ -459,13 +459,67 @@ Column headers are matched via a two-tier fuzzy classifier (exact alias → subs
 
 ---
 
+## Jira Integration
+
+The platform includes an optional Jira workflow integration that automates the international content team's translation ticket process.
+
+### What it does
+
+| Step | Manual workflow | With Jira Integration |
+|------|-----------------|----------------------|
+| Find ticket | Open Jira, search manually | Search by JQL in the app |
+| Get file | Download Excel from ticket | Click "Download and translate" |
+| Translate | CAT tool / external AI | Existing AI pipeline (unchanged) |
+| Upload results | Attach files to ticket manually | Click "Upload XLSX" / "Upload CSV" / "Upload both" |
+| Comment | Write comment manually | Auto-generated comment (optional) |
+| Status change | Change ticket status manually | Apply transition from dropdown (optional) |
+
+### Setup
+
+1. Get a Jira API token at [id.atlassian.com/manage-profile/security/api-tokens](https://id.atlassian.com/manage-profile/security/api-tokens)
+
+2. Add credentials to `.env` (local) or Streamlit Secrets (cloud):
+
+```env
+JIRA_BASE_URL=https://your-company.atlassian.net
+JIRA_EMAIL=your-email@home24.de
+JIRA_API_TOKEN=your-api-token-here
+
+# Optional: default JQL query
+JIRA_TRANSLATION_JQL=project = LOCALIZATION AND status = 'To Do' ORDER BY created DESC
+```
+
+### Workflow
+
+1. Go to **Jira Tickets** in the sidebar (Admin or Standard User only — Guest has no access)
+2. Enter a JQL query and click **Search**
+3. Select a ticket from the results table
+4. Select the Excel attachment to translate
+5. Click **Download and translate** — the file is downloaded and the Translator page opens automatically
+6. Translate as normal (French or Dutch)
+7. After translation, scroll down to **Upload to Jira**:
+   - Click **Upload XLSX**, **Upload CSV**, or **Upload both**
+   - Optionally check "Add Jira comment after upload"
+   - Optionally apply a status transition (e.g. In Progress → Ready for SAP Upload)
+
+### Safety rules
+
+- No automatic file uploads or ticket changes — every action requires an explicit button click
+- Tickets are never closed automatically
+- The Jira API token is never exposed in the UI or logs
+- Guest accounts cannot access the Jira integration
+- Downloaded files are held in memory only — never written to disk
+
+---
+
 ## Project Structure
 
 ```
 de-fr-ecommerce-translator/
-├── app.py                           # Main Streamlit application (~5 600 lines)
+├── app.py                           # Main Streamlit application
 ├── intelligence.py                  # Translation intelligence engine (consistency, furniture terms, glossary auto-learn)
-├── database.py                      # SQLite backend (history, TM, glossary, migrations)
+├── database.py                      # SQLite backend (history, TM, glossary, Jira metadata, migrations)
+├── jira_client.py                   # Jira REST API client (v3)
 ├── glossary.json                    # 166+ DE→FR furniture/e-commerce terms
 ├── requirements.txt                 # Python dependencies
 ├── .env.example                     # Local config template (no real values)

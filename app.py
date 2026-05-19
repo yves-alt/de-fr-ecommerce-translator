@@ -60,6 +60,8 @@ from database import (
     db_load_issue_reports,
     db_update_issue_report_status,
     db_get_issue_report_counts,
+    db_update_jira_metadata,
+    db_get_jira_stats,
 )
 from intelligence import (
     normalize_text,
@@ -85,6 +87,37 @@ from intelligence import (
 )
 
 load_dotenv()
+
+try:
+    from jira_client import get_jira_client, jira_configured
+    _JIRA_AVAILABLE = True
+except ImportError:
+    _JIRA_AVAILABLE = False
+
+    def get_jira_client():  # type: ignore[misc]
+        return None, "jira_client module not installed."
+
+    def jira_configured() -> bool:  # type: ignore[misc]
+        return False
+
+
+class _JiraFileProxy:
+    """
+    Minimal proxy that mimics st.file_uploader's result interface.
+    Lets Jira-downloaded Excel bytes flow through the existing upload pipeline
+    without any changes to the detection or translation logic.
+    """
+
+    def __init__(self, name: str, data: bytes) -> None:
+        self.name = name
+        self.size = len(data)
+        self._data = data
+
+    def getvalue(self) -> bytes:
+        return self._data
+
+    def read(self) -> bytes:
+        return self._data
 
 
 # =============================================================================
@@ -2008,6 +2041,272 @@ def render_column_report(classification: dict):
                 )
 
 
+_EXCEL_EXTENSIONS = (".xlsx", ".xls", ".xlsm", ".xlsb")
+
+
+def jira_tickets_page() -> None:
+    role = st.session_state.get("user_role", "")
+    if role == "guest":
+        st.markdown(
+            '<div class="alert alert-warn">'
+            '<span class="alert-icon">⚠</span>'
+            '<span>Jira integration is not available for Guest accounts.</span>'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+        return
+
+    render_page_header("Jira Tickets", "Search tickets · download source files · upload translations")
+
+    # ── Connection status ─────────────────────────────────────────────────────
+    _conn_key = "_jira_conn_status"
+    if st.button("Test connection", key="jira_test_conn_btn"):
+        st.session_state.pop(_conn_key, None)
+
+    if _conn_key not in st.session_state:
+        if not jira_configured():
+            st.session_state[_conn_key] = {
+                "ok":    False,
+                "name":  "",
+                "email": "",
+                "error": (
+                    "Jira credentials not configured. "
+                    "Add JIRA_BASE_URL, JIRA_EMAIL, JIRA_API_TOKEN "
+                    "to your Streamlit secrets or .env file."
+                ),
+            }
+        else:
+            _jc, _jerr = get_jira_client()
+            if _jc:
+                st.session_state[_conn_key] = _jc.test_connection()
+            else:
+                st.session_state[_conn_key] = {
+                    "ok": False, "name": "", "email": "", "error": _jerr
+                }
+
+    _conn = st.session_state[_conn_key]
+    if _conn["ok"]:
+        st.markdown(
+            f'<div class="alert alert-info">'
+            f'<span class="alert-icon">✓</span>'
+            f'<span>Connected as <strong>{_conn["name"]}</strong> '
+            f'({_conn["email"]})</span>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            f'<div class="alert alert-warn">'
+            f'<span class="alert-icon">⚠</span>'
+            f'<span><strong>Not connected:</strong> {_conn["error"]}</span>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+        with st.expander("Setup instructions", expanded=True):
+            st.markdown("""
+**Local development** — add to `.env`:
+```
+JIRA_BASE_URL=https://your-company.atlassian.net
+JIRA_EMAIL=your-email@home24.de
+JIRA_API_TOKEN=your-api-token-here
+```
+**Streamlit Cloud** — add to Secrets panel:
+```toml
+JIRA_BASE_URL = "https://your-company.atlassian.net"
+JIRA_EMAIL    = "your-email@home24.de"
+JIRA_API_TOKEN = "your-api-token-here"
+```
+Get your API token at: https://id.atlassian.com/manage-profile/security/api-tokens
+            """)
+        return
+
+    st.markdown("---")
+
+    # ── JQL search ───────────────────────────────────────────────────────────
+    st.markdown('<div class="section-label">Search tickets</div>', unsafe_allow_html=True)
+
+    _default_jql = _get_secret(
+        "JIRA_TRANSLATION_JQL",
+        "project = LOCALIZATION AND status = 'To Do' ORDER BY created DESC",
+    )
+    _jql_input = st.text_input(
+        "JQL query:",
+        value=st.session_state.get("_jira_jql_saved", _default_jql),
+        key="jira_jql_input",
+        help="Standard Jira Query Language. Example: project = XYZ AND summary ~ 'translation'",
+    )
+
+    _search_col, _clear_col = st.columns([3, 1])
+    with _search_col:
+        _do_search = st.button("Search", key="jira_search_btn", use_container_width=True)
+    with _clear_col:
+        if st.button("Clear results", key="jira_clear_results_btn", use_container_width=True):
+            st.session_state.pop("_jira_search_results", None)
+            st.rerun()
+
+    if _do_search:
+        st.session_state["_jira_jql_saved"] = _jql_input
+        st.session_state.pop("_jira_search_results", None)
+        _jc2, _jerr2 = get_jira_client()
+        if not _jc2:
+            st.error(f"Connection failed: {_jerr2}")
+        else:
+            with st.spinner("Searching Jira..."):
+                st.session_state["_jira_search_results"] = _jc2.search_issues(
+                    _jql_input, max_results=50
+                )
+
+    # ── Results table ─────────────────────────────────────────────────────────
+    _results = st.session_state.get("_jira_search_results")
+    if _results is None:
+        st.info("Enter a JQL query above and click Search.")
+        return
+
+    if _results.get("error"):
+        st.error(f"Search failed: {_results['error']}")
+        return
+
+    _issues = _results.get("issues", [])
+    if not _issues:
+        st.info("No tickets found for this query.")
+        return
+
+    import pandas as _pd_jira
+    _total = _results.get("total", len(_issues))
+    st.markdown(
+        f'<div class="alert alert-info">'
+        f'<span class="alert-icon">ℹ</span>'
+        f'<span>Showing {len(_issues)} of {_total} tickets</span>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+    _table_rows = [
+        {
+            "Key":         i["key"],
+            "Summary":     i["summary"][:80] + ("…" if len(i["summary"]) > 80 else ""),
+            "Status":      i["status"],
+            "Assignee":    i["assignee"],
+            "Updated":     i["updated"],
+            "Attachments": i["attachment_count"],
+        }
+        for i in _issues
+    ]
+    st.dataframe(
+        _pd_jira.DataFrame(_table_rows),
+        hide_index=True,
+        use_container_width=True,
+    )
+
+    st.markdown("---")
+
+    # ── Ticket selector ───────────────────────────────────────────────────────
+    st.markdown('<div class="section-label">Select ticket</div>', unsafe_allow_html=True)
+
+    _ticket_keys = [i["key"] for i in _issues]
+    _selected_key = st.selectbox(
+        "Ticket:", _ticket_keys, key="jira_ticket_selector"
+    )
+    _selected_issue = next((i for i in _issues if i["key"] == _selected_key), None)
+
+    if not _selected_issue:
+        return
+
+    st.markdown(
+        f'<div class="alert alert-info">'
+        f'<span class="alert-icon">ℹ</span>'
+        f'<span><strong>{_selected_key}</strong>: {_selected_issue["summary"]}'
+        f' — Status: <strong>{_selected_issue["status"]}</strong>'
+        f' · Assignee: {_selected_issue["assignee"]}'
+        f'</span></div>',
+        unsafe_allow_html=True,
+    )
+
+    # ── Attachment list ───────────────────────────────────────────────────────
+    _all_atts  = _selected_issue.get("attachments", [])
+    _excel_atts = [
+        a for a in _all_atts
+        if a["filename"].lower().endswith(_EXCEL_EXTENSIONS)
+    ]
+    _other_atts = [a for a in _all_atts if a not in _excel_atts]
+
+    st.markdown('<div class="section-label">Attachments</div>', unsafe_allow_html=True)
+
+    if not _all_atts:
+        st.info("No attachments on this ticket.")
+        return
+
+    if _other_atts:
+        with st.expander(f"Non-Excel attachments ({len(_other_atts)})", expanded=False):
+            for _att in _other_atts:
+                _size_kb = round(_att["size"] / 1024, 1)
+                st.markdown(f"- `{_att['filename']}` ({_size_kb} KB)")
+
+    if not _excel_atts:
+        st.markdown(
+            '<div class="alert alert-warn">'
+            '<span class="alert-icon">⚠</span>'
+            '<span>No Excel attachments (.xlsx / .xls / .xlsm) found on this ticket.</span>'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+        return
+
+    _att_options    = [a["filename"] for a in _excel_atts]
+    _selected_att_fn = st.selectbox(
+        "Excel attachment to translate:", _att_options, key="jira_att_selector"
+    )
+    _selected_att = next((a for a in _excel_atts if a["filename"] == _selected_att_fn), None)
+
+    if _selected_att:
+        _size_kb = round(_selected_att["size"] / 1024, 1)
+        st.markdown(
+            f'<div class="alert alert-info">'
+            f'<span class="alert-icon">📄</span>'
+            f'<span><strong>{_selected_att["filename"]}</strong>'
+            f' — {_size_kb} KB · uploaded {_selected_att["created"]}</span>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+
+    st.markdown("---")
+
+    # ── Download and route to Translator ─────────────────────────────────────
+    if st.button(
+        f"⬇ Download and translate: {_selected_att_fn}",
+        key="jira_dl_translate_btn",
+        use_container_width=True,
+    ):
+        _jc3, _jerr3 = get_jira_client()
+        if not _jc3:
+            st.error(f"Connection failed: {_jerr3}")
+        elif _selected_att:
+            with st.spinner(f"Downloading {_selected_att_fn}..."):
+                _file_bytes = _jc3.download_attachment(_selected_att["content_url"])
+            if _file_bytes is None:
+                st.error(
+                    "Download failed. Check that your API token has attachment read access."
+                )
+            else:
+                # Store in session_state — translator_page picks it up as uploaded_file
+                st.session_state["_jira_upload"]               = _JiraFileProxy(
+                    _selected_att_fn, _file_bytes
+                )
+                st.session_state["_jira_ticket_key"]           = _selected_key
+                st.session_state["_jira_ticket_summary"]       = _selected_issue["summary"]
+                st.session_state["_jira_attachment_id"]        = _selected_att["id"]
+                st.session_state["_jira_attachment_filename"]  = _selected_att_fn
+                # Clear any stale translation results
+                st.session_state.pop("_tr_result", None)
+                for _sk in [k for k in st.session_state if k.startswith("_sheet_")]:
+                    del st.session_state[_sk]
+                st.session_state["_tr_result_file"] = _selected_att_fn
+                # Navigate to Translator
+                st.session_state["nav_radio"] = "Translator"
+                st.success(f"Downloaded {_selected_att_fn}. Navigating to Translator...")
+                st.rerun()
+
+
 def render_sidebar() -> str:
     with st.sidebar:
         target_language = st.session_state.get("target_language", "French")
@@ -2046,6 +2345,8 @@ def render_sidebar() -> str:
 
         role = st.session_state.get("user_role", "")
         nav_options = ["Translator", "Translation History", "Analytics", "Glossary", "Translation Memory"]
+        if role in ("admin", "standard_user"):
+            nav_options.append("Jira Tickets")
         if role == "admin":
             nav_options.append("Admin Dashboard")
             nav_options.append("Issue Reports")
@@ -5217,11 +5518,32 @@ def translator_page():
         """, unsafe_allow_html=True)
         st.stop()
 
-    uploaded_file = st.file_uploader(
-        "Upload your German Excel file",
-        type=["xlsx"],
-        label_visibility="visible",
-    )
+    # Jira-sourced file takes priority over manual upload
+    _jira_src = st.session_state.get("_jira_upload")
+    if _jira_src is not None:
+        _jk_banner = st.session_state.get("_jira_ticket_key", "")
+        _jk_summ   = st.session_state.get("_jira_ticket_summary", "")
+        st.markdown(
+            f'<div class="alert alert-info">'
+            f'<span class="alert-icon">⬇</span>'
+            f'<span>File from Jira <strong>{_jk_banner}</strong>'
+            f'{": " + _jk_summ if _jk_summ else ""}'
+            f' — <strong>{_jira_src.name}</strong></span>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+        uploaded_file = _jira_src
+        if st.button("Use a different file instead", key="jira_clear_src_btn"):
+            for _jk in ["_jira_upload", "_jira_ticket_key", "_jira_ticket_summary",
+                        "_jira_attachment_id", "_jira_attachment_filename"]:
+                st.session_state.pop(_jk, None)
+            st.rerun()
+    else:
+        uploaded_file = st.file_uploader(
+            "Upload your German Excel file",
+            type=["xlsx"],
+            label_visibility="visible",
+        )
 
     if uploaded_file is not None:
         # Clear stale results when the user switches to a different file
@@ -5584,6 +5906,7 @@ def translator_page():
                 # Store everything in session_state so results persist across reruns
                 # (e.g. when a download button is clicked)
                 st.session_state["_tr_result"] = {
+                    "job_id":             job_id,
                     "stats":              stats,
                     "excel_data":         _excel_data,
                     "csv_bytes":          _csv_bytes,
@@ -5832,6 +6155,167 @@ def translator_page():
                             st.session_state["_tr_result"]["csv_filename"]    = _csv_f2
                             st.session_state["_tr_result"]["csv_removed_col"] = _csv_rc2
                             st.rerun()
+
+            # ── Jira upload section (only when file came from Jira) ───────────
+            _jira_tk   = st.session_state.get("_jira_ticket_key", "")
+            _jira_summ = st.session_state.get("_jira_ticket_summary", "")
+            if _jira_tk:
+                st.markdown("---")
+                st.markdown(
+                    '<div class="section-label">Upload to Jira</div>',
+                    unsafe_allow_html=True,
+                )
+                st.markdown(
+                    f'<div class="alert alert-info">'
+                    f'<span class="alert-icon">⬆</span>'
+                    f'<span>Ticket: <strong>{_jira_tk}</strong>'
+                    f'{" — " + _jira_summ if _jira_summ else ""}'
+                    f'</span></div>',
+                    unsafe_allow_html=True,
+                )
+                _add_jira_comment = st.checkbox(
+                    "Add Jira comment after upload",
+                    value=True,
+                    key="jira_add_comment_cb",
+                )
+                _target_lang_j = st.session_state.get("target_language", "French")
+                _lang_name_j   = "French" if _target_lang_j == "French" else "Dutch"
+
+                _jcol1, _jcol2, _jcol3 = st.columns(3)
+
+                def _do_jira_upload(
+                    upload_xlsx: bool,
+                    upload_csv: bool,
+                    excel_data: bytes,
+                    csv_bytes,
+                    output_filename: str,
+                    csv_filename: str,
+                    ticket_key: str,
+                    ticket_summary: str,
+                    lang_name: str,
+                    add_comment: bool,
+                ) -> None:
+                    _jc, _jerr = get_jira_client()
+                    if not _jc:
+                        st.error(f"Jira connection failed: {_jerr}")
+                        return
+                    _uploaded_files: list[str] = []
+                    if upload_xlsx and excel_data:
+                        _res = _jc.upload_attachment(ticket_key, output_filename, excel_data)
+                        if _res["ok"]:
+                            _uploaded_files.append(output_filename)
+                        else:
+                            st.error(f"XLSX upload failed: {_res['error']}")
+                    if upload_csv and csv_bytes:
+                        _res = _jc.upload_attachment(ticket_key, csv_filename, csv_bytes)
+                        if _res["ok"]:
+                            _uploaded_files.append(csv_filename)
+                        else:
+                            st.error(f"CSV upload failed: {_res['error']}")
+                    if _uploaded_files:
+                        st.success(f"Uploaded to {ticket_key}: {', '.join(_uploaded_files)}")
+                        _now_j = datetime.now().isoformat(timespec="seconds")
+                        _comment_ok = False
+                        if add_comment:
+                            _comment_text = (
+                                f"AI localization files generated and attached.\n"
+                                f"\n"
+                                f"Target language: {lang_name}\n"
+                                f"Generated files:\n"
+                                + "\n".join(f"- {fn}" for fn in _uploaded_files)
+                                + "\n\nGenerated by Home24 AI Localization Platform."
+                            )
+                            _cr = _jc.add_comment(ticket_key, _comment_text)
+                            if _cr["ok"]:
+                                st.success("Comment added to Jira ticket.")
+                                _comment_ok = True
+                            else:
+                                st.warning(f"Comment failed: {_cr['error']}")
+                        _r_id = st.session_state.get("_tr_result", {}).get("job_id", "")
+                        if _r_id:
+                            db_update_jira_metadata(
+                                _r_id,
+                                jira_ticket_key=ticket_key,
+                                jira_ticket_summary=ticket_summary,
+                                jira_attachment_filename=st.session_state.get(
+                                    "_jira_attachment_filename", ""
+                                ),
+                                jira_attachment_id=st.session_state.get(
+                                    "_jira_attachment_id", ""
+                                ),
+                                uploaded_to_jira=1,
+                                jira_upload_time=_now_j,
+                                jira_comment_added=1 if _comment_ok else 0,
+                            )
+
+                with _jcol1:
+                    if st.button(
+                        "⬆ Upload XLSX", key="jira_ul_xlsx", use_container_width=True
+                    ):
+                        _do_jira_upload(
+                            True, False, _ed, _cb, _ofn, _cf,
+                            _jira_tk, _jira_summ, _lang_name_j, _add_jira_comment,
+                        )
+                with _jcol2:
+                    if st.button(
+                        "⬆ Upload CSV", key="jira_ul_csv",
+                        disabled=_cb is None, use_container_width=True,
+                    ):
+                        _do_jira_upload(
+                            False, True, _ed, _cb, _ofn, _cf,
+                            _jira_tk, _jira_summ, _lang_name_j, _add_jira_comment,
+                        )
+                with _jcol3:
+                    if st.button(
+                        "⬆ Upload both", key="jira_ul_both",
+                        disabled=_cb is None, use_container_width=True,
+                    ):
+                        _do_jira_upload(
+                            True, True, _ed, _cb, _ofn, _cf,
+                            _jira_tk, _jira_summ, _lang_name_j, _add_jira_comment,
+                        )
+
+                # ── Optional status transition ────────────────────────────────
+                if st.checkbox(
+                    "Apply status transition",
+                    value=False,
+                    key="jira_trans_cb",
+                ):
+                    _jc_t, _jerr_t = get_jira_client()
+                    if not _jc_t:
+                        st.warning(f"Cannot load transitions: {_jerr_t}")
+                    else:
+                        _trans_list = _jc_t.get_transitions(_jira_tk)
+                        if _trans_list:
+                            _t_names     = [t["name"] for t in _trans_list]
+                            _chosen_t_nm = st.selectbox(
+                                "Transition to:", _t_names, key="jira_trans_sel"
+                            )
+                            _chosen_t_id = next(
+                                (t["id"] for t in _trans_list if t["name"] == _chosen_t_nm),
+                                None,
+                            )
+                            if st.button(
+                                f"Apply: {_chosen_t_nm}", key="jira_apply_trans_btn"
+                            ):
+                                if _chosen_t_id:
+                                    _tr_res = _jc_t.apply_transition(_jira_tk, _chosen_t_id)
+                                    if _tr_res["ok"]:
+                                        st.success(
+                                            f"Ticket {_jira_tk} transitioned to: {_chosen_t_nm}"
+                                        )
+                                        _r_id_t = st.session_state.get(
+                                            "_tr_result", {}
+                                        ).get("job_id", "")
+                                        if _r_id_t:
+                                            db_update_jira_metadata(
+                                                _r_id_t,
+                                                jira_transition_applied=_chosen_t_nm,
+                                            )
+                                    else:
+                                        st.error(f"Transition failed: {_tr_res['error']}")
+                        else:
+                            st.info("No transitions available for this ticket.")
 
 
 # =============================================================================
@@ -6845,6 +7329,8 @@ def main():
         report_issue_page()
     elif page == "Issue Reports":
         admin_issue_reports_page()
+    elif page == "Jira Tickets":
+        jira_tickets_page()
 
     render_footer()
 

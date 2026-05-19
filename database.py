@@ -57,7 +57,15 @@ CREATE TABLE IF NOT EXISTS translation_jobs (
     csv_exported              INTEGER DEFAULT 0,
     csv_removed_column        TEXT DEFAULT '',
     csv_delimiter             TEXT DEFAULT ';',
-    csv_encoding              TEXT DEFAULT 'utf-8-sig'
+    csv_encoding              TEXT DEFAULT 'utf-8-sig',
+    jira_ticket_key           TEXT DEFAULT '',
+    jira_ticket_summary       TEXT DEFAULT '',
+    jira_attachment_filename  TEXT DEFAULT '',
+    jira_attachment_id        TEXT DEFAULT '',
+    uploaded_to_jira          INTEGER DEFAULT 0,
+    jira_upload_time          TEXT DEFAULT '',
+    jira_comment_added        INTEGER DEFAULT 0,
+    jira_transition_applied   TEXT DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS review_warnings (
@@ -194,6 +202,7 @@ def init_db(
     _ensure_v5_migration()
     _ensure_v6_migration()
     _ensure_v7_migration()
+    _ensure_v8_migration()
     _migrate_json_if_needed()
     if default_glossary:
         _seed_glossary_if_empty(default_glossary, "French")
@@ -1437,3 +1446,114 @@ def db_get_issue_report_counts() -> dict:
         return {r["status"]: r["cnt"] for r in rows}
     except Exception:
         return {}
+
+
+# =============================================================================
+# V8 MIGRATION — Jira integration columns
+# =============================================================================
+
+def _ensure_v8_migration() -> None:
+    """Add Jira tracking columns to translation_jobs."""
+    if _get_schema_version() >= 8:
+        return
+    try:
+        new_cols = [
+            ("jira_ticket_key",          "TEXT DEFAULT ''"),
+            ("jira_ticket_summary",      "TEXT DEFAULT ''"),
+            ("jira_attachment_filename", "TEXT DEFAULT ''"),
+            ("jira_attachment_id",       "TEXT DEFAULT ''"),
+            ("uploaded_to_jira",         "INTEGER DEFAULT 0"),
+            ("jira_upload_time",         "TEXT DEFAULT ''"),
+            ("jira_comment_added",       "INTEGER DEFAULT 0"),
+            ("jira_transition_applied",  "TEXT DEFAULT ''"),
+        ]
+        with _db() as conn:
+            existing = _table_columns(conn, "translation_jobs")
+            for col_name, col_def in new_cols:
+                if col_name not in existing:
+                    conn.execute(
+                        f"ALTER TABLE translation_jobs ADD COLUMN {col_name} {col_def}"
+                    )
+        _set_schema_version(8)
+    except Exception:
+        pass
+
+
+# =============================================================================
+# JIRA METADATA — CRUD
+# =============================================================================
+
+def db_update_jira_metadata(
+    job_id: str,
+    jira_ticket_key: str = "",
+    jira_ticket_summary: str = "",
+    jira_attachment_filename: str = "",
+    jira_attachment_id: str = "",
+    uploaded_to_jira: int = 0,
+    jira_upload_time: str = "",
+    jira_comment_added: int = 0,
+    jira_transition_applied: str = "",
+) -> None:
+    """Persist Jira workflow metadata for a translation job."""
+    try:
+        with _db() as conn:
+            conn.execute(
+                """
+                UPDATE translation_jobs SET
+                    jira_ticket_key          = COALESCE(NULLIF(?, ''), jira_ticket_key),
+                    jira_ticket_summary      = COALESCE(NULLIF(?, ''), jira_ticket_summary),
+                    jira_attachment_filename = COALESCE(NULLIF(?, ''), jira_attachment_filename),
+                    jira_attachment_id       = COALESCE(NULLIF(?, ''), jira_attachment_id),
+                    uploaded_to_jira         = MAX(uploaded_to_jira, ?),
+                    jira_upload_time         = COALESCE(NULLIF(?, ''), jira_upload_time),
+                    jira_comment_added       = MAX(jira_comment_added, ?),
+                    jira_transition_applied  = COALESCE(NULLIF(?, ''), jira_transition_applied)
+                WHERE id = ?
+                """,
+                (
+                    jira_ticket_key,
+                    jira_ticket_summary,
+                    jira_attachment_filename,
+                    jira_attachment_id,
+                    uploaded_to_jira,
+                    jira_upload_time,
+                    jira_comment_added,
+                    jira_transition_applied,
+                    job_id,
+                ),
+            )
+    except Exception:
+        pass
+
+
+def db_get_jira_stats() -> dict:
+    """Return Jira workflow statistics for the admin dashboard."""
+    try:
+        with _db() as conn:
+            total_from_jira = conn.execute(
+                "SELECT COUNT(*) FROM translation_jobs WHERE jira_ticket_key != ''"
+            ).fetchone()[0]
+            total_uploaded = conn.execute(
+                "SELECT COUNT(*) FROM translation_jobs WHERE uploaded_to_jira = 1"
+            ).fetchone()[0]
+            recent_rows = conn.execute(
+                """
+                SELECT jira_ticket_key, jira_ticket_summary,
+                       original_filename, output_filename,
+                       target_language, user_email,
+                       uploaded_to_jira, jira_upload_time,
+                       jira_comment_added, jira_transition_applied,
+                       datetime
+                FROM translation_jobs
+                WHERE jira_ticket_key != ''
+                ORDER BY datetime DESC
+                LIMIT 50
+                """
+            ).fetchall()
+        return {
+            "total_from_jira": total_from_jira,
+            "total_uploaded":  total_uploaded,
+            "recent":          [dict(r) for r in recent_rows],
+        }
+    except Exception:
+        return {"total_from_jira": 0, "total_uploaded": 0, "recent": []}
