@@ -58,6 +58,8 @@ from intelligence import (
     apply_furniture_terms,
     auto_learn_glossary_from_source,
     run_local_consistency_pass,
+    apply_french_semantic_normalization,
+    apply_french_typography_rules,
     FURNITURE_TERM_MAP_FR,
     FURNITURE_TERM_MAP_NL,
 )
@@ -2079,6 +2081,19 @@ def get_openai_client():
 # TRANSLATION FUNCTIONS
 # =============================================================================
 
+_FR_SHARED_RULES = (
+    "- All German words MUST be translated — zero German residue allowed\n"
+    "- French typography: always write a space before and after ':' (e.g. 'Structure : métal')\n"
+    "- Spaces around '/' in color/material combinations (e.g. 'Noir / Gris', 'Aluminium / Polyester')\n"
+    "- \"pulverbeschichtet\" → \"thermolaqué\" (NEVER 'revêtu de poudre' or 'revêtement de poudre')\n"
+    "- \"Geflecht\" / \"Polyrattan\" / \"Kunststoffgeflecht\" → \"résine tressée\"\n"
+    "- \"bestehend aus\" → \"composé de\", \"Set bestehend aus\" → \"Ensemble composé de\"\n"
+    "- Preserve <br> tags exactly — NEVER replace with semicolons\n"
+    "- Preserve numbers, dimensions and percentages exactly\n"
+    "- Write real home24.fr wording — not literal German structure"
+)
+
+
 def _build_system_prompt(canonical: str, glossary_block: str, target_language: str = "French") -> str:
     if target_language == "Dutch":
         return _build_nl_system_prompt(canonical, glossary_block)
@@ -2086,7 +2101,7 @@ def _build_system_prompt(canonical: str, glossary_block: str, target_language: s
     if canonical == "name":
         return (
             "You are a premium French copywriter for Home24 France furniture e-commerce.\n"
-            "Translate the German product name to natural, elegant French.\n\n"
+            "Translate the German product name to natural, elegant French — real home24.fr wording.\n\n"
             "STRICT rules:\n"
             "- Maximum 40 characters total\n"
             "- No commas, no brackets, no parentheses\n"
@@ -2101,6 +2116,18 @@ def _build_system_prompt(canonical: str, glossary_block: str, target_language: s
             "- \"Sofaelement\" → \"Module de canapé\"\n"
             "- \"Gartenstuhl\" → \"Chaise de jardin\"\n"
             "- \"Gartentisch\" → \"Table de jardin\"\n"
+            "- \"Chaiselongue\" / \"Chaise longue\" → ALWAYS two words: \"Chaise longue\"\n"
+            "- \"Fußhocker\" / \"Fusshocker\" in seating/lounge context → \"Repose-pieds\"\n"
+            "- \"Esstisch\" → \"Table\" (NOT 'table à manger' unless clearly a dining table category)\n"
+            "- Ausziehbar table → \"Table extensible\"\n"
+            "- \"Artisan Eiche Dekor\" / \"Eiche Artisan Dekor\" → \"Décor chêne artisan\"\n"
+            "- \"Eiche Dekor\" → \"Décor chêne\" (décor FIRST, then wood name)\n"
+            "- Colors: \"Schlamm\" / \"mud\" → \"argile\"; \"Terra\" (color) → \"Terracotta\"\n"
+            "- \"boue\" is FORBIDDEN in customer-facing copy — use \"argile\" or \"taupe\"\n"
+            "- Pluralise item names when source indicates multiple items:\n"
+            "  6-teilig / Set / Lot / x6 / 6 Stück → pluralise the item noun\n"
+            "  e.g. 6 plates → \"Assiettes de service\" not \"Assiette de service\"\n"
+            "  Do NOT pluralise model or collection names\n"
             "- Preserve model/collection names exactly (e.g. Vedene, Arin, Bocca, Level36)\n"
             "- Preserve dimensions and numbers exactly\n"
             "- Write elegant, commercial French — not literal word-for-word translation"
@@ -2112,17 +2139,55 @@ def _build_system_prompt(canonical: str, glossary_block: str, target_language: s
             "You are a premium French copywriter for Home24 France furniture e-commerce.\n"
             "Translate the German material description to natural, precise French.\n\n"
             "Rules:\n"
-            "- Preserve <br> tags exactly — NEVER replace them with semicolons\n"
-            "- NEVER use semicolons (;) to separate properties; use <br> instead\n"
-            "- All German words MUST be translated\n"
-            "- \"pulverbeschichtet\" → \"thermolaqué\" (NEVER \"revêtu par poudre\")\n"
-            "- \"Geflecht\" / \"Polyrattan\" / \"Kunststoffgeflecht\" → \"résine tressée\"\n"
-            "- \"Rattan\" → \"rotin\"\n"
+            + _FR_SHARED_RULES + "\n"
             "- \"Gestell\" / \"Tischgestell\" → \"piètement\" or \"structure\" per context\n"
-            "- \"Bezug\" → \"revêtement\" (NEVER \"housse\" for frame components)\n"
+            "- \"Bezug\" → \"revêtement\" (NEVER \"housse\" for frame/structure components)\n"
             "- \"Korpus\" → \"caisson\"\n"
             "- \"Untergestell\" → \"structure inférieure\"\n"
+            "- BHT / BxHxT / \"B x H x T\" → \"L x H x P\" (French dimension format)\n"
+            "  Example: \"BHT: 100 x 80 x 45 cm\" → \"L x H x P : 100 x 80 x 45 cm\"\n"
+            "- \"Artisan Eiche Dekor\" / \"Eiche Dekor\" → \"décor chêne artisan\" / \"décor chêne\"\n"
+            "  The word 'décor' always comes FIRST: 'décor chêne artisan' NOT 'chêne artisan décor'\n"
+            "- \"Grifflos\" → \"sans poignées\"\n"
+            "- \"autark\" (kitchen) → \"équipée\"\n"
             "- Use professional French furniture terminology"
+            f"{glossary_block}\n"
+            "Return ONLY the translated text, nothing else."
+        )
+    elif canonical == "colorDetail":
+        return (
+            "You are a premium French copywriter for Home24 France furniture e-commerce.\n"
+            "Translate the German color description to natural, attractive French.\n\n"
+            "Rules:\n"
+            "- All German words MUST be translated — zero German residue\n"
+            "- Spaces around '/' in color combinations: 'Noir / Gris' NOT 'Noir/Gris'\n"
+            "- French typography: space before and after ':'\n"
+            "- dunkelgrau → gris foncé, hellgrau → gris clair\n"
+            "- schwarz → noir, weiß → blanc, braun → brun, grau → gris\n"
+            "- \"Schlamm\" / \"Schlammfarbe\" / mud-like colors → \"argile\" (NEVER 'boue')\n"
+            "- \"Terra\" (color) → \"terracotta\"\n"
+            "- \"Sand\" → \"sable\", \"Ton\" (clay color) → \"argile\"\n"
+            "- \"Artisan Eiche\" → \"chêne artisan\"\n"
+            "- \"Artisan Eiche Dekor\" / \"Eiche Dekor\" → \"décor chêne artisan\" / \"décor chêne\"\n"
+            "  'décor' always comes FIRST in the phrase\n"
+            "- Preserve color codes and numbers exactly\n"
+            "- Write elegant, commercial color names — not literal German"
+            f"{glossary_block}\n"
+            "Return ONLY the translated text, nothing else."
+        )
+    elif canonical == "otherMeasurements":
+        return (
+            "You are a premium French copywriter for Home24 France furniture e-commerce.\n"
+            "Translate the German measurement/dimension text to natural French.\n\n"
+            "Rules:\n"
+            "- BHT / BxHxT / \"B x H x T\" → \"L x H x P\" (French standard)\n"
+            "  Example: \"BHT: 100 x 80 x 45 cm\" → \"L x H x P : 100 x 80 x 45 cm\"\n"
+            "  Example: \"Tisch (BxHxT): 180 x 75 x 100 cm\" → \"Table (L x H x P) : 180 x 75 x 100 cm\"\n"
+            "- French typography: ALWAYS a space before and after ':'\n"
+            "- Spaces around 'x' in dimensions: '100 x 80 x 45' NOT '100x80x45'\n"
+            "- Breite → largeur, Höhe → hauteur, Tiefe → profondeur, Länge → longueur\n"
+            "- Preserve ALL numbers, units and symbols exactly — do not change values\n"
+            "- Preserve <br> tags exactly"
             f"{glossary_block}\n"
             "Return ONLY the translated text, nothing else."
         )
@@ -2131,30 +2196,26 @@ def _build_system_prompt(canonical: str, glossary_block: str, target_language: s
             "You are a premium French copywriter for Home24 France furniture e-commerce.\n"
             "Translate the German delivery scope text to natural, elegant French.\n\n"
             "Rules:\n"
-            "- All German words MUST be translated — zero German residue\n"
-            "- \"Set bestehend aus\" → \"Ensemble composé de\"\n"
-            "- \"bestehend aus\" → \"composé de\"\n"
+            + _FR_SHARED_RULES + "\n"
             "- \"inkl.\" / \"inklusive\" → \"inclus(e)\"\n"
             "- \"ohne Dekoration\" → \"sans décoration\"\n"
-            "- Use natural French e-commerce phrasing — not literal German structure\n"
             "- Prefer \"composé de\" over \"contenant\" for set descriptions\n"
-            "- Preserve <br> tags exactly"
+            "- When item names indicate multiple pieces, pluralise naturally:\n"
+            "  e.g. '6 assiettes' not '6 assiette', 'Lot de 2 tables' not 'Lot de 2 table'\n"
+            "- \"assiettes à manger\" is FORBIDDEN — use \"assiettes\" or \"assiettes de service\""
             f"{glossary_block}\n"
             "Return ONLY the translated text, nothing else."
         )
     else:
         return (
             "You are a premium French copywriter for Home24 France furniture e-commerce.\n"
-            "Translate the German text to natural, elegant French.\n\n"
+            "Translate the German text to natural, elegant French — real home24.fr wording.\n\n"
             "Rules:\n"
-            "- All German words MUST be translated — zero German residue allowed\n"
-            "- Use natural French, not literal word-for-word translation\n"
-            "- \"pulverbeschichtet\" → \"thermolaqué\"\n"
-            "- \"Geflecht\" / \"Polyrattan\" → \"résine tressée\"\n"
-            "- \"bestehend aus\" → \"composé de\"\n"
-            "- \"ohne Dekoration\" → \"sans décoration\"\n"
-            "- Preserve <br> tags exactly as they appear\n"
-            "- Preserve numbers, dimensions and percentages exactly"
+            + _FR_SHARED_RULES + "\n"
+            "- BHT / BxHxT / 'B x H x T' → 'L x H x P'\n"
+            "- \"Artisan Eiche Dekor\" → \"décor chêne artisan\" ('décor' FIRST)\n"
+            "- Colors: 'Schlamm' / mud-like → 'argile' (NEVER 'boue')\n"
+            "- 'Chaiselongue' → 'chaise longue' (always two words)"
             f"{glossary_block}\n"
             "Return ONLY the translated text, nothing else."
         )
@@ -2591,6 +2652,12 @@ def fix_german_residue(
     locally_fixed = apply_furniture_terms(text, target_language)
     if locally_fixed != text:
         text = locally_fixed
+        if not detect_german_residue(text, target_language):
+            return text
+
+    # Step 1b: French semantic normalization (no API)
+    if target_language == "French":
+        text = apply_french_semantic_normalization(text)
         if not detect_german_residue(text, target_language):
             return text
 
@@ -4060,6 +4127,13 @@ def process_excel_with_progress(
                 cell.value = text
                 stats["residue_corrections"] += 1
 
+            # Step 1b: French semantic normalization (fixes literal German-pattern output)
+            if target_language == "French":
+                normalized = apply_french_semantic_normalization(text)
+                if normalized != text:
+                    text = normalized
+                    cell.value = text
+
             # Step 2: Quick residue scan — if clean, done
             detected = detect_german_residue(text, target_language)
             if not detected:
@@ -4160,9 +4234,11 @@ def process_excel_with_progress(
                 for col_header, (col_idx, canonical) in to_translate.items():
                     cell = worksheet.cell(row=row_num, column=col_idx)
                     if cell.value and str(cell.value).strip():
-                        cell.value = apply_french_capitalization_rules(
-                            str(cell.value), canonical, glossary
-                        )
+                        val = str(cell.value)
+                        val = apply_french_semantic_normalization(val)
+                        val = apply_french_capitalization_rules(val, canonical, glossary)
+                        val = apply_french_typography_rules(val)
+                        cell.value = val
         elif target_language == "Dutch":
             for row_num in range(data_start_row, worksheet.max_row + 1):
                 for col_header, (col_idx, canonical) in to_translate.items():

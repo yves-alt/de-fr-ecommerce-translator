@@ -470,61 +470,89 @@ def extract_glossary_suggestions(
 # =============================================================================
 
 # Curated DE→FR furniture term map — applied as fast local pass before/after AI
+# Longest entries first within each section so multi-word phrases replace before substrings.
 FURNITURE_TERM_MAP_FR: dict[str, str] = {
+    # Dimension abbreviations (German → French standard)
+    "Breite x Höhe x Tiefe":          "largeur x hauteur x profondeur",
+    "B x H x T":                      "L x H x P",
+    "BxHxT":                          "L x H x P",
+    "BHT":                            "L x H x P",
+    # Décor / wood finish — compound forms first
+    "Artisan Eiche Dekor":            "décor chêne artisan",
+    "Artisan-Eiche-Dekor":            "décor chêne artisan",
+    "Eiche Artisan Dekor":            "décor chêne artisan",
+    "Artisan Dekor Eiche":            "décor chêne artisan",
+    "Eiche Dekor":                    "décor chêne",
+    "Dekor Eiche":                    "décor chêne",
+    # Seating accessories
+    "Fußhocker":                      "repose-pieds",
+    "Fusshocker":                     "repose-pieds",
+    "Chaiselongue":                   "chaise longue",
+    "chaiselongue":                   "chaise longue",
+    # Handles / kitchen
+    "Grifflos":                       "sans poignées",
+    "grifflos":                       "sans poignées",
+    "autark":                         "équipée",
+    # Drawer runner (French)
+    "Unterflurauszug":                "tiroir sous-plancher",
+    "Unterflurführung":               "tiroir sous-plancher",
+    "Unterflur-Auszug":               "tiroir sous-plancher",
+    # Colors
+    "Schlamm":                        "argile",
     # Outdoor / garden sets
-    "Gartenessgruppe":    "ensemble de jardin",
-    "Gartengruppe":       "salon de jardin",
-    "Gartenset":          "salon de jardin",
-    "Loungeset":          "salon de jardin",
-    "Loungesofa":         "canapé de jardin",
-    "Loungesessel":       "fauteuil de jardin",
-    "Terrassenset":       "ensemble de terrasse",
-    "Sofaelement":        "module de canapé",
-    "Sofamodul":          "module de canapé",
-    "Gartenstuhl":        "chaise de jardin",
-    "Gartentisch":        "table de jardin",
-    "Gartenbank":         "banc de jardin",
-    "Gartenliege":        "chaise longue de jardin",
-    "Gartensofa":         "canapé de jardin",
-    "Gartenmöbel":        "mobilier de jardin",
-    "Terrassenmöbel":     "mobilier de terrasse",
+    "Gartenessgruppe":                "ensemble de jardin",
+    "Gartengruppe":                   "salon de jardin",
+    "Gartenset":                      "salon de jardin",
+    "Loungeset":                      "salon de jardin",
+    "Loungesofa":                     "canapé de jardin",
+    "Loungesessel":                   "fauteuil de jardin",
+    "Terrassenset":                   "ensemble de terrasse",
+    "Sofaelement":                    "module de canapé",
+    "Sofamodul":                      "module de canapé",
+    "Gartenstuhl":                    "chaise de jardin",
+    "Gartentisch":                    "table de jardin",
+    "Gartenbank":                     "banc de jardin",
+    "Gartenliege":                    "chaise longue de jardin",
+    "Gartensofa":                     "canapé de jardin",
+    "Gartenmöbel":                    "mobilier de jardin",
+    "Terrassenmöbel":                 "mobilier de terrasse",
     # Materials / finishes
-    "pulverbeschichtet":  "thermolaqué",
-    "Pulverbeschichtung": "revêtement thermolaqué",
-    "thermobeschichtet":  "thermolaqué",
-    "Geflecht":           "résine tressée",
-    "Kunststoffgeflecht": "résine tressée",
-    "Flechtwerk":         "résine tressée",
-    "Polyrattan":         "résine tressée",
-    "Rattan":             "rotin",
+    "pulverbeschichtet":              "thermolaqué",
+    "Pulverbeschichtung":             "revêtement thermolaqué",
+    "thermobeschichtet":              "thermolaqué",
+    "Geflecht":                       "résine tressée",
+    "Kunststoffgeflecht":             "résine tressée",
+    "Flechtwerk":                     "résine tressée",
+    "Polyrattan":                     "résine tressée",
+    "Rattan":                         "rotin",
     # Frame / structure
-    "Tischgestell":       "piètement de table",
-    "Untergestell":       "structure inférieure",
-    "Zargen":             "traverses",
-    "Zarge":              "traverse",
+    "Tischgestell":                   "piètement de table",
+    "Untergestell":                   "structure inférieure",
+    "Zargen":                         "traverses",
+    "Zarge":                          "traverse",
     # Phrases (longest first so multi-word replaces before single words)
-    "Set bestehend aus":  "ensemble composé de",
-    "bestehend aus":      "composé de",
-    "ohne Dekoration":    "sans décoration",
-    "inkl. Dekoration":   "décoration incluse",
+    "Set bestehend aus":              "ensemble composé de",
+    "bestehend aus":                  "composé de",
+    "ohne Dekoration":                "sans décoration",
+    "inkl. Dekoration":               "décoration incluse",
     # Adjectives / descriptors
-    "Ausziehbar":         "extensible",
-    "Absetzung":          "bordure contrastante",
-    "Abhebung":           "bordure contrastante",
-    "Dekoration":         "décoration",
+    "Ausziehbar":                     "extensible",
+    "Absetzung":                      "bordure contrastante",
+    "Abhebung":                       "bordure contrastante",
+    "Dekoration":                     "décoration",
     # Mattress / bedding
     "7-Zonen-Taschenfederkernmatratze": "matelas ressorts ensachés 7 zones",
     "9-Zonen-Taschenfederkernmatratze": "matelas ressorts ensachés 9 zones",
-    "Taschenfederkernmatratze":         "matelas à ressorts ensachés",
-    "Taschenfederkern":                 "ressorts ensachés",
-    "4-seitiger Reißverschluss":        "fermeture éclair sur 4 côtés",
-    "Einseitige Kokosmatte":            "couche de coco sur une face",
-    "Abnehmbarer Bezug":                "revêtement amovible",
-    "Kokosmatte":                       "couche de coco",
-    "Kokosschicht":                     "couche de coco",
-    "Doppeltuch":                       "coutil double",
-    "Reißverschluss":                   "fermeture éclair",
-    "Matratze":                         "matelas",
+    "Taschenfederkernmatratze":       "matelas à ressorts ensachés",
+    "Taschenfederkern":               "ressorts ensachés",
+    "4-seitiger Reißverschluss":      "fermeture éclair sur 4 côtés",
+    "Einseitige Kokosmatte":          "couche de coco sur une face",
+    "Abnehmbarer Bezug":              "revêtement amovible",
+    "Kokosmatte":                     "couche de coco",
+    "Kokosschicht":                   "couche de coco",
+    "Doppeltuch":                     "coutil double",
+    "Reißverschluss":                 "fermeture éclair",
+    "Matratze":                       "matelas",
 }
 
 FURNITURE_TERM_MAP_NL: dict[str, str] = {
@@ -686,15 +714,37 @@ def auto_learn_glossary_from_source(
 
 # Wrong AI-generated French variants → preferred canonical
 CONSISTENCY_VARIANTS_FR: dict[str, str] = {
-    "rotin synthétique":    "résine tressée",
-    "rattan synthétique":   "résine tressée",
-    "osier synthétique":    "résine tressée",
-    "rotin en plastique":   "résine tressée",
-    "laqué par poudre":     "thermolaqué",
-    "traitement en poudre": "revêtement thermolaqué",
-    "contenant":            "composé de",
-    "se compose de":        "composé de",
-    "qui comprend":         "composé de",
+    # Powder coating wrong variants (longest first)
+    "revêtement de poudre":           "thermolaqué",
+    "revêtu de poudre":               "thermolaqué",
+    "revêtu par poudre":              "thermolaqué",
+    "laqué par poudre":               "thermolaqué",
+    "traitement en poudre":           "thermolaqué",
+    "rotin synthétique":              "résine tressée",
+    "rattan synthétique":             "résine tressée",
+    "osier synthétique":              "résine tressée",
+    "rotin en plastique":             "résine tressée",
+    # Composition / set wording
+    "ensemble consistant de":         "ensemble composé de",
+    "set consistant de":              "ensemble composé de",
+    "se compose de":                  "composé de",
+    "qui comprend":                   "composé de",
+    "contenant":                      "composé de",
+    # Tableware
+    "assiettes à manger":             "assiettes",
+    "assiette à manger":              "assiette",
+    # Furniture / product terminology
+    "chaiselongue":                   "chaise longue",
+    "cuisine autonome":               "cuisine équipée",
+    # Color corrections
+    "boue":                           "argile",
+    # Décor position (wrong word order)
+    "chêne artisan décor":            "décor chêne artisan",
+    "artisan chêne décor":            "décor chêne artisan",
+    "chêne décor artisan":            "décor chêne artisan",
+    # Awkward literal phrases
+    "table sans revêtement":          "table",
+    "décoration non comprise":        "accessoires non inclus",
 }
 
 # Wrong AI-generated Dutch variants → preferred canonical
@@ -794,3 +844,119 @@ def run_local_consistency_pass(
             corrections += 1
 
     return {"corrections": corrections, "detected": detected, "harmonized": harmonized}
+
+
+# =============================================================================
+# FRENCH HOME24 STYLE — SEMANTIC NORMALIZATION
+# =============================================================================
+
+# Complex regex patterns for French output that requires rewriting, not just
+# word replacement. Applied per-cell after translation and consistency passes.
+_FR_SEMANTIC_FIXES: list[tuple[re.Pattern, str]] = [
+    # BHT dimension labels still in output after partial translation
+    (re.compile(r'\bBHT\b',                    re.IGNORECASE | re.UNICODE), 'L x H x P'),
+    (re.compile(r'\bBxHxT\b',                  re.IGNORECASE | re.UNICODE), 'L x H x P'),
+    (re.compile(r'\bB\s+x\s+H\s+x\s+T\b',     re.IGNORECASE | re.UNICODE), 'L x H x P'),
+    # German dimension words that slipped through
+    (re.compile(r'\bBreite\b',                  re.IGNORECASE | re.UNICODE), 'largeur'),
+    (re.compile(r'\bH[öo]he\b',                re.IGNORECASE | re.UNICODE), 'hauteur'),
+    (re.compile(r'\bTiefe\b',                   re.IGNORECASE | re.UNICODE), 'profondeur'),
+    # Chaise longue — must be two words
+    (re.compile(r'\bchaiselongue\b',            re.IGNORECASE | re.UNICODE), 'chaise longue'),
+    # Tableware: assiette(s) à manger → assiette(s)
+    (re.compile(r'\bassiettes?\s+à\s+manger\b', re.IGNORECASE | re.UNICODE), 'assiettes'),
+    # German-pattern literal translations → natural French
+    (re.compile(r'\bcuisine\s+autonome\b',                       re.IGNORECASE | re.UNICODE), 'cuisine équipée'),
+    (re.compile(r'\bset\s+consist(?:ant|e)\s+de\b',              re.IGNORECASE | re.UNICODE), 'ensemble composé de'),
+    (re.compile(r'\bensemble\s+consist(?:ant|e)\s+de\b',         re.IGNORECASE | re.UNICODE), 'ensemble composé de'),
+    # Powder coating various wrong forms
+    (re.compile(r'\brevêtement\s+(?:à\s+la\s+|de\s+|par\s+)?poudre\b', re.IGNORECASE | re.UNICODE), 'thermolaqué'),
+    (re.compile(r'\brevêtu\s+(?:à\s+la\s+|de\s+|par\s+)poudre\b',      re.IGNORECASE | re.UNICODE), 'thermolaqué'),
+    (re.compile(r'\blaqué\s+(?:à\s+la\s+|de\s+|par\s+)poudre\b',       re.IGNORECASE | re.UNICODE), 'thermolaqué'),
+    # Décor position — wrong word order → correct home24.fr order
+    (re.compile(r'\bchêne\s+artisan\s+d[eé]cor\b',  re.IGNORECASE | re.UNICODE), 'décor chêne artisan'),
+    (re.compile(r'\bartisan\s+chêne\s+d[eé]cor\b',  re.IGNORECASE | re.UNICODE), 'décor chêne artisan'),
+    (re.compile(r'\bchêne\s+d[eé]cor\s+artisan\b',  re.IGNORECASE | re.UNICODE), 'décor chêne artisan'),
+    (re.compile(r'\bd[eé]cor\s+artisan\s+chêne\b',  re.IGNORECASE | re.UNICODE), 'décor chêne artisan'),
+    # Untranslated "Dekor" remaining in French text
+    (re.compile(r'\bDekor\b',                        re.UNICODE),                 'décor'),
+    # Awkward literal phrase
+    (re.compile(r'\btable\s+sans\s+rev[eê]tement\b', re.IGNORECASE | re.UNICODE), 'table'),
+    # Color: boue → argile
+    (re.compile(r'\bboue\b',                         re.IGNORECASE | re.UNICODE), 'argile'),
+]
+
+
+def apply_french_semantic_normalization(text: str) -> str:
+    """
+    Convert literal German-pattern translations to natural French e-commerce wording.
+    Runs after translation and consistency passes, before typography and capitalisation.
+    """
+    if not text:
+        return text
+    for pat, repl in _FR_SEMANTIC_FIXES:
+        text = pat.sub(repl, text)
+    return re.sub(r'  +', ' ', text)
+
+
+# =============================================================================
+# FRENCH TYPOGRAPHY RULES
+# =============================================================================
+
+_TYPO_BR_RE  = re.compile(r'<br\s*/?>', re.IGNORECASE)
+_TYPO_URL_RE = re.compile(r'https?://\S+', re.IGNORECASE)
+# Slash between alphabetic words (both sides must start with a letter)
+_TYPO_SLASH_RE = re.compile(
+    r'(?<=[a-zA-Zéàèùâêîôûëïüçœæ])\s*/\s*(?=[a-zA-Zéàèùâêîôûëïüçœæ])',
+    re.UNICODE,
+)
+
+
+def apply_french_typography_rules(text: str) -> str:
+    """
+    Apply French typography: non-breaking space before ':', spaces around '/'
+    in product color/material combinations.
+    Preserves URLs, <br> tags, and percentage composition slashes.
+    """
+    if not text:
+        return text
+
+    tokens: dict[str, str] = {}
+    counter = [0]
+
+    def _protect(pat: re.Pattern, t: str) -> str:
+        def _sub(m: re.Match) -> str:
+            k = f'\x00P{counter[0]}\x00'
+            counter[0] += 1
+            tokens[k] = m.group(0)
+            return k
+        return pat.sub(_sub, t)
+
+    text = _protect(_TYPO_BR_RE, text)
+    text = _protect(_TYPO_URL_RE, text)
+
+    # Colon spacing (French typography: space before and after ':')
+    text = re.sub(r'(?<!\s):', ' :', text)    # space before ':'
+    text = re.sub(r':(?!\s)',  ': ', text)    # space after ':'
+
+    # Slash spacing: alphabetic / alphabetic → alphabetic / alphabetic
+    # Skip when '%' precedes the slash in the same segment (composition context)
+    _snapshot = text  # snapshot for context lookup (before slash substitution)
+
+    def _slash_repl(m: re.Match) -> str:
+        before_slash = _snapshot[:m.start()]
+        last_ph = before_slash.rfind('\x00')
+        segment_before = before_slash[last_ph + 1:] if last_ph >= 0 else before_slash
+        if '%' in segment_before:
+            return m.group(0)
+        return ' / '
+
+    text = _TYPO_SLASH_RE.sub(_slash_repl, text)
+
+    # Collapse double spaces created by above rules
+    text = re.sub(r'  +', ' ', text).strip()
+
+    for k, v in tokens.items():
+        text = text.replace(k, v)
+
+    return text
