@@ -203,6 +203,7 @@ def init_db(
     _ensure_v6_migration()
     _ensure_v7_migration()
     _ensure_v8_migration()
+    _ensure_v9_migration()
     _migrate_json_if_needed()
     if default_glossary:
         _seed_glossary_if_empty(default_glossary, "French")
@@ -1557,3 +1558,89 @@ def db_get_jira_stats() -> dict:
         }
     except Exception:
         return {"total_from_jira": 0, "total_uploaded": 0, "recent": []}
+
+
+# =============================================================================
+# V9 MIGRATION — NL Trados TM corpus table
+# =============================================================================
+
+def _ensure_v9_migration() -> None:
+    """Create nl_trados_tm table for the Dutch Home24 Trados corpus."""
+    if _get_schema_version() >= 9:
+        return
+    try:
+        with _db() as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS nl_trados_tm (
+                    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                    source_de    TEXT NOT NULL,
+                    target_nl    TEXT NOT NULL,
+                    source_norm  TEXT NOT NULL,
+                    usage_count  INTEGER DEFAULT 0,
+                    imported_at  TEXT NOT NULL
+                )
+            """)
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_nl_trados_norm ON nl_trados_tm(source_norm)"
+            )
+        _set_schema_version(9)
+    except Exception:
+        pass
+
+
+# =============================================================================
+# NL TRADOS TM — CRUD
+# =============================================================================
+
+def db_nl_trados_import(entries: list[dict]) -> int:
+    """
+    Bulk-replace the nl_trados_tm table with new entries.
+    entries: list of {"source": str, "target": str, "usage_count": int}
+    Returns count of imported rows.
+    """
+    import re as _re
+    now = datetime.utcnow().isoformat()
+
+    def _norm(t: str) -> str:
+        return _re.sub(r'\s+', ' ', str(t).strip().lower())
+
+    rows = []
+    for e in entries:
+        src = str(e.get("source", "")).strip()
+        tgt = str(e.get("target", "")).strip()
+        if not src or not tgt or src == tgt:
+            continue
+        rows.append((src, tgt, _norm(src), int(e.get("usage_count", 0)), now))
+
+    try:
+        with _db() as conn:
+            conn.execute("DELETE FROM nl_trados_tm")
+            conn.executemany(
+                "INSERT INTO nl_trados_tm(source_de, target_nl, source_norm, usage_count, imported_at)"
+                " VALUES (?, ?, ?, ?, ?)",
+                rows,
+            )
+        return len(rows)
+    except Exception:
+        return 0
+
+
+def db_nl_trados_load_all() -> list[dict]:
+    """Load all NL Trados TM entries from DB for engine initialization."""
+    try:
+        with _db() as conn:
+            rows = conn.execute(
+                "SELECT source_de, target_nl, usage_count FROM nl_trados_tm ORDER BY usage_count DESC"
+            ).fetchall()
+        return [{"source": r[0], "target": r[1], "usage_count": r[2]} for r in rows]
+    except Exception:
+        return []
+
+
+def db_nl_trados_count() -> int:
+    """Return number of TM entries stored in the DB."""
+    try:
+        with _db() as conn:
+            return conn.execute("SELECT COUNT(*) FROM nl_trados_tm").fetchone()[0]
+    except Exception:
+        return 0

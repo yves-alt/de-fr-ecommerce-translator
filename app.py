@@ -85,6 +85,18 @@ from intelligence import (
     get_corpus_style_hint,
     apply_forbidden_patterns,
 )
+from nl_engine import (
+    Home24DutchCorpusEngine,
+    parse_trados_xlsx,
+    nl_post_process,
+    nl_qa_check,
+    detect_nl_german_residue,
+)
+from database import (
+    db_nl_trados_import,
+    db_nl_trados_load_all,
+    db_nl_trados_count,
+)
 
 load_dotenv()
 
@@ -118,6 +130,44 @@ class _JiraFileProxy:
 
     def read(self) -> bytes:
         return self._data
+
+
+# =============================================================================
+# NL CORPUS ENGINE — singleton loader
+# =============================================================================
+
+_NL_TM_AUTO_PATH = Path(__file__).parent.parent / "Downloads" / "Translation_Memory_Export_NL.xlsx"
+
+
+def _get_nl_corpus_engine() -> "Home24DutchCorpusEngine | None":
+    """
+    Return the cached Dutch corpus engine.
+    Loaded from DB once per session.
+    If DB is empty and the Trados XLSX is found locally, auto-imports it.
+    """
+    if "nl_corpus_engine" not in st.session_state:
+        entries = db_nl_trados_load_all()
+
+        # Auto-import from known local path if DB is empty
+        if not entries and _NL_TM_AUTO_PATH.exists():
+            try:
+                raw = parse_trados_xlsx(str(_NL_TM_AUTO_PATH))
+                db_nl_trados_import(raw)
+                entries = db_nl_trados_load_all()
+            except Exception:
+                entries = []
+
+        if entries:
+            st.session_state["nl_corpus_engine"] = Home24DutchCorpusEngine(entries)
+        else:
+            st.session_state["nl_corpus_engine"] = None
+    return st.session_state["nl_corpus_engine"]
+
+
+def _reload_nl_corpus_engine() -> "Home24DutchCorpusEngine | None":
+    """Force a reload of the corpus engine (call after import)."""
+    st.session_state.pop("nl_corpus_engine", None)
+    return _get_nl_corpus_engine()
 
 
 # =============================================================================
@@ -2521,12 +2571,11 @@ def render_sidebar() -> str:
 
         role = st.session_state.get("user_role", "")
         nav_options = ["Translator", "Translation History", "Analytics", "Glossary", "Translation Memory"]
-        if role in ("admin", "standard_user"):
-            nav_options.append("Jira Tickets")
         if role == "admin":
             nav_options.append("Admin Dashboard")
             nav_options.append("Issue Reports")
         nav_options.append("Report an Issue")
+        # Jira integration temporarily disabled — code preserved in jira_client.py
 
         page = st.radio(
             "Navigation",
@@ -3036,9 +3085,14 @@ _FR_SHARED_RULES = (
 )
 
 
-def _build_system_prompt(canonical: str, glossary_block: str, target_language: str = "French") -> str:
+def _build_system_prompt(
+    canonical: str,
+    glossary_block: str,
+    target_language: str = "French",
+    tm_guidance: str = "",
+) -> str:
     if target_language == "Dutch":
-        return _build_nl_system_prompt(canonical, glossary_block)
+        return _build_nl_system_prompt(canonical, glossary_block, tm_guidance=tm_guidance)
     # French prompts
     if canonical == "name":
         return (
@@ -3175,138 +3229,189 @@ _NL_SHARED_RULES = (
     "- Waschtisch → \"wastafelmeubel\", Waschbecken → \"wastafel\"\n"
     "- Griff → \"greep\", Griffe → \"grepen\", Blende → \"frontpaneel\", Sockel → \"plint\"\n"
     "- Soft-Close / Softclose → \"soft-close\", Dämpfung → \"demping\"\n"
-    "- Percentage formatting: write \"100%\" not \"100 %\" (no space before %). "
-    "Lowercase material after %: \"100% polyester\" not \"100% Polyester\""
+    "- Percentage: \"100%\" not \"100 %\"; lowercase after %: \"100% polyester\" not \"100% Polyester\"\n"
+    "- Slash in color/material combos: NO spaces — \"zwart/grijs\" not \"zwart / grijs\"\n"
+    "- Dekor terminology (CRITICAL — Home24 NL canonical):\n"
+    "  • \"Eiche Artisan Dekor\" → \"Artisan eikenlook\"\n"
+    "  • \"Eiche Viking Dekor\" → \"Viking eikenhouten look\"\n"
+    "  • \"Eiche hell Dekor\" → \"lichte eikenhouten look\"\n"
+    "  • \"Marmor Weiß Dekor\" → \"witte marmerlook\"\n"
+    "  • \"Kernbuche Dekor\" → \"kernbeukenhouten look\"\n"
+    "  • NEVER write \"eiken decor\" or \"Eiken decor\" — always use \"eikenlook\" or \"eikenhouten look\"\n"
+    "  • The Dutch word is \"look\" (not \"decor\") for material finishes\n"
+    "- Color-descriptor suffixes: \"Anthrazit\" → \"antracietkleurig\", \"Graphit\" → \"grafietkleurig\","
+    " \"Silber\" → \"zilverkleurig\", \"Gold\" → \"goudkleurig\"\n"
+    "- TV furniture: \"TV-Lowboard\" → \"Tv-meubel\", \"Fernsehsessel\" → \"tv-fauteuil\"\n"
+    "- Seating: \"3-Sitzer\" → \"3-zits\", \"3-Sitzer Sofa\" → \"3-zitsbank\"\n"
+    "- Lighting: \"Pendelleuchte\" → \"hanglamp\", \"Tischleuchte\" → \"tafellamp\","
+    " \"Deckenleuchte\" → \"plafondlamp\", \"Stehleuchte\" → \"staande lamp\"\n"
+    "- Bathroom: \"Badset\" → \"Badkamerset\"\n"
+    "- Type/Typ: \"Typ A\" → \"type A\" (lowercase, no period)\n"
+    "- Teilig: \"3-teilig\" → \"3-delig\"\n"
+    "- Flammig: \"1-flammig\" → \"1-lichts\""
 )
 
 
-def _build_nl_system_prompt(canonical: str, glossary_block: str) -> str:
-    """Dutch-specific system prompts for each column type."""
+_NL_SYSTEM_PREAMBLE = (
+    "You are a Home24 Netherlands localization specialist — NOT a generic translator.\n"
+    "Your output must match real Home24 NL product copy style: native Dutch, commercial, compact.\n\n"
+    "CRITICAL — NEVER do these:\n"
+    "- Write \"eiken decor\" or \"decor eik\" → ALWAYS use \"eikenlook\" or \"eikenhouten look\"\n"
+    "- Write \"TV lowboard\" or \"Televisiemeubel\" → ALWAYS \"Tv-meubel\"\n"
+    "- Add spaces around slashes in color combos → \"zwart/grijs\" NOT \"zwart / grijs\"\n"
+    "- Add space before % → \"95%\" NOT \"95 %\"\n"
+    "- Leave \"Dekor\" untranslated → ALWAYS replace with \"look\"\n"
+    "- Invent Dutch terminology → reuse TM vocabulary when provided\n"
+    "- Write \"Anthrazit\" → ALWAYS \"antracietkleurig\"; \"Graphit\" → \"grafietkleurig\"\n\n"
+)
+
+
+def _build_nl_system_prompt(canonical: str, glossary_block: str, tm_guidance: str = "") -> str:
+    """Dutch-specific system prompts — TM-guided, Home24 NL canonical."""
+    tm_block = f"\n{tm_guidance}" if tm_guidance else ""
+
     if canonical == "name":
         return (
-            "You are a professional Dutch translator for Home24 Netherlands e-commerce.\n"
-            "Translate the German product name to Dutch following these STRICT rules:\n"
+            _NL_SYSTEM_PREAMBLE
+            + "Translate the German product name to Dutch:\n"
             "- Maximum 40 characters total\n"
-            "- No commas allowed\n"
-            "- No brackets or parentheses allowed\n"
-            "- Natural, commercial Dutch product name for furniture e-commerce\n"
-            "- \"Sofa\" → \"bank\", \"Sessel\" → \"fauteuil\"\n"
-            "- \"Ecksofa\" → \"hoekbank\", \"Schlafsofa\" → \"slaapbank\"\n"
-            "- \"Sitzer\" → \"zits\" (e.g. \"3-Sitzer\" = \"3-zits\")\n"
-            "- GSP-Blende → \"vaatwasserfront\"\n"
-            "- Einzelwaschtisch → \"enkele wastafel\", Doppelwaschtisch → \"dubbele wastafel\"\n"
-            "- Grifflos → \"greeploos\"\n"
-            "- Preserve model/collection names: Arin, Bocca, Level36, Sonoma, Asely\n"
-            "- Use natural Dutch furniture terminology, not literal German"
-            f"{glossary_block}\n"
+            "- No commas, brackets, or parentheses\n"
+            "- Natural, commercial Dutch product name\n"
+            "- \"Sofa\" → \"bank\" / \"Sessel\" → \"fauteuil\" / \"Ecksofa\" → \"hoekbank\"\n"
+            "- \"Schlafsofa\" → \"slaapbank\" / \"Sitzer\" → \"zits\"\n"
+            "- \"3-Sitzer Sofa\" → \"3-zitsbank\" / \"2,5-Sitzer Sofa\" → \"2,5-zitsbank\"\n"
+            "- \"TV-Lowboard\" → \"Tv-meubel\" / \"Fernsehsessel\" → \"tv-fauteuil\"\n"
+            "- \"Pendelleuchte\" → \"hanglamp\" / \"Tischleuchte\" → \"tafellamp\"\n"
+            "- \"Deckenleuchte\" → \"plafondlamp\" / \"Stehleuchte\" → \"staande lamp\"\n"
+            "- \"Badset\" → \"Badkamerset\"\n"
+            "- \"GSP-Blende\" → \"vaatwasserfront\" / \"Grifflos\" → \"greeploos\"\n"
+            "- Preserve model/collection names exactly: Arin, Bocca, Himalund, Asely, Mardenis\n"
+            + _NL_SHARED_RULES
+            + f"{tm_block}{glossary_block}\n"
             "Return ONLY the translated text, nothing else."
         )
     elif canonical == "colorDetail":
         return (
-            "You are a professional Dutch translator for Home24 Netherlands e-commerce.\n"
-            "Translate German color descriptions to natural Dutch:\n"
-            "- dunkelgrau → donkergrijs, hellgrau → lichtgrijs\n"
-            "- dunkelbraun → donkerbruin, hellbraun → lichtbruin\n"
-            "- schwarz → zwart, weiß → wit, grau → grijs\n"
-            "- blau → blauw, grün → groen, braun → bruin\n"
-            "- sand/Sandbeige → zandkleurig/zandbeige\n"
-            "- Anthrazit → antraciet\n"
+            _NL_SYSTEM_PREAMBLE
+            + "Translate German color descriptions to natural Home24 NL Dutch:\n"
+            "- Slash combos: NO spaces — \"zwart/grijs\" not \"zwart / grijs\"\n"
+            "- Hyphen combos: hyphens — \"wit-grijs\" for contrast combos\n"
+            "- dunkelgrau → donkergrijs / hellgrau → lichtgrijs\n"
+            "- dunkelbraun → donkerbruin / hellbraun → lichtbruin\n"
+            "- Schwarz → zwart / Weiß → wit / Grau → grijs / Braun → bruin\n"
+            "- Blau → blauw / Grün → groen / Rot → rood / Gelb → geel\n"
+            "- Anthrazit → antracietkleurig / Graphit → grafietkleurig\n"
+            "- Silber → zilverkleurig / Gold → goudkleurig / Creme → crèmekleurig\n"
+            "- Sandschwarz → zandzwart / Sandbeige → zandbeige\n"
+            "- Dekor patterns: \"Eiche Artisan Dekor\" → \"Artisan eikenlook\","
+            " \"Eiche hell Dekor\" → \"lichte eikenhouten look\"\n"
+            "- Colors are lowercase after slash: \"zwart/grijs\" not \"Zwart/Grijs\"\n"
             "- Preserve color codes and numbers exactly"
-            f"{glossary_block}\n"
+            + f"{tm_block}{glossary_block}\n"
             "Return ONLY the translated text, nothing else."
         )
     elif canonical == "materialDetail":
         return (
-            "You are a professional Dutch translator for Home24 Netherlands e-commerce.\n"
-            "Translate the German material description to natural Dutch.\n\n"
-            "STRICT rules:\n"
-            "- Bezug → bekleding, Gestell → onderstel, Füße → poten\n"
-            "- Korpus → romp, Schublade → lade, Schubladen → lades, Türen → deuren\n"
-            "- Holzwerkstoff → houtmateriaal, Spanplatte → spaanplaat\n"
-            "- Massivholz → massief hout, Holz → hout\n"
-            "- Eiche → eiken, Buche → beuk, Kiefer → grenen\n"
+            _NL_SYSTEM_PREAMBLE
+            + "Translate the German material description to natural Home24 NL Dutch.\n\n"
+            "Material rules:\n"
+            "- \"Spanplatte, foliert\" → \"gefolieerde spaanplaat\" (adjective BEFORE noun)\n"
+            "- \"Spanplatte, beschichtet\" → \"gecoate spaanplaat\"\n"
+            "- \"MDF, beschichtet\" → \"gecoat MDF\" / \"MDF foliert\" → \"gefolieerd MDF\"\n"
+            "- \"Metall, pulverbeschichtet\" → \"gepoedercoat metaal\"\n"
+            "- Bezug → bekleding / Gestell → onderstel / Füße → poten\n"
+            "- Korpus → romp / Schublade → lade / Schubladen → lades / Türen → deuren\n"
+            "- Holzwerkstoff → houtmateriaal / Massivholz → massief hout\n"
+            "- Eiche → eiken / Buche → beuk / Kiefer → grenen / Nussbaum → notelaar\n"
+            "- Echtholzfurnier → fineer van echt hout / Furnier → fineer\n"
+            "- Holz-Verbundstoff → hout-composietmateriaal\n"
             + _NL_SHARED_RULES + "\n"
-            "- Preserve <br> tags exactly — NEVER replace them with semicolons\n"
-            "- NEVER use semicolons (;) as property separators\n"
-            "- Natural Dutch kitchen/bathroom/furniture terminology"
-            f"{glossary_block}\n"
+            "- Preserve <br> tags exactly — NEVER replace with semicolons\n"
+            "- NEVER use semicolons as property separators"
+            + f"{tm_block}{glossary_block}\n"
             "Return ONLY the translated text, nothing else."
         )
     elif canonical == "textileCompositionCover1":
         return (
-            "You are a professional Dutch translator for Home24 Netherlands e-commerce.\n"
-            "Translate the German textile composition to Dutch:\n"
-            "- Baumwolle → katoen, Polyester → polyester\n"
-            "- Wolle → wol, Leinen → linnen, Viskose → viscose\n"
-            "- Seide → zijde, Acryl → acryl, Elasthan → elastaan\n"
-            "- Preserve all percentage numbers exactly\n"
-            "- Write percentages WITHOUT space before %: \"80% katoen\" not \"80 % katoen\"\n"
-            "- Use lowercase for fiber names after percentages: \"80% katoen\" not \"80% Katoen\""
-            f"{glossary_block}\n"
+            _NL_SYSTEM_PREAMBLE
+            + "Translate the German textile composition to Dutch:\n"
+            "- Baumwolle → katoen / Polyester → polyester / Wolle → wol\n"
+            "- Leinen → linnen / Viskose → viscose / Seide → zijde\n"
+            "- Acryl → acryl / Elasthan → elastaan / Polyamid → polyamide\n"
+            "- Jute → jute / Nylon → nylon\n"
+            "- Füllung → vulling / Innenstoff → binnenstof\n"
+            "- Percentages: no space before % → \"80% katoen\" not \"80 % Katoen\"\n"
+            "- Comma separator in compositions: \"60% linnen, 40% katoen\"\n"
+            "- Preserve all percentage numbers exactly"
+            + f"{tm_block}{glossary_block}\n"
             "Return ONLY the translated text, nothing else."
         )
     elif canonical == "deliveryScope":
         return (
-            "You are a professional Dutch translator for Home24 Netherlands e-commerce.\n"
-            "Translate German delivery scope to natural Dutch:\n"
+            _NL_SYSTEM_PREAMBLE
+            + "Translate German delivery scope to natural Home24 NL Dutch:\n"
             "- Lieferumfang → leveringsomvang\n"
-            "- Lieferung → levering\n"
             "- inklusive/inkl. → inclusief/incl.\n"
             "- bestehend aus → bestaande uit\n"
             "- Set bestehend aus → set bestaande uit\n"
             "- ohne Dekoration → zonder decoratie\n"
+            "- ohne Armatur → zonder armatuur\n"
+            "- Loungeset bestehend aus: → Tuinset bestaande uit:\n"
             + _NL_SHARED_RULES + "\n"
             "- Natural Dutch e-commerce language\n"
             "- Preserve <br> tags exactly"
-            f"{glossary_block}\n"
+            + f"{tm_block}{glossary_block}\n"
             "Return ONLY the translated text, nothing else."
         )
     elif canonical == "otherMeasurements":
         return (
-            "You are a professional Dutch translator for Home24 Netherlands e-commerce.\n"
-            "Translate German measurements/dimensions to Dutch:\n"
+            _NL_SYSTEM_PREAMBLE
+            + "Translate German measurements/dimensions to Dutch:\n"
             "- Maße/Abmessungen → afmetingen\n"
-            "- Breite → breedte, Höhe → hoogte, Tiefe → diepte, Länge → lengte\n"
+            "- Breite → breedte / Höhe → hoogte / Tiefe → diepte / Länge → lengte\n"
             "- BHT / BxHxT / \"B x H x T\" → \"B x H x D\"\n"
-            "  Example: \"BHT: 100 x 80 x 45 cm\" → \"B x H x D: 100 x 80 x 45 cm\"\n"
+            "  Example: \"Schubkasten (BHT): 50x10x30 cm\" → \"lade (B x H x D): 50x10x30 cm\"\n"
             "- Preserve ALL numbers, units, and symbols exactly\n"
-            "- Do not invent or change any dimension values"
-            f"{glossary_block}\n"
+            "- Draagkracht for Belastbarkeit\n"
+            "- Preserve <br> tags exactly"
+            + f"{tm_block}{glossary_block}\n"
             "Return ONLY the translated text, nothing else."
         )
     elif canonical == "qualityDetail":
         return (
-            "You are a professional Dutch translator for Home24 Netherlands e-commerce.\n"
-            "Translate German quality details to natural Dutch:\n"
+            _NL_SYSTEM_PREAMBLE
+            + "Translate German quality details to natural Home24 NL Dutch:\n"
             "- Professional Dutch furniture/kitchen/bathroom e-commerce language\n"
-            "- Fluent and commercial but not exaggerated\n"
+            "- Fluent and commercial — sounds written by a native Dutch copywriter\n"
             + _NL_SHARED_RULES + "\n"
             "- Preserve <br> tags exactly as they appear\n"
             "- Do not invent product information"
-            f"{glossary_block}\n"
+            + f"{tm_block}{glossary_block}\n"
             "Return ONLY the translated text, nothing else."
         )
     elif canonical == "variantName":
         return (
-            "You are a professional Dutch translator for Home24 Netherlands e-commerce.\n"
-            "Translate German variant names to Dutch:\n"
-            "- Natural Dutch\n"
-            "- GSP-Blende → \"vaatwasserfront\", Grifflos → \"greeploos\"\n"
-            "- Preserve model numbers and collection names\n"
-            "- Short and commercial"
-            f"{glossary_block}\n"
+            _NL_SYSTEM_PREAMBLE
+            + "Translate German variant names to Home24 NL Dutch:\n"
+            "- Natural, concise Dutch\n"
+            "- GSP-Blende → \"vaatwasserfront\" / Grifflos → \"greeploos\"\n"
+            "- Dekor patterns → eikenlook / eikenhouten look (see critical rules above)\n"
+            "- Preserve model numbers and collection names exactly\n"
+            "- Short and commercial — catalogue-ready"
+            + _NL_SHARED_RULES
+            + f"{tm_block}{glossary_block}\n"
             "Return ONLY the translated text, nothing else."
         )
     else:
         return (
-            "You are a professional Dutch translator for Home24 Netherlands e-commerce.\n"
-            "Translate the German text to natural Dutch:\n"
-            "- Use natural Dutch, not literal German translation\n"
-            "- Remove all German traces\n"
+            _NL_SYSTEM_PREAMBLE
+            + "Translate the German text to natural Home24 NL Dutch:\n"
+            "- Sounds written by a native Dutch furniture copywriter\n"
+            "- Zero German residue\n"
             + _NL_SHARED_RULES + "\n"
-            "- Preserve <br> tags exactly as they appear\n"
+            "- Preserve <br> tags exactly\n"
             "- Preserve numbers and dimensions exactly"
-            f"{glossary_block}\n"
+            + f"{tm_block}{glossary_block}\n"
             "Return ONLY the translated text, nothing else."
         )
 
@@ -3483,7 +3588,10 @@ def translate_batch(
 
             translations = json.loads(content)
             if isinstance(translations, list) and len(translations) == n:
-                return [str(t).strip() for t in translations]
+                out = [str(t).strip() for t in translations]
+                if target_language == "Dutch":
+                    out = [nl_post_process(t) for t in out]
+                return out
 
         except Exception:
             pass
@@ -3493,7 +3601,10 @@ def translate_batch(
         break
 
     # Fallback: single-cell translation for each item
-    return _fallback_single_translations(client, texts, canonical, token_counter, glossary, notify_fn=notify_fn, target_language=target_language)
+    out = _fallback_single_translations(client, texts, canonical, token_counter, glossary, notify_fn=notify_fn, target_language=target_language)
+    if target_language == "Dutch":
+        out = [nl_post_process(t) for t in out]
+    return out
 
 
 def _fallback_single_translations(
@@ -3597,7 +3708,13 @@ def fix_german_residue(
         if not detect_german_residue(text, target_language):
             return text
 
-    # Step 1b: French semantic normalization (no API)
+    # Step 1b: Dutch NL post-processing pass (dekor, furniture, format)
+    if target_language == "Dutch":
+        text = nl_post_process(text)
+        if not detect_german_residue(text, target_language):
+            return text
+
+    # Step 1c: French semantic normalization (no API)
     if target_language == "French":
         text = apply_french_semantic_normalization(text)
         if not detect_german_residue(text, target_language):
@@ -4784,10 +4901,27 @@ def process_excel_with_progress(
         product_type = detect_product_type(name_samples, ctx_samples)
         product_hint = get_product_type_hint(product_type, target_language)
 
-        # Enrich with home24.fr corpus style examples
+        # Enrich with home24.fr corpus style examples (French)
         if target_language == "French":
             product_hint += get_corpus_style_hint(product_type, target_language)
             stats["corpus_matches"] += 1 if product_hint.strip() else 0
+
+        # Enrich Dutch prompt with Trados TM terminology
+        _nl_corpus = None
+        if target_language == "Dutch":
+            _nl_corpus = _get_nl_corpus_engine()
+            if _nl_corpus:
+                _src_sample = " ".join(
+                    text for _, _, _, _, text in cells_queue
+                    if text and len(text) > 4
+                )[:800]
+                _tm_terms = _nl_corpus.extract_terminology(_src_sample, max_terms=15)
+                if _tm_terms:
+                    product_hint += "\nHome24 NL TM terminology — reuse these exact Dutch terms:\n"
+                    product_hint += "\n".join(
+                        f'  • "{de}" → "{nl}"' for de, nl in _tm_terms[:12]
+                    )
+                stats["corpus_matches"] += 1 if _tm_terms else 0
 
         # TIE stats tracking
         tie_stats = {
@@ -4820,21 +4954,36 @@ def process_excel_with_progress(
         tie_stats["duplicate_cells_saved"] = cells_saved
         tie_stats["gpt_calls_avoided"]    += cells_saved
 
-        # ── Intelligence: Glossary-Only + Pattern + Semantic TM ──────────────
+        # ── Intelligence: Trados TM + Glossary-Only + Pattern + Semantic TM ────
         final_api_queue: list[tuple] = []
         for item in unique_queue:
             row_num, col_header, col_idx, canonical, text = item
             col_type = _tm_col_type(canonical)
             resolved = False
 
+            # ── Dutch: Trados TM exact match (highest priority) ───────────────
+            if not resolved and target_language == "Dutch" and _nl_corpus:
+                exact_tr = _nl_corpus.exact_match(text)
+                if exact_tr is not None:
+                    exact_tr = nl_post_process(exact_tr)
+                    results[(row_num, col_idx)] = exact_tr
+                    tm_put(tm, text, exact_tr, col_type, target_language)
+                    tie_stats["gpt_calls_avoided"]   += 1
+                    tie_stats.setdefault("trados_exact", 0)
+                    tie_stats["trados_exact"]        += 1
+                    resolved = True
+
             # Glossary-only resolution
-            gl_tr = try_glossary_only(text, glossary, target_language)
-            if gl_tr is not None:
-                results[(row_num, col_idx)] = gl_tr
-                tm_put(tm, text, gl_tr, col_type, target_language)
-                tie_stats["glossary_only_count"] += 1
-                tie_stats["gpt_calls_avoided"]   += 1
-                resolved = True
+            if not resolved:
+                gl_tr = try_glossary_only(text, glossary, target_language)
+                if gl_tr is not None:
+                    if target_language == "Dutch":
+                        gl_tr = nl_post_process(gl_tr)
+                    results[(row_num, col_idx)] = gl_tr
+                    tm_put(tm, text, gl_tr, col_type, target_language)
+                    tie_stats["glossary_only_count"] += 1
+                    tie_stats["gpt_calls_avoided"]   += 1
+                    resolved = True
 
             # Pattern / rule-based translation
             if not resolved:
@@ -4846,11 +4995,26 @@ def process_excel_with_progress(
                     tie_stats["gpt_calls_avoided"]  += 1
                     resolved = True
 
-            # Semantic TM match
+            # ── Dutch: Trados TM fuzzy match (after cheap resolutions) ────────
+            if not resolved and target_language == "Dutch" and _nl_corpus:
+                fuzzy_result = _nl_corpus.fuzzy_match(text, threshold=0.88)
+                if fuzzy_result is not None:
+                    fuzzy_tr, _fscore = fuzzy_result
+                    fuzzy_tr = nl_post_process(fuzzy_tr)
+                    results[(row_num, col_idx)] = fuzzy_tr
+                    tm_put(tm, text, fuzzy_tr, col_type, target_language)
+                    tie_stats["gpt_calls_avoided"]   += 1
+                    tie_stats.setdefault("trados_fuzzy", 0)
+                    tie_stats["trados_fuzzy"]        += 1
+                    resolved = True
+
+            # Semantic TM match (app-level TM)
             if not resolved:
                 sem = semantic_tm_match(tm, text, col_type, target_language)
                 if sem is not None:
                     sem_tr, _score = sem
+                    if target_language == "Dutch":
+                        sem_tr = nl_post_process(sem_tr)
                     results[(row_num, col_idx)] = sem_tr
                     tm_put(tm, text, sem_tr, col_type, target_language)
                     tie_stats["semantic_tm_hits"]   += 1
@@ -7279,6 +7443,47 @@ def translation_memory_page():
             f'Showing top 200 of {len(sorted_entries):,} entries.</div>',
             unsafe_allow_html=True,
         )
+
+    # ── Trados NL TM Corpus ───────────────────────────────────────────────────
+    role = st.session_state.get("user_role", "")
+    if role == "admin":
+        st.markdown("---")
+        st.markdown('<div class="section-label">Dutch Trados TM Corpus (NL)</div>', unsafe_allow_html=True)
+
+        trados_count = db_nl_trados_count()
+        col_a, col_b = st.columns([2, 1])
+        with col_a:
+            if trados_count > 0:
+                engine = _get_nl_corpus_engine()
+                st.success(
+                    f"Trados TM loaded: **{trados_count:,} entries** in DB"
+                    + (f", **{len(engine):,} active** in engine" if engine else "")
+                )
+            else:
+                st.info("No Dutch Trados TM imported yet. Upload the Trados XLSX export below.")
+
+        with col_b:
+            uploaded_tm = st.file_uploader(
+                "Import Trados TM Export (XLSX)",
+                type=["xlsx"],
+                key="trados_tm_upload",
+                help="Upload Translation_Memory_Export_NL.xlsx from Trados",
+            )
+            if uploaded_tm and st.button("Import TM", key="import_trados_btn", type="primary"):
+                with st.spinner(f"Importing {uploaded_tm.name}…"):
+                    try:
+                        import tempfile, os
+                        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as tmp:
+                            tmp.write(uploaded_tm.getvalue())
+                            tmp_path = tmp.name
+                        entries = parse_trados_xlsx(tmp_path)
+                        os.unlink(tmp_path)
+                        n_imported = db_nl_trados_import(entries)
+                        _reload_nl_corpus_engine()
+                        st.success(f"Imported {n_imported:,} TM entries. Engine reloaded.")
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"Import failed: {exc}")
 
 
 # =============================================================================
