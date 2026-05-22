@@ -97,6 +97,16 @@ from database import (
     db_nl_trados_load_all,
     db_nl_trados_count,
 )
+from pipeline import (
+    LargeFileModeConfig,
+    detect_large_file_mode,
+    SemanticRowClusterer,
+    WorkbookConsistencyMemory,
+    build_clustered_batches,
+    qa_cell_needs_ai_fix,
+    SheetDebugMetrics,
+    LARGE_FILE_ROW_THRESHOLD,
+)
 
 load_dotenv()
 
@@ -168,6 +178,26 @@ def _reload_nl_corpus_engine() -> "Home24DutchCorpusEngine | None":
     """Force a reload of the corpus engine (call after import)."""
     st.session_state.pop("nl_corpus_engine", None)
     return _get_nl_corpus_engine()
+
+
+# =============================================================================
+# WORKBOOK CONSISTENCY MEMORY — session-state singleton
+# =============================================================================
+
+def _get_consistency_memory(file_key: str) -> WorkbookConsistencyMemory:
+    """
+    Return the per-upload WorkbookConsistencyMemory singleton.
+    One memory instance per uploaded file (keyed by filename + size).
+    A new upload clears the old memory automatically.
+    """
+    mem_key = f"_wcm_{file_key}"
+    if mem_key not in st.session_state:
+        # Clear any stale instances from a previous file
+        for k in list(st.session_state.keys()):
+            if k.startswith("_wcm_"):
+                del st.session_state[k]
+        st.session_state[mem_key] = WorkbookConsistencyMemory()
+    return st.session_state[mem_key]
 
 
 # =============================================================================
@@ -4837,6 +4867,10 @@ def process_excel_with_progress(
 
     _forbidden_patterns: list = []
 
+    # ── Enterprise pipeline: get session-level consistency memory ────────────
+    _file_key_for_wcm = f"{uploaded_file.name}_{getattr(uploaded_file, 'size', 0)}"
+    _consistency_mem  = _get_consistency_memory(_file_key_for_wcm)
+
     with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
         tmp.write(uploaded_file.getvalue())
         tmp_path = tmp.name
@@ -4855,6 +4889,18 @@ def process_excel_with_progress(
         data_start_row = header_row + 1
         total_rows     = max(0, _ws_max_row - header_row)
         start_time     = time.time()
+
+        # ── Enterprise pipeline: large file mode auto-detection ───────────────
+        _lf_config     = detect_large_file_mode(total_rows)
+        _large_mode    = _lf_config.active
+        # User-supplied batch_size is honoured unless large file mode overrides
+        _eff_batch     = min(batch_size, _lf_config.batch_size) if _large_mode else batch_size
+        _eff_concurrent = min(max_concurrent_batches, _lf_config.max_concurrent) if _large_mode else max_concurrent_batches
+        # Debug metrics tracker
+        _dbg_metrics   = SheetDebugMetrics(sheet_name)
+        _dbg_metrics.large_file_mode = _large_mode
+        stats["large_file_mode"] = _large_mode
+        stats["effective_batch_size"] = _eff_batch
 
         # ── Phase 0: Pre-scan ─────────────────────────────────────────────────
         progress_bar.progress(0.02)
@@ -5031,20 +5077,18 @@ def process_excel_with_progress(
         }
 
         # ── Phase 2: Parallel batch translation ──────────────────────────────
-        by_col_type: dict[str, list] = {}
-        for item in final_api_queue:
-            ct = _tm_col_type(item[3])
-            by_col_type.setdefault(ct, []).append(item)
-
+        # Enterprise pipeline: use hierarchical (cluster-first) batching for large files.
+        # Flat batching is used for small files to preserve legacy behaviour.
         total_api_cells = len(final_api_queue)
 
-        # Build a flat, ordered batch list across all col_types
-        batch_list: list[tuple] = []
-        for col_type, items in by_col_type.items():
-            for batch_start in range(0, len(items), batch_size):
-                batch_items    = items[batch_start : batch_start + batch_size]
-                canonical_used = batch_items[0][3]
-                batch_list.append((batch_items, canonical_used))
+        batch_list, _cluster_count = build_clustered_batches(
+            final_api_queue,
+            batch_size=_eff_batch,
+            cluster_first=_large_mode,
+            max_cluster_size=_lf_config.cluster_size,
+        )
+        _dbg_metrics.cluster_count = _cluster_count
+        stats["cluster_count"] = _cluster_count
 
         total_batches  = len(batch_list)
         retry_counter  = [0]
@@ -5055,7 +5099,7 @@ def process_excel_with_progress(
         api_cells_done    = 0
         batch_durations   = []
 
-        with ThreadPoolExecutor(max_workers=max(1, max_concurrent_batches)) as executor:
+        with ThreadPoolExecutor(max_workers=max(1, _eff_concurrent)) as executor:
             future_map = {
                 executor.submit(
                     _run_batch_task,
@@ -5100,14 +5144,22 @@ def process_excel_with_progress(
                 )
 
         # Apply results sequentially (main thread — no concurrent Excel writes)
+        _consistency_fixes_batch = 0
         for result in sorted(batch_results, key=lambda r: r["batch_id"]):
             for i, (row_num, col_header, col_idx, canonical, text) in enumerate(result["batch_items"]):
                 tr = str(result["translations"][i]).strip() if i < len(result["translations"]) else text
                 if canonical == "name":
                     tr = validate_product_name(tr)
+                # Enterprise pipeline: enforce workbook-level consistency
+                tr_enforced = _consistency_mem.enforce(text, canonical, tr)
+                if tr_enforced != tr:
+                    _consistency_fixes_batch += 1
+                    tr = tr_enforced
                 results[(row_num, col_idx)] = tr
                 tm_put(tm, text, tr, _tm_col_type(canonical), target_language)
                 stats["cells_translated"] += 1
+
+        stats["consistency_memory_fixes"] = _consistency_fixes_batch
 
         # Restore duplicate cells — representative cells are now in results
         for (dup_row, dup_col), (rep_row, rep_col) in dup_restore_map.items():
@@ -5134,7 +5186,7 @@ def process_excel_with_progress(
         stats["avg_batch_duration"] = round(
             sum(batch_durations) / max(len(batch_durations), 1), 2
         )
-        stats["max_concurrent_used"] = max_concurrent_batches
+        stats["max_concurrent_used"] = _eff_concurrent
         stats["avg_batch_size"] = (
             round(total_api_cells / max(total_batches, 1), 1)
             if total_batches > 0 else 0.0
@@ -5142,6 +5194,20 @@ def process_excel_with_progress(
 
         # Merge TIE stats
         stats.update(tie_stats)
+
+        # Enterprise pipeline: populate per-sheet debug metrics
+        _dbg_metrics.rows            = total_rows
+        _dbg_metrics.cells_total     = total_to_process
+        _dbg_metrics.tm_hits         = stats["tm_hits"]
+        _dbg_metrics.trados_exact    = tie_stats.get("trados_exact", 0)
+        _dbg_metrics.trados_fuzzy    = tie_stats.get("trados_fuzzy", 0)
+        _dbg_metrics.glossary_only   = tie_stats["glossary_only_count"]
+        _dbg_metrics.pattern         = tie_stats["pattern_count"]
+        _dbg_metrics.semantic_tm     = tie_stats["semantic_tm_hits"]
+        _dbg_metrics.ai_cells        = total_api_cells
+        _dbg_metrics.failed_batches  = failed_batches
+        _dbg_metrics.processing_time = time.time() - start_time
+        stats["_sheet_debug_metrics"] = _dbg_metrics.to_dict()
 
         # API call accounting: include all intelligence-layer savings
         stats["api_calls_made"]    = total_batches
@@ -5373,14 +5439,27 @@ def process_excel_with_progress(
         _forbidden_lang = "FR" if target_language == "French" else "NL"
         _forbidden_patterns = db_load_forbidden_patterns(_forbidden_lang) if target_language == "French" else []
 
-        # ── Phase 3: Residue check (fast local scan first, AI only for remaining) ──
-        # Only check cells that went through API translation + refinement
-        residue_candidates = {
+        # ── Phase 3: Residue check (fast multi-layer QA first, AI only for flagged) ──
+        # Enterprise pipeline: pre-filter with qa_cell_needs_ai_fix (L1 + L2, no API).
+        # Only cells flagged by L1/L2 proceed to the full local-fix + AI loop.
+        # This avoids iterating thousands of clean cells on large files.
+        residue_candidates_raw = {
             (rn, ci)
             for rn, ci in results
             if (rn, ci) in api_translated_cells
         }
-        # Also include cells refined via AI (they may have changed)
+        # Pre-filter: skip cells that are already clean (fast, no API)
+        if _large_mode:
+            residue_candidates = {
+                (rn, ci)
+                for rn, ci in residue_candidates_raw
+                if qa_cell_needs_ai_fix(
+                    str(results.get((rn, ci), "")),
+                    _forbidden_patterns,
+                )[0]
+            }
+        else:
+            residue_candidates = residue_candidates_raw
         total_residue_cells = max(len(residue_candidates), 1)
         checked = 0
 
@@ -6140,6 +6219,25 @@ def translator_page():
                 ),
             )
 
+        # ── Enterprise pipeline: Large File Mode indicator ───────────────────
+        _preview_lf = detect_large_file_mode(
+            max(real_max_row - header_row, 0)
+        )
+        if _preview_lf.active:
+            _lf_batch_info = (
+                f"Batch size reduced to {_preview_lf.batch_size} · "
+                f"Semantic clustering active · "
+                f"Concurrency capped at {_preview_lf.max_concurrent}"
+            )
+            st.markdown(
+                f'<div class="alert alert-info">'
+                f'<span class="alert-icon">⚡</span>'
+                f'<span><strong>Large File Mode</strong> — {real_max_row - header_row} rows detected. '
+                f'{_lf_batch_info}</span>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+
         st.markdown('<div class="section-label">Translate</div>', unsafe_allow_html=True)
         st.markdown("""
         <div class="alert alert-warn" style="margin-bottom:16px;">
@@ -6310,6 +6408,36 @@ def translator_page():
                 ),
             ]
             st.markdown(_pipeline_status_html(_pipeline_steps), unsafe_allow_html=True)
+
+            # ── Enterprise pipeline: Large File Mode badge ───────────────────
+            if _s.get("large_file_mode"):
+                _cm_fixes = _s.get("consistency_memory_fixes", 0)
+                _clusters = _s.get("cluster_count", 0)
+                _eff_bs   = _s.get("effective_batch_size", _s.get("avg_batch_size", "?"))
+                _lf_badge_parts = [
+                    f"Batch size: {_eff_bs}",
+                    f"Clusters: {_clusters}" if _clusters else None,
+                    f"Consistency enforced: {_cm_fixes} fix(es)" if _cm_fixes else None,
+                ]
+                _lf_text = " · ".join(p for p in _lf_badge_parts if p)
+                st.markdown(
+                    f'<div class="alert alert-info">'
+                    f'<span class="alert-icon">⚡</span>'
+                    f'<span><strong>Large File Mode was active.</strong> {_lf_text}</span>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+
+            # ── Admin: per-sheet debug metrics ──────────────────────────────
+            if _role == "admin" and _s.get("_sheet_debug_metrics"):
+                with st.expander("Per-sheet pipeline metrics (admin)", expanded=False):
+                    import pandas as _pd_dbg
+                    _dbg_row = _s["_sheet_debug_metrics"]
+                    st.dataframe(
+                        _pd_dbg.DataFrame([_dbg_row]),
+                        hide_index=True,
+                        use_container_width=True,
+                    )
 
             # ── Translation Intelligence ──
             st.markdown('<div class="section-label">Translation Intelligence</div>', unsafe_allow_html=True)
