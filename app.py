@@ -501,10 +501,29 @@ GERMAN_RESIDUE_WORDS = [
     "Einzelwaschtisch", "Doppelwaschtisch", "Waschbeckenunterschrank",
     "Softclose", "Dämpfung",
     "BHT", "BxHxT",
+    # Carpet / rug types
+    "Fußmatte", "Fussmatte", "Läufer", "Laufer",
+    "Hochflorteppich", "Kurzflorteppich", "Teppichläufer",
+    "Teppich", "Kuhfellteppich", "Sisalteppich", "Juteteppich",
+    "Schaffell", "Kunstfell",
+    # Colors (German)
+    "Elfenbein", "Puderrosa",
+    # Textile composition materials
+    "Polypropylen", "Polyamid", "Modacryl",
+    "Kokosfaser", "Kokos", "Gummi", "Mikrofaser",
 ]
 
 FRENCH_ACCEPTABLE_WORDS = [
-    "beige", "taupe", "polyester", "set", "bouclé", "boucle",
+    # Colors identical in German and French
+    "beige", "taupe",
+    # E-commerce / color terms used unchanged
+    "multi", "multicolore",
+    # Textile materials — same word or close cognate acceptable in French output
+    "polyester", "polyamide", "viscose", "modacrylique", "polypropylène",
+    "coco", "caoutchouc", "latex", "nylon", "sisal", "jute", "chenille",
+    "microfibre", "coton", "laine", "lin", "soie",
+    # Style/product terms used unchanged
+    "set", "bouclé", "boucle",
 ]
 
 # Dutch words that overlap with GERMAN_RESIDUE_WORDS — suppress false positives
@@ -3154,6 +3173,14 @@ def _build_system_prompt(
             "  6-teilig / Set / Lot / x6 / 6 Stück → pluralise the item noun\n"
             "  e.g. 6 plates → \"Assiettes de service\" not \"Assiette de service\"\n"
             "  Do NOT pluralise model or collection names\n"
+            "- Carpet / rug product types (CRITICAL — do not confuse these):\n"
+            "  • \"Fußmatte\" → \"Tapis d'entrée\" (entry/door mat)\n"
+            "  • \"Hochflorteppich\" → \"Tapis à poils longs\" (high-pile rug)\n"
+            "  • \"Kurzflorteppich\" → \"Tapis à poils courts\" (low-pile rug)\n"
+            "  • \"Läufer\" → \"Chemin de couloir\" (NEVER \"Couverture\" — that means blanket)\n"
+            "  • \"Teppich\" → \"Tapis\", \"Teppichläufer\" → \"Tapis de couloir\"\n"
+            "- Preserve product series names exactly as-is (e.g. Entry, Natural Guard, Cosy, Firenze)\n"
+            "  Do NOT translate 'Entry' as 'd'accueil' — it is a product series name\n"
             "- Preserve model/collection names exactly (e.g. Vedene, Arin, Bocca, Level36)\n"
             "- Preserve dimensions and numbers exactly\n"
             "- Write elegant, commercial French — not literal word-for-word translation"
@@ -3193,11 +3220,31 @@ def _build_system_prompt(
             "- \"Schlamm\" / \"Schlammfarbe\" / mud-like colors → \"argile\" (NEVER 'boue')\n"
             "- \"Terra\" (color) → \"terracotta\"\n"
             "- \"Sand\" → \"sable\", \"Ton\" (clay color) → \"argile\"\n"
+            "- \"Elfenbein\" → \"ivoire\", \"Puderrosa\" → \"rose poudré\"\n"
+            "- \"Natur\" → \"naturel\", \"Blaugrün\" → \"bleu-vert\"\n"
+            "- \"Multi\" → \"multicolore\" (or keep \"Multi\" if the brand uses it)\n"
             "- \"Artisan Eiche\" → \"chêne artisan\"\n"
             "- \"Artisan Eiche Dekor\" / \"Eiche Dekor\" → \"décor chêne artisan\" / \"décor chêne\"\n"
             "  'décor' always comes FIRST in the phrase\n"
             "- Preserve color codes and numbers exactly\n"
             "- Write elegant, commercial color names — not literal German"
+            f"{glossary_block}\n"
+            "Return ONLY the translated text, nothing else."
+        )
+    elif canonical == "textileCompositionCover1":
+        return (
+            "You are a precise translator for Home24 France product data.\n"
+            "Translate German textile composition labels to French.\n\n"
+            "Rules:\n"
+            "- EU spacing format: 'X % material' (space before AND after %) — e.g. '100 % polyester'\n"
+            "- Preserve the separator: '/' as in source\n"
+            "- Fiber names in LOWERCASE\n"
+            "- Polyester → polyester, Baumwolle → coton, Wolle → laine\n"
+            "- Viskose → viscose, Polyamid → polyamide, Polypropylen → polypropylène\n"
+            "- Modacryl → modacrylique, Kokos → coco, Gummi → caoutchouc\n"
+            "- Leinen → lin, Seide → soie, Elasthan → élasthanne\n"
+            "- Mikrofaser → microfibre, Acryl → acrylique, Leder → cuir\n"
+            "- Preserve numbers exactly — NEVER alter percentages"
             f"{glossary_block}\n"
             "Return ONLY the translated text, nothing else."
         )

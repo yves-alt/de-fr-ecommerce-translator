@@ -181,30 +181,99 @@ def try_pattern_translation(
     return None
 
 
+# Built-in fiber name maps — used as fallback when the glossary has no entry.
+# EU standard format: "X % material" (space before %).
+_FIBER_NAMES_FR: dict[str, str] = {
+    "polyester":    "polyester",
+    "baumwolle":    "coton",
+    "wolle":        "laine",
+    "seide":        "soie",
+    "leinen":       "lin",
+    "viskose":      "viscose",
+    "polyamid":     "polyamide",
+    "polypropylen": "polypropylène",
+    "acryl":        "acrylique",
+    "modacryl":     "modacrylique",
+    "elasthan":     "élasthanne",
+    "lycra":        "lycra",
+    "modal":        "modal",
+    "tencel":       "tencel",
+    "lyocell":      "lyocell",
+    "kokos":        "coco",
+    "kokosfaser":   "fibre de coco",
+    "gummi":        "caoutchouc",
+    "latex":        "latex",
+    "jute":         "jute",
+    "sisal":        "sisal",
+    "hanf":         "chanvre",
+    "bambus":       "bambou",
+    "nylon":        "nylon",
+    "mikrofaser":   "microfibre",
+    "chenille":     "chenille",
+    "leder":        "cuir",
+    "kunstleder":   "similicuir",
+    "polyacryl":    "polyacrylique",
+    "polyurethan":  "polyuréthane",
+}
+
+_FIBER_NAMES_NL: dict[str, str] = {
+    "polyester":    "polyester",
+    "baumwolle":    "katoen",
+    "wolle":        "wol",
+    "seide":        "zijde",
+    "leinen":       "linnen",
+    "viskose":      "viscose",
+    "polyamid":     "polyamide",
+    "polypropylen": "polypropyleen",
+    "acryl":        "acryl",
+    "modacryl":     "modacryl",
+    "elasthan":     "elasthaan",
+    "kokos":        "kokos",
+    "kokosfaser":   "kokosvezel",
+    "gummi":        "rubber",
+    "jute":         "jute",
+    "sisal":        "sisal",
+    "nylon":        "nylon",
+    "mikrofaser":   "microvezel",
+    "leder":        "leer",
+    "kunstleder":   "kunstleer",
+}
+
+
 def _translate_pct_composition(
     text: str,
     glossary: dict,
     target_language: str,
 ) -> str | None:
-    """Translate '60% Baumwolle, 40% Polyester' using glossary fiber mappings."""
-    terms = glossary.get("terms", {})
+    """
+    Translate '60 % Baumwolle / 40 % Polyester' using built-in fiber map + glossary.
+    Output format: 'X % material' (EU standard — space before %).
+    """
+    fiber_map = _FIBER_NAMES_FR if target_language != "Dutch" else _FIBER_NAMES_NL
+    glos_terms = {k.lower(): v.lower() for k, v in glossary.get("terms", {}).items()}
+
+    # Split on comma or slash separators
     parts = re.split(r"\s*[,/]\s*", text)
     out: list[str] = []
+    sep = " / " if "/" in text else ", "
+
     for part in parts:
         m = re.match(r"^(\d+)\s*%\s*(.+)$", part.strip(), re.IGNORECASE)
         if not m:
             return None
         pct, fiber = m.group(1), m.group(2).strip()
         fiber_lo = fiber.lower()
-        matched = None
-        for de, tr in terms.items():
-            if de.lower() == fiber_lo:
-                matched = tr.lower()
-                break
+
+        # Glossary first (user-maintained, highest authority)
+        matched = glos_terms.get(fiber_lo)
+        # Built-in map as fallback
+        if matched is None:
+            matched = fiber_map.get(fiber_lo)
         if matched is None:
             return None
-        out.append(f"{pct}% {matched}")
-    return ", ".join(out)
+        out.append(f"{pct} % {matched}")
+
+    return sep.join(out)
 
 
 # =============================================================================
@@ -540,6 +609,37 @@ FURNITURE_TERM_MAP_FR: dict[str, str] = {
     "Absetzung":                      "bordure contrastante",
     "Abhebung":                       "bordure contrastante",
     "Dekoration":                     "décoration",
+    # Carpet / rug product types — compound forms first
+    "Hochflorteppich":                "tapis à poils longs",
+    "Kurzflorteppich":                "tapis à poils courts",
+    "Teppichläufer":                  "tapis de couloir",
+    "Kuhfellteppich":                 "tapis en cuir de vache",
+    "Sisalteppich":                   "tapis en sisal",
+    "Juteteppich":                    "tapis en jute",
+    "Naturteppich":                   "tapis naturel",
+    "Schaffell":                      "peau de mouton",
+    "Kunstfell":                      "fourrure synthétique",
+    "Fußmatte":                       "tapis d'entrée",
+    "Läufer":                         "chemin de couloir",
+    "Teppich":                        "tapis",
+    # Textile composition materials
+    "Polypropylen":                   "polypropylène",
+    "Polyamid":                       "polyamide",
+    "Modacryl":                       "modacrylique",
+    "Kokosfaser":                     "fibre de coco",
+    "Viskose":                        "viscose",
+    "Gummi":                          "caoutchouc",
+    "Mikrofaser":                     "microfibre",
+    # Colors
+    "Elfenbein":                      "ivoire",
+    "Puderrosa":                      "rose poudré",
+    "Blaugrün":                       "bleu-vert",
+    "Hellbraun":                      "brun clair",
+    "Hellgrün":                       "vert clair",
+    "Dunkelgrau":                     "gris foncé",
+    "Dunkelblau":                     "bleu foncé",
+    "Hellgrau":                       "gris clair",
+    "Dunkelgrün":                     "vert foncé",
     # Mattress / bedding
     "7-Zonen-Taschenfederkernmatratze": "matelas ressorts ensachés 7 zones",
     "9-Zonen-Taschenfederkernmatratze": "matelas ressorts ensachés 9 zones",
@@ -745,6 +845,15 @@ CONSISTENCY_VARIANTS_FR: dict[str, str] = {
     # Awkward literal phrases
     "table sans revêtement":          "table",
     "décoration non comprise":        "accessoires non inclus",
+    # Carpet runners — "couverture" is a common AI mistranslation of "Läufer" (runner rug)
+    "couverture de couloir":          "chemin de couloir",
+    "tapis couverture":               "chemin de couloir",
+    # Textile composition wrong forms
+    "couche de coco / caoutchouc":    "coco / caoutchouc",
+    "couche de coco":                 "coco",
+    # Rug/carpet wrong product type names
+    "tapis à haute pile":             "tapis à poils longs",
+    "tapis ras":                      "tapis à poils courts",
 }
 
 # Wrong AI-generated Dutch variants → preferred canonical
@@ -884,6 +993,20 @@ _FR_SEMANTIC_FIXES: list[tuple[re.Pattern, str]] = [
     (re.compile(r'\btable\s+sans\s+rev[eê]tement\b', re.IGNORECASE | re.UNICODE), 'table'),
     # Color: boue → argile
     (re.compile(r'\bboue\b',                         re.IGNORECASE | re.UNICODE), 'argile'),
+    # Carpet runner: "Couverture [CapitalWord NNN]" is a wrong AI translation of "Läufer"
+    # Pattern: "Couverture" followed by a proper noun and a 3+ digit product code
+    (re.compile(r'\bCouverture\b(?=\s+[A-Z][a-z]+\s+\d{3,})', re.UNICODE),       'Chemin'),
+    # Textile composition: normalize spacing to EU standard "X % material"
+    (re.compile(r'(\d+)%\s*([a-zéàèùâêîôûëïüçœæ])', re.UNICODE),                r'\1 % \2'),
+    # Wrong carpet type names from overly literal AI translation
+    (re.compile(r'\btapis\s+à\s+haute?\s+pile\b',    re.IGNORECASE | re.UNICODE), 'tapis à poils longs'),
+    (re.compile(r'\btapis\s+ras\b',                  re.IGNORECASE | re.UNICODE), 'tapis à poils courts'),
+    (re.compile(r'\btapis\s+de\s+sol\b(?!\s+de\b)',  re.IGNORECASE | re.UNICODE), "tapis d'entrée"),
+    # Läufer residue (German not translated)
+    (re.compile(r'\bLäufer\b',                        re.IGNORECASE | re.UNICODE), 'Chemin de couloir'),
+    # Fußmatte residue
+    (re.compile(r'\bFußmatte\b',                      re.IGNORECASE | re.UNICODE), "Tapis d'entrée"),
+    (re.compile(r'\bFussmatte\b',                     re.IGNORECASE | re.UNICODE), "Tapis d'entrée"),
 ]
 
 

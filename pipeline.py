@@ -91,6 +91,11 @@ _CATEGORY_KW: frozenset = frozenset({
     "matratze", "taschenfederkern", "kaltschaum",
     # Tableware
     "geschirr", "teller", "porzellan", "geschirrset",
+    # Carpet / rugs / floor textiles
+    "fußmatte", "fussmatte", "läufer", "laufer",
+    "hochflorteppich", "kurzflorteppich", "teppichläufer",
+    "sisalteppich", "juteteppich", "kuhfellteppich",
+    "schaffell", "kunstfell",
 })
 
 _WORD_SPLIT_RE = re.compile(r'[^\wäöüÄÖÜß]+')
@@ -326,6 +331,13 @@ _L1_RESIDUE_RE = re.compile(
     # Kitchen / bathroom
     r'Küchenzeile|Einbauküche|Arbeitsplatte|Grifflos|grifflos|'
     r'Waschtisch|Waschbecken|Unterflurauszug|'
+    # Carpet / rug / floor textile types
+    r'Fußmatte|Fussmatte|Hochflorteppich|Kurzflorteppich|Teppichläufer|'
+    r'Sisalteppich|Juteteppich|Kuhfellteppich|Schaffell|Kunstfell|'
+    r'Läufer|Teppich|'
+    # Textile composition materials (German terms that must not appear in French output)
+    r'Polypropylen|Polyamid|Modacryl|Kokosfaser|Kokos|Gummi|Mikrofaser|'
+    r'Elfenbein|Puderrosa|'
     # Dimension abbreviations
     r'BHT|BxHxT'
     r')\b',
@@ -333,8 +345,20 @@ _L1_RESIDUE_RE = re.compile(
 )
 
 _L1_ACCEPTABLE = frozenset({
-    "beige", "taupe", "polyester", "set", "velours",
-    "glas", "creme", "klein", "bouclé", "boucle",
+    # Colors same in German and French
+    "beige", "taupe",
+    # Product/style terms used unchanged
+    "set", "bouclé", "boucle", "velours",
+    # Textile materials valid in both languages
+    "polyester", "polyamide", "viscose", "modacrylique", "polypropylène",
+    "coco", "caoutchouc", "latex", "nylon", "sisal", "jute", "chenille",
+    "microfibre",
+    # Glass/other materials
+    "glas", "creme",
+    # Common adjectives
+    "klein",
+    # Color/term abbreviations
+    "multi",
 })
 
 
