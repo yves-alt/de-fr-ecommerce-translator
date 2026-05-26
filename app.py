@@ -1188,37 +1188,48 @@ def _normalize_col_header(raw) -> str:
 # =============================================================================
 
 def inject_custom_css():
-    # ── Background tokens ──────────────────────────────────────────────────────
-    bg_app    = "#F8FAFC"
-    bg_sb     = "#F1F5F9"
+    # ── Background ──────────────────────────────────────────────────────────────
+    bg_app    = "#F5F7FA"
+    bg_sb     = "#FFFFFF"
     bg_card   = "#FFFFFF"
     bg_input  = "#F8FAFC"
-    bg_hover  = "rgba(15,61,94,0.03)"
-    bg_subtle = "rgba(15,61,94,0.04)"
-    # ── Border / divider tokens ────────────────────────────────────────────────
-    divider   = "#E2E8F0"
-    divider_s = "#EFF3F7"
-    border    = "#E2E8F0"
-    border_sm = "#E2E8F0"
-    border_md = "#CBD5E1"
-    border_dsh= "#CBD5E1"
-    border_hv = "#94A3B8"
-    hover_rb  = "rgba(15,61,94,0.05)"
-    # ── Text tokens ───────────────────────────────────────────────────────────
-    text      = "#0F172A"
-    text2     = "#334155"
-    text2b    = "#475569"
-    text3     = "#64748B"
-    text4     = "#94A3B8"
-    text5     = "#CBD5E1"
-    text6     = "#94A3B8"
-    # ── Component-specific tokens ──────────────────────────────────────────────
-    sb_btn    = "#64748B"
-    code_bg   = "rgba(15,61,94,0.06)"
-    code_clr  = "#0F3D5E"
-    prog_trk  = "#E2E8F0"
-    chip_bg   = "rgba(15,61,94,0.05)"
-    chip_bdr  = "#E2E8F0"
+    bg_hover  = "rgba(15,61,158,0.025)"
+    bg_subtle = "rgba(15,61,158,0.04)"
+    # ── Primary accent ───────────────────────────────────────────────────────────
+    primary   = "#0F3D9E"
+    primary_d = "#0B2D7E"
+    primary_lt= "#EAF2FF"
+    # ── Status ────────────────────────────────────────────────────────────────────
+    green     = "#12A150"
+    green_d   = "#0E8A42"
+    green_bg  = "#F0FBF5"
+    amber     = "#E6A23C"
+    amber_lt  = "#FEF3C7"
+    red       = "#EF4444"
+    # ── Borders / dividers ────────────────────────────────────────────────────────
+    divider   = "#E8ECF2"
+    divider_s = "#F0F3F8"
+    border    = "#E8ECF2"
+    border_sm = "#E8ECF2"
+    border_md = "#D1D9E6"
+    border_dsh= "#C8D3E6"
+    border_hv = "#B0BDD6"
+    hover_rb  = "rgba(15,61,158,0.05)"
+    # ── Text ──────────────────────────────────────────────────────────────────────
+    text      = "#1A2035"
+    text2     = "#2D3A52"
+    text2b    = "#4A566D"
+    text3     = "#6B7A99"
+    text4     = "#9BA8BE"
+    text5     = "#C3CBDB"
+    text6     = "#9BA8BE"
+    # ── Component tokens ──────────────────────────────────────────────────────────
+    sb_btn    = "#6B7A99"
+    code_bg   = "rgba(15,61,158,0.06)"
+    code_clr  = "#0F3D9E"
+    prog_trk  = "#E8ECF2"
+    chip_bg   = "rgba(15,61,158,0.05)"
+    chip_bdr  = "#E8ECF2"
 
     st.markdown(f"""
     <style>
@@ -1255,8 +1266,8 @@ def inject_custom_css():
         to   {{ opacity: 1; transform: translateY(0); }}
     }}
     @keyframes glow-pulse {{
-        0%, 100% {{ box-shadow: 0 0 0 0 rgba(34,197,94,0.4); }}
-        50%       {{ box-shadow: 0 0 0 7px rgba(34,197,94,0); }}
+        0%, 100% {{ box-shadow: 0 0 0 0 rgba(15,61,158,0.40); }}
+        50%       {{ box-shadow: 0 0 0 8px rgba(15,61,158,0); }}
     }}
     @keyframes dot-pulse {{
         0%, 100% {{ opacity: 1; transform: scale(1); }}
@@ -1271,14 +1282,14 @@ def inject_custom_css():
     [data-testid="stSidebar"] {{
         background-color: {bg_sb} !important;
         border-right: 1px solid {divider} !important;
-        min-width: 230px !important;
-        width: 230px !important;
+        min-width: 240px !important;
+        width: 240px !important;
         transform: translateX(0) !important;
         visibility: visible !important;
         display: flex !important;
+        box-shadow: 2px 0 14px rgba(15,61,158,0.04) !important;
     }}
 
-    /* Hide both the collapse button (inside sidebar) and the expand button (hamburger) */
     [data-testid="stSidebarCollapseButton"],
     [data-testid="stSidebarCollapsedControl"],
     [data-testid="collapsedControl"] {{
@@ -1286,7 +1297,7 @@ def inject_custom_css():
         visibility: hidden !important;
         pointer-events: none !important;
     }}
-    [data-testid="stSidebarContent"] {{ padding: 20px 14px !important; }}
+    [data-testid="stSidebarContent"] {{ padding: 24px 16px !important; }}
 
     [data-testid="stSidebar"] p,
     [data-testid="stSidebar"] span,
@@ -1296,21 +1307,28 @@ def inject_custom_css():
     [data-testid="stSidebar"] hr {{
         border: none !important;
         border-top: 1px solid {divider} !important;
-        margin: 10px 0 !important;
+        margin: 12px 0 !important;
     }}
 
     [data-testid="stSidebar"] [data-testid="stRadio"] label {{
-        font-size: 13px !important;
+        font-size: 13.5px !important;
         font-weight: 500 !important;
-        padding: 8px 10px !important;
-        border-radius: 7px !important;
+        padding: 9px 12px !important;
+        border-radius: 10px !important;
         cursor: pointer !important;
-        transition: color 0.15s, background 0.15s !important;
+        transition: color 0.18s, background 0.18s !important;
         display: block !important;
+        color: {text3} !important;
+        margin-bottom: 2px !important;
     }}
     [data-testid="stSidebar"] [data-testid="stRadio"] label:hover {{
         color: {text} !important;
         background: {hover_rb} !important;
+    }}
+    [data-testid="stSidebar"] [data-testid="stRadio"] label:has(input:checked) {{
+        background: {primary_lt} !important;
+        color: {primary} !important;
+        font-weight: 600 !important;
     }}
 
     [data-testid="stSidebar"] .stButton > button {{
@@ -1333,37 +1351,38 @@ def inject_custom_css():
         box-shadow: none !important;
     }}
 
-    .sb-brand {{ padding: 6px 0 18px; }}
+    .sb-brand {{ padding: 0 0 20px; }}
     .sb-wordmark {{
-        display: flex; align-items: center; gap: 9px;
-        font-size: 14px; font-weight: 700; letter-spacing: -0.02em;
+        display: flex; align-items: center; gap: 10px;
+        font-size: 15px; font-weight: 700; letter-spacing: -0.02em;
         color: {text} !important;
     }}
     .sb-dot {{
-        width: 7px; height: 7px; border-radius: 50%;
-        background: #22C55E; flex-shrink: 0;
+        width: 8px; height: 8px; border-radius: 50%;
+        background: {green}; flex-shrink: 0;
+        box-shadow: 0 0 0 3px rgba(18,161,80,0.15);
     }}
     .sb-org {{
-        font-size: 10px; font-weight: 600; text-transform: uppercase;
-        letter-spacing: 0.09em; color: {text4} !important;
-        margin-top: 3px; padding-left: 16px;
+        font-size: 10.5px; font-weight: 600; text-transform: uppercase;
+        letter-spacing: 0.10em; color: {text4} !important;
+        margin-top: 4px; padding-left: 18px;
     }}
     .sb-nav-label {{
-        font-size: 10px; font-weight: 600; text-transform: uppercase;
-        letter-spacing: 0.1em; color: {text5} !important;
-        padding: 0 10px; margin-bottom: 4px; display: block;
+        font-size: 10px; font-weight: 700; text-transform: uppercase;
+        letter-spacing: 0.12em; color: {text5} !important;
+        padding: 0 12px; margin-bottom: 6px; display: block;
     }}
     .sb-user {{
         background: {bg_subtle};
-        border: 1px solid {divider};
-        border-radius: 8px; padding: 10px 12px; margin: 6px 0;
+        border: 1px solid {border};
+        border-radius: 10px; padding: 11px 13px; margin: 6px 0;
     }}
     .sb-user-label {{
-        font-size: 10px; font-weight: 600; text-transform: uppercase;
-        letter-spacing: 0.08em; color: {text5} !important; display: block;
+        font-size: 10px; font-weight: 700; text-transform: uppercase;
+        letter-spacing: 0.09em; color: {text5} !important; display: block;
     }}
     .sb-user-email {{
-        font-size: 11px; color: {text2b} !important;
+        font-size: 11.5px; color: {text2b} !important;
         margin-top: 4px; display: block; word-break: break-all;
         font-family: Menlo, Monaco, 'Cascadia Code', monospace;
     }}
@@ -1379,10 +1398,10 @@ def inject_custom_css():
         letter-spacing: 0.07em; text-transform: uppercase;
         margin-bottom: 36px;
     }}
-    .login-lockup-dot {{ width: 7px; height: 7px; border-radius: 50%; background: #22C55E; }}
+    .login-lockup-dot {{ width: 7px; height: 7px; border-radius: 50%; background: {green}; }}
     .login-title {{
-        font-size: 36px; font-weight: 800; color: #0F3D5E;
-        letter-spacing: -0.04em; margin: 0 0 10px; line-height: 1.1;
+        font-size: 32px; font-weight: 800; color: {primary};
+        letter-spacing: -0.04em; margin: 0 0 10px; line-height: 1.15;
     }}
     .login-subtitle {{ font-size: 14px; color: {text3}; font-weight: 400; }}
     .login-footer {{
@@ -1390,56 +1409,56 @@ def inject_custom_css():
         margin-top: 18px; font-weight: 500;
     }}
     .login-form-title {{
-        font-size: 19px; font-weight: 700; color: {text};
+        font-size: 22px; font-weight: 800; color: {text};
         letter-spacing: -0.03em;
     }}
     .login-form-sub {{
-        font-size: 12px; color: {text4}; margin-top: 5px;
+        font-size: 13px; color: {text4}; margin-top: 5px; font-weight: 400;
     }}
 
     [data-testid="stForm"] {{
         background: {bg_card} !important;
         border: 1px solid {border_sm} !important;
-        border-radius: 16px !important;
-        padding: 36px 40px !important;
-        box-shadow: 0 4px 24px rgba(15,61,94,0.06) !important;
+        border-radius: 20px !important;
+        padding: 40px 44px !important;
+        box-shadow: 0 4px 28px rgba(15,61,158,0.07) !important;
         animation: fadeUp 0.45s ease 0.08s both;
     }}
 
     /* ── Page header ──────────────────────────────────────────── */
     .page-hd {{
-        padding: 2px 0 26px;
+        padding: 4px 0 28px;
         border-bottom: 1px solid {divider};
-        margin-bottom: 32px;
+        margin-bottom: 36px;
         animation: fadeUp 0.3s ease;
     }}
     .page-hd-title {{
-        font-size: 26px; font-weight: 800; color: #0F3D5E;
+        font-size: 28px; font-weight: 800; color: {primary};
         letter-spacing: -0.04em; line-height: 1.2;
     }}
-    .page-hd-sub {{ font-size: 14px; color: {text3}; margin-top: 6px; font-weight: 400; }}
+    .page-hd-sub {{ font-size: 14px; color: {text3}; margin-top: 7px; font-weight: 400; }}
 
     /* ── Section label ────────────────────────────────────────── */
     .section-label {{
-        font-size: 11px; font-weight: 700; color: {text4};
-        text-transform: uppercase; letter-spacing: 0.1em;
-        margin: 28px 0 12px;
+        font-size: 10.5px; font-weight: 700; color: {text4};
+        text-transform: uppercase; letter-spacing: 0.12em;
+        margin: 36px 0 14px;
     }}
 
     /* ── Cards ────────────────────────────────────────────────── */
     .card {{
         background: {bg_card};
         border: 1px solid {border};
-        border-radius: 14px; padding: 28px; margin: 12px 0;
-        box-shadow: 0 2px 12px rgba(15,61,94,0.05);
+        border-radius: 20px; padding: 32px; margin: 14px 0;
+        box-shadow: 0 2px 14px rgba(15,61,158,0.05);
         animation: fadeUp 0.3s ease;
         transition: border-color 0.2s, box-shadow 0.2s;
     }}
-    .card:hover {{ border-color: {border_hv}; box-shadow: 0 4px 20px rgba(15,61,94,0.09); }}
+    .card:hover {{ border-color: {border_hv}; box-shadow: 0 6px 24px rgba(15,61,158,0.09); }}
     .card-title {{
-        font-size: 11px; font-weight: 700; color: {text4};
-        text-transform: uppercase; letter-spacing: 0.1em;
-        margin-bottom: 18px; padding-bottom: 14px;
+        font-size: 10.5px; font-weight: 700; color: {text4};
+        text-transform: uppercase; letter-spacing: 0.12em;
+        margin-bottom: 20px; padding-bottom: 16px;
         border-bottom: 1px solid {divider};
     }}
 
@@ -1451,9 +1470,9 @@ def inject_custom_css():
         animation: fadeUp 0.3s ease;
     }}
     .alert-icon {{ font-size: 14px; flex-shrink: 0; margin-top: 1px; }}
-    .alert-info  {{ background: #E0F2FE; border: 1px solid #BAE6FD; color: #0369A1; }}
-    .alert-success {{ background: #DCFCE7; border: 1px solid #BBF7D0; color: #16A34A; }}
-    .alert-warn  {{ background: #FEF3C7; border: 1px solid #FDE68A; color: #92400E; }}
+    .alert-info  {{ background: {primary_lt}; border: 1px solid #C0D8FB; color: {primary}; }}
+    .alert-success {{ background: {green_bg}; border: 1px solid rgba(18,161,80,0.22); color: {green_d}; }}
+    .alert-warn  {{ background: {amber_lt}; border: 1px solid rgba(230,162,60,0.28); color: #7A4A0F; }}
     .alert strong {{ color: {text}; font-weight: 600; }}
     .alert code {{
         font-family: Menlo, Monaco, monospace; font-size: 11px;
@@ -1462,26 +1481,26 @@ def inject_custom_css():
     }}
 
     /* ── Stat result cards ────────────────────────────────────── */
-    .result-grid {{ display: grid; grid-template-columns: repeat(4,1fr); gap: 12px; margin: 18px 0; }}
+    .result-grid {{ display: grid; grid-template-columns: repeat(4,1fr); gap: 14px; margin: 20px 0; }}
     .result-card {{
         background: {bg_card}; border: 1px solid {border};
-        border-radius: 14px; padding: 22px 20px;
-        box-shadow: 0 2px 10px rgba(15,61,94,0.05);
+        border-radius: 16px; padding: 24px 22px;
+        box-shadow: 0 2px 12px rgba(15,61,158,0.05);
         transition: border-color 0.2s, transform 0.2s, box-shadow 0.2s;
         animation: fadeUp 0.35s ease;
     }}
-    .result-card:hover {{ border-color: {border_hv}; transform: translateY(-2px); box-shadow: 0 6px 20px rgba(15,61,94,0.08); }}
+    .result-card:hover {{ border-color: {border_hv}; transform: translateY(-2px); box-shadow: 0 8px 24px rgba(15,61,158,0.09); }}
     .result-card-label {{
-        font-size: 11px; font-weight: 600; color: {text4};
-        text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 12px;
+        font-size: 10.5px; font-weight: 600; color: {text4};
+        text-transform: uppercase; letter-spacing: 0.09em; margin-bottom: 13px;
     }}
     .result-card-value {{
-        font-size: 30px; font-weight: 800; letter-spacing: -0.04em;
+        font-size: 32px; font-weight: 800; letter-spacing: -0.04em;
         font-variant-numeric: tabular-nums; color: {text};
     }}
-    .result-card-value.accent  {{ color: #0F3D5E; }}
-    .result-card-value.success {{ color: #22C55E; }}
-    .result-card-value.warn    {{ color: #F59E0B; }}
+    .result-card-value.accent  {{ color: {primary}; }}
+    .result-card-value.success {{ color: {green}; }}
+    .result-card-value.warn    {{ color: {amber}; }}
 
     /* ── Column chips ─────────────────────────────────────────── */
     .chip {{
@@ -1506,9 +1525,9 @@ def inject_custom_css():
     /* ── File chip ────────────────────────────────────────────── */
     .file-chip {{
         display: inline-flex; align-items: center; gap: 8px;
-        background: #E0F2FE;
-        border: 1px solid #BAE6FD;
-        color: #0369A1; padding: 6px 16px; border-radius: 20px;
+        background: {primary_lt};
+        border: 1px solid #C0D8FB;
+        color: {primary}; padding: 6px 16px; border-radius: 20px;
         font-size: 12px; font-weight: 600; margin: 8px 0;
         font-family: Menlo, Monaco, 'Cascadia Code', monospace;
         animation: slide-in 0.25s ease;
@@ -1518,81 +1537,84 @@ def inject_custom_css():
     .prog-shell {{
         background: {bg_card};
         border: 1px solid {border};
-        border-radius: 12px; padding: 26px 28px; margin: 14px 0;
+        border-radius: 20px; padding: 34px 36px; margin: 16px 0;
         animation: fadeUp 0.3s ease;
+        box-shadow: 0 2px 16px rgba(15,61,158,0.05);
     }}
     .prog-head {{
         display: flex; align-items: center;
-        justify-content: space-between; margin-bottom: 18px;
+        justify-content: space-between; margin-bottom: 24px;
     }}
     .prog-phase {{
-        font-size: 12px; font-weight: 700; color: {text};
-        text-transform: uppercase; letter-spacing: 0.07em;
+        font-size: 13px; font-weight: 700; color: {text};
+        text-transform: uppercase; letter-spacing: 0.08em;
     }}
-    .prog-sheet {{ font-size: 11px; color: {text4}; margin-top: 3px; }}
+    .prog-sheet {{ font-size: 12px; color: {text4}; margin-top: 4px; }}
     .prog-badge {{
-        display: inline-flex; align-items: center; gap: 5px;
-        padding: 3px 10px; border-radius: 20px;
-        font-size: 10px; font-weight: 700; letter-spacing: 0.06em;
-        background: #DCFCE7;
-        border: 1px solid #BBF7D0;
-        color: #16A34A;
+        display: inline-flex; align-items: center; gap: 6px;
+        padding: 4px 12px; border-radius: 20px;
+        font-size: 10.5px; font-weight: 700; letter-spacing: 0.06em;
+        background: {green_bg};
+        border: 1px solid rgba(18,161,80,0.22);
+        color: {green_d};
     }}
     .prog-badge-dot {{
-        width: 5px; height: 5px; border-radius: 50%; background: #22C55E;
+        width: 6px; height: 6px; border-radius: 50%; background: {green};
         animation: dot-pulse 1.4s ease infinite;
     }}
     .prog-track {{
-        width: 100%; height: 3px;
+        width: 100%; height: 4px;
         background: {prog_trk};
-        border-radius: 2px; overflow: hidden; margin: 14px 0;
+        border-radius: 3px; overflow: hidden; margin: 18px 0;
         position: relative;
     }}
     .prog-bar {{
-        height: 3px; border-radius: 2px;
-        background: linear-gradient(90deg, #22C55E 0%, #16A34A 100%);
-        transition: width 0.4s ease; position: relative;
+        height: 4px; border-radius: 3px;
+        background: linear-gradient(90deg, {primary} 0%, #3B6EDE 100%);
+        transition: width 0.45s cubic-bezier(0.4,0,0.2,1); position: relative;
     }}
     .prog-bar::after {{
-        content: ''; position: absolute; right: -1px; top: -2px;
-        width: 7px; height: 7px; background: #22C55E;
+        content: ''; position: absolute; right: -1px; top: -3px;
+        width: 10px; height: 10px; background: {primary};
         border-radius: 50%; animation: glow-pulse 1.6s ease infinite;
+        box-shadow: 0 0 0 3px {primary_lt};
     }}
     .prog-item {{
-        display: flex; align-items: center; gap: 8px;
-        font-size: 12px; color: {text3}; margin: 10px 0;
+        display: flex; align-items: center; gap: 9px;
+        font-size: 12.5px; color: {text3}; margin: 11px 0;
         font-family: Menlo, Monaco, 'Cascadia Code', monospace;
     }}
     .prog-item-dot {{
-        width: 5px; height: 5px; border-radius: 50%; background: #22C55E; flex-shrink: 0;
+        width: 6px; height: 6px; border-radius: 50%; background: {primary}; flex-shrink: 0;
         animation: dot-pulse 1.4s ease infinite;
     }}
-    .prog-item-col {{ color: #16A34A; }}
+    .prog-item-col {{ color: {primary}; }}
     .prog-item-row {{ color: {text4}; margin-left: 6px; }}
     .prog-stats {{
-        display: flex; gap: 28px; margin-top: 18px; padding-top: 14px;
+        display: flex; gap: 32px; margin-top: 22px; padding-top: 18px;
         border-top: 1px solid {divider_s};
         flex-wrap: wrap;
     }}
     .prog-stat-val {{
-        font-size: 15px; font-weight: 700; color: {text};
+        font-size: 16px; font-weight: 800; color: {text};
         font-variant-numeric: tabular-nums; display: block;
     }}
     .prog-stat-lbl {{
-        font-size: 9px; font-weight: 700; color: {text4};
-        text-transform: uppercase; letter-spacing: 0.09em;
-        margin-top: 2px; display: block;
+        font-size: 9.5px; font-weight: 700; color: {text4};
+        text-transform: uppercase; letter-spacing: 0.10em;
+        margin-top: 3px; display: block;
     }}
 
     /* ── Quality gate ─────────────────────────────────────────── */
     .qg {{
         background: {bg_card}; border: 1px solid {border};
-        border-radius: 11px; overflow: hidden; margin: 14px 0;
+        border-radius: 14px; overflow: hidden; margin: 14px 0;
         animation: fadeUp 0.35s ease;
+        box-shadow: 0 1px 8px rgba(15,61,158,0.04);
     }}
     .qg-row {{
         display: flex; align-items: center; gap: 16px;
-        padding: 13px 20px;
+        padding: 14px 22px;
         border-bottom: 1px solid {divider_s};
         font-size: 13px;
         transition: background 0.15s;
@@ -1600,94 +1622,94 @@ def inject_custom_css():
     .qg-row:last-child {{ border-bottom: none; }}
     .qg-row:hover {{ background: {bg_hover}; }}
     .qg-icon {{ flex-shrink: 0; font-size: 13px; }}
-    .qg-label {{ font-weight: 600; color: {text2}; min-width: 160px; font-size: 12px; }}
-    .qg-value {{ color: {text3}; font-size: 12px; font-family: Menlo, Monaco, monospace; }}
+    .qg-label {{ font-weight: 600; color: {text2}; min-width: 160px; font-size: 12.5px; }}
+    .qg-value {{ color: {text3}; font-size: 12.5px; font-family: Menlo, Monaco, monospace; }}
 
     /* ── Warning detail ───────────────────────────────────────── */
     .warn-detail {{
         display: flex; gap: 12px; align-items: flex-start;
-        padding: 13px 16px; margin: 7px 0;
-        background: rgba(245,158,11,0.04);
-        border: 1px solid rgba(245,158,11,0.1);
-        border-radius: 9px; font-size: 12px; color: {text2};
+        padding: 14px 18px; margin: 8px 0;
+        background: rgba(230,162,60,0.04);
+        border: 1px solid rgba(230,162,60,0.12);
+        border-radius: 11px; font-size: 12.5px; color: {text2};
         animation: fadeUp 0.3s ease;
     }}
     .warn-detail-dot {{
         width: 5px; height: 5px; border-radius: 50%;
-        background: #f59e0b; margin-top: 4px; flex-shrink: 0;
+        background: {amber}; margin-top: 5px; flex-shrink: 0;
     }}
-    .warn-detail strong {{ color: #c8952a; }}
+    .warn-detail strong {{ color: #b07020; }}
 
     /* ── Success / completion banner ──────────────────────────── */
     .success-banner {{
-        display: flex; align-items: center; gap: 16px;
-        padding: 20px 24px;
-        background: #DCFCE7;
-        border: 1px solid #BBF7D0;
-        border-radius: 14px; margin: 16px 0;
+        display: flex; align-items: center; gap: 18px;
+        padding: 22px 28px;
+        background: {green_bg};
+        border: 1px solid rgba(18,161,80,0.22);
+        border-radius: 16px; margin: 18px 0;
         animation: fadeUp 0.3s ease;
     }}
     .success-banner-icon {{
-        width: 40px; height: 40px; border-radius: 50%;
-        background: #BBF7D0;
-        border: 1px solid #86EFAC;
+        width: 44px; height: 44px; border-radius: 50%;
+        background: rgba(18,161,80,0.12);
+        border: 1px solid rgba(18,161,80,0.22);
         display: flex; align-items: center; justify-content: center;
-        font-size: 18px; flex-shrink: 0;
+        font-size: 20px; flex-shrink: 0;
     }}
-    .success-banner-title {{ font-size: 15px; font-weight: 700; color: #15803D; }}
-    .success-banner-sub   {{ font-size: 12px; color: #166534; margin-top: 3px; }}
+    .success-banner-title {{ font-size: 15px; font-weight: 700; color: {green_d}; }}
+    .success-banner-sub   {{ font-size: 12.5px; color: rgba(14,138,66,0.75); margin-top: 4px; }}
 
     .warn-banner {{
-        padding: 18px 22px;
-        background: rgba(245,158,11,0.05);
-        border: 1px solid rgba(245,158,11,0.12);
-        border-radius: 11px; margin: 16px 0;
+        padding: 18px 24px;
+        background: rgba(230,162,60,0.04);
+        border: 1px solid rgba(230,162,60,0.14);
+        border-radius: 13px; margin: 18px 0;
         animation: fadeUp 0.3s ease;
     }}
-    .warn-banner-title {{ font-size: 14px; font-weight: 700; color: #c89a44; }}
-    .warn-banner-sub   {{ font-size: 11px; color: #3a2e1a; margin-top: 3px; }}
+    .warn-banner-title {{ font-size: 14px; font-weight: 700; color: {amber}; }}
+    .warn-banner-sub   {{ font-size: 11.5px; color: {text2}; margin-top: 4px; }}
 
     /* ── Metric cards ─────────────────────────────────────────── */
-    .kpi-row   {{ display: grid; grid-template-columns: repeat(4,1fr); gap: 12px; margin: 20px 0; }}
-    .kpi-row-3 {{ display: grid; grid-template-columns: repeat(3,1fr); gap: 12px; margin: 20px 0; }}
+    .kpi-row   {{ display: grid; grid-template-columns: repeat(4,1fr); gap: 14px; margin: 22px 0; }}
+    .kpi-row-3 {{ display: grid; grid-template-columns: repeat(3,1fr); gap: 14px; margin: 22px 0; }}
     .kpi {{
         background: {bg_card};
         border: 1px solid {border};
-        border-radius: 14px; padding: 24px 20px;
-        box-shadow: 0 2px 10px rgba(15,61,94,0.05);
+        border-radius: 16px; padding: 26px 24px;
+        box-shadow: 0 2px 12px rgba(15,61,158,0.05);
         transition: border-color 0.2s, transform 0.2s, box-shadow 0.2s;
         animation: fadeUp 0.35s ease;
     }}
-    .kpi:hover {{ border-color: {border_hv}; transform: translateY(-2px); box-shadow: 0 6px 20px rgba(15,61,94,0.08); }}
+    .kpi:hover {{ border-color: {border_hv}; transform: translateY(-2px); box-shadow: 0 8px 24px rgba(15,61,158,0.09); }}
     .kpi-label {{
-        font-size: 11px; font-weight: 600; color: {text4};
-        text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 12px;
+        font-size: 10.5px; font-weight: 600; color: {text4};
+        text-transform: uppercase; letter-spacing: 0.09em; margin-bottom: 13px;
     }}
     .kpi-value {{
-        font-size: 30px; font-weight: 800; letter-spacing: -0.04em;
+        font-size: 32px; font-weight: 800; letter-spacing: -0.04em;
         color: {text}; font-variant-numeric: tabular-nums;
     }}
-    .kpi-value.accent  {{ color: #0F3D5E; }}
-    .kpi-value.success {{ color: #22C55E; }}
-    .kpi-value.warn    {{ color: #F59E0B; }}
+    .kpi-value.accent  {{ color: {primary}; }}
+    .kpi-value.success {{ color: {green}; }}
+    .kpi-value.warn    {{ color: {amber}; }}
     .kpi-value.muted   {{ color: {text4}; }}
-    .kpi-sub {{ font-size: 11px; color: {text4}; margin-top: 6px; }}
+    .kpi-sub {{ font-size: 11.5px; color: {text4}; margin-top: 7px; }}
 
     /* ── Hero metric ──────────────────────────────────────────── */
     .hero-kpi {{
-        text-align: center; padding: 56px 32px; border-radius: 16px;
-        background: linear-gradient(135deg, #E0F2FE 0%, #DCFCE7 100%);
-        border: 1px solid #BAE6FD; margin: 20px 0;
+        text-align: center; padding: 60px 32px; border-radius: 20px;
+        background: linear-gradient(135deg, {primary_lt} 0%, {green_bg} 100%);
+        border: 1px solid #C0D8FB; margin: 22px 0;
         animation: fadeUp 0.4s ease;
     }}
     .hero-kpi-value {{
         font-size: 80px; font-weight: 800; letter-spacing: -0.05em; line-height: 1;
-        background: linear-gradient(135deg, #0F3D5E 0%, #0369A1 100%);
+        background: linear-gradient(135deg, {primary} 0%, #2563EB 100%);
         -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;
         margin: 0;
     }}
-    .hero-kpi-label {{ font-size: 15px; color: {text3}; margin: 14px 0 0; font-weight: 500; }}
-    .hero-kpi-sub   {{ font-size: 12px; color: {text4}; margin: 6px 0 0; }}
+    .hero-kpi-label {{ font-size: 15px; color: {text3}; margin: 16px 0 0; font-weight: 500; }}
+    .hero-kpi-sub   {{ font-size: 12px; color: {text4}; margin: 7px 0 0; }}
 
     /* ── History ──────────────────────────────────────────────── */
     .history-empty {{
@@ -1697,11 +1719,11 @@ def inject_custom_css():
     .history-empty-sub {{ font-size: 12px; color: {text5}; }}
     .history-empty-sub strong {{ color: {text4}; }}
     .cloud-note {{
-        padding: 11px 15px; border-radius: 10px; margin: 14px 0;
-        font-size: 11px; line-height: 1.5;
-        background: #E0F2FE;
-        border: 1px solid #BAE6FD;
-        color: #0369A1;
+        padding: 12px 16px; border-radius: 11px; margin: 14px 0;
+        font-size: 11.5px; line-height: 1.55;
+        background: {primary_lt};
+        border: 1px solid #C0D8FB;
+        color: {primary};
     }}
 
     /* ── Footer ───────────────────────────────────────────────── */
@@ -1712,75 +1734,96 @@ def inject_custom_css():
     [data-testid="stTextInput"] input {{
         background: {bg_input} !important;
         border: 1px solid {border_md} !important;
-        border-radius: 9px !important;
+        border-radius: 10px !important;
         color: {text} !important;
-        font-size: 13px !important;
-        caret-color: #22C55E !important;
+        font-size: 13.5px !important;
+        padding: 11px 14px !important;
+        caret-color: {primary} !important;
     }}
     [data-testid="stTextInput"] input:focus {{
-        border-color: rgba(34,197,94,0.5) !important;
-        box-shadow: 0 0 0 3px rgba(34,197,94,0.12) !important;
+        border-color: rgba(15,61,158,0.45) !important;
+        box-shadow: 0 0 0 3px rgba(15,61,158,0.10) !important;
         outline: none !important;
     }}
-    [data-testid="stTextInput"] label p {{ color: {text2b} !important; font-size: 12px !important; font-weight: 500 !important; }}
+    [data-testid="stTextInput"] label p {{ color: {text2b} !important; font-size: 12.5px !important; font-weight: 500 !important; }}
 
     [data-testid="stNumberInput"] input {{
         background: {bg_input} !important;
         border: 1px solid {border_md} !important;
-        border-radius: 8px !important;
+        border-radius: 9px !important;
         color: {text} !important;
         font-size: 13px !important;
     }}
-    [data-testid="stNumberInput"] label p {{ color: {text2b} !important; font-size: 12px !important; }}
+    [data-testid="stNumberInput"] label p {{ color: {text2b} !important; font-size: 12.5px !important; }}
 
     [data-testid="stSelectbox"] > div > div {{
         background: {bg_input} !important;
         border: 1px solid {border_md} !important;
-        border-radius: 8px !important;
+        border-radius: 9px !important;
         color: {text} !important;
         font-size: 13px !important;
     }}
-    [data-testid="stSelectbox"] label p {{ color: {text2b} !important; font-size: 12px !important; }}
+    [data-testid="stSelectbox"] label p {{ color: {text2b} !important; font-size: 12.5px !important; }}
+
+    [data-testid="stTextarea"] textarea {{
+        background: {bg_input} !important;
+        border: 1px solid {border_md} !important;
+        border-radius: 10px !important;
+        color: {text} !important;
+        font-size: 13.5px !important;
+        line-height: 1.6 !important;
+        caret-color: {primary} !important;
+    }}
+    [data-testid="stTextarea"] textarea:focus {{
+        border-color: rgba(15,61,158,0.40) !important;
+        box-shadow: 0 0 0 3px rgba(15,61,158,0.08) !important;
+        outline: none !important;
+    }}
+    [data-testid="stTextarea"] label p {{ color: {text2b} !important; font-size: 12.5px !important; font-weight: 500 !important; }}
 
     .stProgress {{ padding: 6px 0 !important; }}
     .stProgress > div > div > div {{
-        background: linear-gradient(90deg, #22C55E 0%, #16A34A 100%) !important;
-        border-radius: 2px !important;
+        background: linear-gradient(90deg, {primary} 0%, #3B6EDE 100%) !important;
+        border-radius: 3px !important;
+    }}
+    .stProgress > div > div {{
+        border-radius: 3px !important;
+        background: {prog_trk} !important;
     }}
 
     .stButton > button {{
-        background: #22C55E !important;
+        background: {primary} !important;
         color: #fff !important;
         border: none !important;
-        border-radius: 10px !important;
-        padding: 11px 26px !important;
+        border-radius: 12px !important;
+        padding: 12px 28px !important;
         font-weight: 600 !important;
-        font-size: 13px !important;
+        font-size: 13.5px !important;
         letter-spacing: 0.01em !important;
         transition: background 0.15s, transform 0.15s, box-shadow 0.15s !important;
-        box-shadow: 0 2px 12px rgba(34,197,94,0.30) !important;
+        box-shadow: 0 2px 14px rgba(15,61,158,0.22) !important;
     }}
     .stButton > button:hover {{
-        background: #16A34A !important;
+        background: {primary_d} !important;
         transform: translateY(-1px) !important;
-        box-shadow: 0 5px 18px rgba(34,197,94,0.40) !important;
+        box-shadow: 0 6px 20px rgba(15,61,158,0.32) !important;
     }}
     .stButton > button:active {{ transform: translateY(0) !important; }}
 
     .stDownloadButton > button {{
         background: #FFFFFF !important;
-        color: #0F3D5E !important;
-        border: 1.5px solid #0F3D5E !important;
-        border-radius: 10px !important;
-        padding: 12px 26px !important;
+        color: {primary} !important;
+        border: 1.5px solid {primary} !important;
+        border-radius: 12px !important;
+        padding: 12px 28px !important;
         font-weight: 600 !important;
-        font-size: 13px !important;
+        font-size: 13.5px !important;
         box-shadow: none !important;
         transition: background 0.15s, border-color 0.15s, transform 0.15s !important;
     }}
     .stDownloadButton > button:hover {{
-        background: #E0F2FE !important;
-        border-color: #0369A1 !important;
+        background: {primary_lt} !important;
+        border-color: {primary_d} !important;
         transform: translateY(-1px) !important;
     }}
 
@@ -1788,40 +1831,41 @@ def inject_custom_css():
     [data-testid="stFileUploader"] > div {{
         background: {bg_hover} !important;
         border: 1.5px dashed {border_dsh} !important;
-        border-radius: 11px !important;
+        border-radius: 14px !important;
         transition: border-color 0.2s, background 0.2s !important;
+        padding: 24px !important;
     }}
     [data-testid="stFileUploader"] section:hover,
     [data-testid="stFileUploader"] > div:hover {{
-        border-color: rgba(34,197,94,0.4) !important;
-        background: rgba(34,197,94,0.03) !important;
+        border-color: rgba(15,61,158,0.35) !important;
+        background: rgba(15,61,158,0.03) !important;
     }}
     [data-testid="stFileUploader"] span,
     [data-testid="stFileUploader"] p {{ color: {text3} !important; font-size: 13px !important; }}
     [data-testid="stFileUploader"] small {{ color: {text5} !important; }}
     [data-testid="stFileUploader"] button {{
-        background: #DCFCE7 !important;
-        color: #16A34A !important;
-        border: 1px solid #BBF7D0 !important;
-        border-radius: 8px !important;
-        font-size: 12px !important;
+        background: {primary_lt} !important;
+        color: {primary} !important;
+        border: 1px solid #C0D8FB !important;
+        border-radius: 9px !important;
+        font-size: 12.5px !important;
         font-weight: 600 !important;
     }}
 
     [data-testid="stExpander"] {{
         background: {bg_card} !important;
         border: 1px solid {border} !important;
-        border-radius: 9px !important;
+        border-radius: 12px !important;
     }}
     [data-testid="stExpander"] summary {{
         color: {text3} !important;
-        font-size: 12px !important;
+        font-size: 12.5px !important;
         font-weight: 600 !important;
-        padding: 10px 14px !important;
+        padding: 12px 16px !important;
     }}
 
     [data-testid="stDataFrame"] {{
-        border-radius: 11px !important;
+        border-radius: 13px !important;
         overflow: hidden !important;
         border: 1px solid {border} !important;
     }}
@@ -1862,15 +1906,44 @@ def inject_custom_css():
         color: #818cf8;
     }}
     .alert-success {{
-        background: #DCFCE7;
-        border: 1px solid #BBF7D0;
-        color: #16A34A;
+        background: {green_bg};
+        border: 1px solid rgba(18,161,80,0.22);
+        color: {green_d};
+    }}
+
+    /* ── Translator hero card ────────────────────────────────── */
+    .tr-hero {{
+        background: {bg_card};
+        border: 1px solid {border};
+        border-radius: 24px; padding: 44px 48px; margin-bottom: 36px;
+        box-shadow: 0 4px 28px rgba(15,61,158,0.06);
+        animation: fadeUp 0.35s ease;
+        position: relative; overflow: hidden;
+    }}
+    .tr-hero::before {{
+        content: ''; position: absolute;
+        top: -70px; right: -70px;
+        width: 220px; height: 220px; border-radius: 50%;
+        background: radial-gradient(circle, {primary_lt} 0%, transparent 70%);
+        pointer-events: none;
+    }}
+    .tr-hero-tag {{
+        font-size: 10.5px; font-weight: 700; text-transform: uppercase;
+        letter-spacing: 0.12em; color: {primary}; margin-bottom: 12px;
+    }}
+    .tr-hero-title {{
+        font-size: 30px; font-weight: 800; color: {primary};
+        letter-spacing: -0.03em; margin: 0 0 12px; line-height: 1.2;
+    }}
+    .tr-hero-sub {{
+        font-size: 15px; color: {text3}; margin: 0; font-weight: 400;
+        max-width: 520px; line-height: 1.65;
     }}
 
     @media (max-width: 780px) {{
         .kpi-row, .result-grid {{ grid-template-columns: repeat(2,1fr) !important; }}
         .hero-kpi-value {{ font-size: 52px !important; }}
-        .main .block-container {{ padding: 1.5rem 1.2rem 3rem !important; }}
+        .main .block-container {{ padding: 1.5rem 1.4rem 3rem !important; }}
     }}
     </style>
     """, unsafe_allow_html=True)
@@ -5898,49 +5971,119 @@ def render_review_dashboard(all_warnings: list, stats: dict, highlight_in_excel:
 # =============================================================================
 
 def login_page():
-    render_header()
+    col_left, col_right = st.columns([9, 11], gap="small")
 
-    _, col, _ = st.columns([1, 1.6, 1])
-    with col:
-        with st.form("login_form"):
-            st.markdown("""
-            <div style="text-align:center;margin-bottom:28px;">
-                <div class="login-form-title" style="color:#0F3D5E;">Sign in to Home24</div>
-                <div class="login-form-sub">Internal access · AI localization workspace</div>
+    with col_left:
+        st.markdown("""
+        <div style="
+            background: linear-gradient(160deg, #0F3D9E 0%, #1A56D6 100%);
+            min-height: 92vh;
+            padding: 60px 52px;
+            display: flex;
+            flex-direction: column;
+            margin: -2.5rem -1rem -4rem -3rem;
+            position: relative;
+            overflow: hidden;
+        ">
+            <div style="position:absolute;top:-110px;right:-110px;width:340px;height:340px;
+                        border-radius:50%;background:rgba(255,255,255,0.06);pointer-events:none;"></div>
+            <div style="position:absolute;bottom:-80px;left:-70px;width:240px;height:240px;
+                        border-radius:50%;background:rgba(255,255,255,0.05);pointer-events:none;"></div>
+            <div style="display:flex;align-items:center;gap:10px;font-size:15px;font-weight:700;
+                        color:rgba(255,255,255,0.95);letter-spacing:-0.01em;position:relative;z-index:1;">
+                <div style="width:9px;height:9px;border-radius:50%;background:#12A150;
+                            box-shadow:0 0 0 3px rgba(18,161,80,0.28);flex-shrink:0;"></div>
+                Home24 Localization
             </div>
-            """, unsafe_allow_html=True)
+            <div style="flex:1;display:flex;flex-direction:column;justify-content:center;
+                        padding:52px 0;position:relative;z-index:1;">
+                <div style="font-size:10.5px;font-weight:700;text-transform:uppercase;
+                            letter-spacing:0.14em;color:rgba(255,255,255,0.45);margin-bottom:22px;">
+                    Enterprise · Internal Platform
+                </div>
+                <h1 style="font-size:36px;font-weight:800;color:#ffffff;letter-spacing:-0.04em;
+                           line-height:1.15;margin:0 0 20px;">
+                    Translate product data at scale.
+                </h1>
+                <p style="font-size:15px;color:rgba(255,255,255,0.68);line-height:1.72;
+                          font-weight:400;margin:0 0 44px;max-width:340px;">
+                    AI-powered German to French and Dutch localization — built for Home24's e-commerce catalog.
+                </p>
+                <ul style="list-style:none;padding:0;margin:0;">
+                    <li style="display:flex;align-items:center;gap:13px;font-size:13.5px;
+                               color:rgba(255,255,255,0.78);margin-bottom:16px;font-weight:500;">
+                        <span style="width:7px;height:7px;border-radius:50%;background:#12A150;
+                                     flex-shrink:0;box-shadow:0 0 0 2px rgba(18,161,80,0.3);"></span>
+                        Translation Memory with semantic matching
+                    </li>
+                    <li style="display:flex;align-items:center;gap:13px;font-size:13.5px;
+                               color:rgba(255,255,255,0.78);margin-bottom:16px;font-weight:500;">
+                        <span style="width:7px;height:7px;border-radius:50%;background:#12A150;
+                                     flex-shrink:0;box-shadow:0 0 0 2px rgba(18,161,80,0.3);"></span>
+                        Verified furniture &amp; material terminology
+                    </li>
+                    <li style="display:flex;align-items:center;gap:13px;font-size:13.5px;
+                               color:rgba(255,255,255,0.78);margin-bottom:16px;font-weight:500;">
+                        <span style="width:7px;height:7px;border-radius:50%;background:#12A150;
+                                     flex-shrink:0;box-shadow:0 0 0 2px rgba(18,161,80,0.3);"></span>
+                        Quality gate with automatic residue detection
+                    </li>
+                    <li style="display:flex;align-items:center;gap:13px;font-size:13.5px;
+                               color:rgba(255,255,255,0.78);font-weight:500;">
+                        <span style="width:7px;height:7px;border-radius:50%;background:#12A150;
+                                     flex-shrink:0;box-shadow:0 0 0 2px rgba(18,161,80,0.3);"></span>
+                        Batch processing with Excel export
+                    </li>
+                </ul>
+            </div>
+            <div style="font-size:11px;color:rgba(255,255,255,0.30);font-weight:500;
+                        letter-spacing:0.04em;position:relative;z-index:1;">
+                Home24 · Internal use only · v6.0
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
 
-            email_input    = st.text_input("Email address", placeholder="you@home24.de")
-            password_input = st.text_input("Password", type="password", placeholder="••••••••")
-            submitted      = st.form_submit_button("Sign in →", use_container_width=True)
+    with col_right:
+        st.markdown("<div style='height:60px'></div>", unsafe_allow_html=True)
+        _, form_col, _ = st.columns([1, 5, 1])
+        with form_col:
+            with st.form("login_form"):
+                st.markdown("""
+                <div style="margin-bottom:32px;">
+                    <div class="login-form-title">Welcome back</div>
+                    <div class="login-form-sub">Sign in to your localization workspace</div>
+                </div>
+                """, unsafe_allow_html=True)
 
-        st.markdown(
-            '<p style="text-align:center;font-size:0.75rem;color:#b0b0c8;margin-top:10px;">'
-            'Demo guest access available</p>',
-            unsafe_allow_html=True,
-        )
-        st.markdown('<p class="login-footer">Home24 · Internal use only</p>', unsafe_allow_html=True)
+                email_input    = st.text_input("Email address", placeholder="you@home24.de")
+                password_input = st.text_input("Password", type="password", placeholder="••••••••")
+                submitted      = st.form_submit_button("Sign in", use_container_width=True)
 
-        if submitted:
-            _, stored_pw = _get_admin_credentials()
-            guest_email, guest_pw = _get_guest_credentials()
-            if not stored_pw and not guest_pw:
-                st.error("Credentials not configured. Check Streamlit secrets or your .env file.")
-            else:
-                role = verify_credentials(email_input, password_input)
-                if role:
-                    session_id = str(uuid.uuid4())
-                    st.session_state["authenticated"]    = True
-                    st.session_state["user_role"]        = role
-                    st.session_state["user_email"]       = email_input.strip().lower()
-                    st.session_state["session_id"]       = session_id
-                    st.session_state["language_selected"] = False
-                    db_log_login(email_input.strip().lower(), role, session_id)
-                    st.rerun()
+            st.markdown(
+                '<p style="text-align:center;font-size:0.75rem;color:#9BA8BE;margin-top:12px;">'
+                'Demo guest access available</p>',
+                unsafe_allow_html=True,
+            )
+            st.markdown('<p class="login-footer">Home24 · Internal use only</p>', unsafe_allow_html=True)
+
+            if submitted:
+                _, stored_pw = _get_admin_credentials()
+                guest_email, guest_pw = _get_guest_credentials()
+                if not stored_pw and not guest_pw:
+                    st.error("Credentials not configured. Check Streamlit secrets or your .env file.")
                 else:
-                    st.error("Invalid email or password.")
-
-    render_footer()
+                    role = verify_credentials(email_input, password_input)
+                    if role:
+                        session_id = str(uuid.uuid4())
+                        st.session_state["authenticated"]    = True
+                        st.session_state["user_role"]        = role
+                        st.session_state["user_email"]       = email_input.strip().lower()
+                        st.session_state["session_id"]       = session_id
+                        st.session_state["language_selected"] = False
+                        db_log_login(email_input.strip().lower(), role, session_id)
+                        st.rerun()
+                    else:
+                        st.error("Invalid email or password.")
 
 
 # =============================================================================
@@ -5953,19 +6096,10 @@ def translator_page():
     lang_label      = "Dutch (NL)" if target_language == "Dutch" else "French (FR)"
 
     st.markdown(f"""
-    <div style="background:linear-gradient(135deg,#E0F2FE 0%,#DCFCE7 100%);
-                border:1px solid #BAE6FD;border-radius:16px;
-                padding:40px 40px 36px;margin-bottom:36px;
-                animation:fadeUp 0.35s ease;">
-        <div style="font-size:11px;font-weight:700;text-transform:uppercase;
-                    letter-spacing:0.1em;color:#0369A1;margin-bottom:10px;">
-            DE → {lang_code} · AI-Powered
-        </div>
-        <h1 style="font-size:28px;font-weight:800;color:#0F3D5E;
-                   letter-spacing:-0.03em;margin:0 0 10px;line-height:1.2;">
-            AI Localization Platform
-        </h1>
-        <p style="font-size:15px;color:#475569;margin:0;font-weight:400;max-width:540px;">
+    <div class="tr-hero">
+        <div class="tr-hero-tag">DE → {lang_code} · AI-Powered</div>
+        <h1 class="tr-hero-title">AI Localization Platform</h1>
+        <p class="tr-hero-sub">
             Translate German product data into {lang_label.split(" ")[0]} with verified
             e-commerce terminology, translation memory, and quality assurance.
         </p>
@@ -7667,44 +7801,60 @@ def translation_memory_page():
 
 def language_selection_page():
     st.markdown("""
-    <div class="login-hero">
-        <div class="login-lockup">
-            <div class="login-lockup-dot"></div>
+    <div style="text-align:center;padding:72px 0 48px;animation:fadeUp 0.4s ease;">
+        <div style="display:inline-flex;align-items:center;gap:8px;font-size:10.5px;
+                    font-weight:700;text-transform:uppercase;letter-spacing:0.14em;
+                    color:#9BA8BE;margin-bottom:28px;">
+            <div style="width:6px;height:6px;border-radius:50%;background:#12A150;"></div>
             Home24 AI Localization
         </div>
-        <h1 class="login-title">Choose your target language</h1>
-        <p class="login-subtitle">Select the language for this translation session</p>
+        <h1 style="font-size:34px;font-weight:800;color:#0F3D9E;letter-spacing:-0.04em;
+                   line-height:1.15;margin:0 0 14px;">Choose your target language</h1>
+        <p style="font-size:15px;color:#6B7A99;font-weight:400;margin:0;">
+            Select the language for this translation session
+        </p>
     </div>
     """, unsafe_allow_html=True)
 
-    _, col, _ = st.columns([1, 2, 1])
+    _, col, _ = st.columns([1, 2.2, 1])
     with col:
-        st.markdown("""
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:8px 0 24px;">
-        """, unsafe_allow_html=True)
+        col_fr, col_nl = st.columns(2, gap="large")
 
-        col_fr, col_nl = st.columns(2)
         with col_fr:
-            if st.button("🇫🇷  French (FR)", use_container_width=True, key="pick_fr"):
+            st.markdown("""
+            <div style="background:#FFFFFF;border:1px solid #E8ECF2;border-radius:20px;
+                        padding:36px 28px 28px;text-align:center;
+                        box-shadow:0 2px 14px rgba(15,61,158,0.05);margin-bottom:14px;
+                        transition:border-color 0.2s,box-shadow 0.2s;">
+                <div style="font-size:44px;margin-bottom:18px;line-height:1;">🇫🇷</div>
+                <div style="font-size:17px;font-weight:700;color:#1A2035;margin-bottom:6px;">French</div>
+                <div style="font-size:12px;color:#9BA8BE;font-weight:500;">
+                    German → French · FR prefix
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+            if st.button("Select French", use_container_width=True, key="pick_fr"):
                 st.session_state["target_language"]  = "French"
                 st.session_state["language_selected"] = True
                 st.rerun()
-            st.markdown("""
-            <div style="text-align:center;font-size:11px;color:#94A3B8;margin-top:4px;">
-                German → French<br>FR- prefix
-            </div>
-            """, unsafe_allow_html=True)
 
         with col_nl:
-            if st.button("🇳🇱  Dutch (NL)", use_container_width=True, key="pick_nl"):
+            st.markdown("""
+            <div style="background:#FFFFFF;border:1px solid #E8ECF2;border-radius:20px;
+                        padding:36px 28px 28px;text-align:center;
+                        box-shadow:0 2px 14px rgba(15,61,158,0.05);margin-bottom:14px;
+                        transition:border-color 0.2s,box-shadow 0.2s;">
+                <div style="font-size:44px;margin-bottom:18px;line-height:1;">🇳🇱</div>
+                <div style="font-size:17px;font-weight:700;color:#1A2035;margin-bottom:6px;">Dutch</div>
+                <div style="font-size:12px;color:#9BA8BE;font-weight:500;">
+                    German → Dutch · NL prefix
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+            if st.button("Select Dutch", use_container_width=True, key="pick_nl"):
                 st.session_state["target_language"]  = "Dutch"
                 st.session_state["language_selected"] = True
                 st.rerun()
-            st.markdown("""
-            <div style="text-align:center;font-size:11px;color:#94A3B8;margin-top:4px;">
-                German → Dutch<br>NL- prefix
-            </div>
-            """, unsafe_allow_html=True)
 
     render_footer()
 
