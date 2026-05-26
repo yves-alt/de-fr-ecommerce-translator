@@ -3,12 +3,15 @@ Home24 Dutch (NL) Localization Engine — Trados TM-powered.
 
 Pipeline priority:
   1. Exact TM match        → EXACT_TM_MATCH
-  2. Fuzzy TM match        → FUZZY_TM_MATCH
-  3. Terminology injection → AI_GUIDED (constrains GPT output)
-  4. Dekor normalization   → applied pre/post-AI
-  5. Forbidden patterns    → applied post-AI
-  6. Format normalization  → applied post-AI
-  7. QA validation         → applied post-AI
+  2. Segment TM match      → SEGMENT_TM_MATCH
+  3. Fuzzy TM match        → FUZZY_TM_MATCH
+  4. Token fuzzy match     → TOKEN_FUZZY_MATCH
+  5. Terminology injection → AI_GUIDED (constrains GPT output)
+  6. Dekor normalization   → applied pre/post-AI
+  7. Post-colon lowercase  → applied post-AI
+  8. Forbidden patterns    → applied post-AI
+  9. Format normalization  → applied post-AI
+ 10. QA validation         → applied post-AI
 """
 
 import re
@@ -22,24 +25,28 @@ from difflib import SequenceMatcher
 
 # Dekor / finish patterns — longest first so multi-word phrases replace before substrings
 NL_DEKOR_MAP: list[tuple[str, str]] = [
-    ("Eiche Artisan Dekor",    "Artisan eikenlook"),
-    ("Eiche Viking Dekor",     "Viking eikenhouten look"),
-    ("Eiche hell Dekor",       "lichte eikenhouten look"),
+    # Multi-word compound dekor forms first (longest match wins)
+    ("Eiche Sägerau Dekor",    "grof gezaagde eikenlook"),   # TM: exact
+    ("Eiche Artisan Dekor",    "Artisan eikenlook"),          # TM: exact
+    ("Eiche Viking Dekor",     "Viking eikenhouten look"),    # TM: exact
+    ("Eiche hell Dekor",       "lichte eikenhouten look"),    # TM: exact
     ("Eiche dunkel Dekor",     "donkere eikenhouten look"),
     ("Eiche natur Dekor",      "natuurlijke eikenhouten look"),
     ("Zinneiche Dekor",        "tin-eikenhouten look"),
-    ("Kernbuche Dekor",        "kernbeukenhouten look"),
-    ("Marmor Weiß Dekor",      "witte marmerlook"),
+    ("Kernbuche Dekor",        "kernbeukenhouten look"),      # TM: exact
+    ("Marmor Weiß Dekor",      "witte marmerlook"),           # TM: exact
     ("Marmor Schwarz Dekor",   "zwarte marmerlook"),
     ("Marmor Grau Dekor",      "grijze marmerlook"),
+    ("Nussbaum Dekor",         "notenlook"),                  # TM-derived; never "Notelaar Dekor"
     ("Beton Dekor",            "betonlook"),
     ("Artisan Dekor",          "Artisan look"),
-    ("Eiche Dekor",            "eikenhouten look"),
-    ("Dekor",                  "look"),           # generic fallback — last
+    # Single-word forms — must come after compounds
+    ("Eiche Dekor",            "eikenlook"),                  # TM pattern
+    ("Eiche",                  "eiken"),                      # raw wood, not dekor
+    ("Dekor",                  "look"),                       # generic fallback — last
 ]
 
 # Color map — full German → Dutch canonical
-# "Color-of-X" descriptors get -kleurig in NL; basic colors do not
 NL_COLOR_MAP: list[tuple[str, str]] = [
     # Compound shades first
     ("dunkelgrau",     "donkergrijs"),
@@ -80,98 +87,129 @@ NL_COLOR_MAP: list[tuple[str, str]] = [
     ("Matt",           "mat"),
 ]
 
-# Canonical furniture name map — TM-verified (longest first)
+# Canonical furniture/product name map — TM-verified (longest first)
 NL_FURNITURE_CANONICAL: list[tuple[str, str]] = [
+    # Kitchen — specific forms first
+    ("Singleküche",             "Mini keuken"),         # TM: "Singleküche Kinneloa" → "Mini keuken Kinneloa"
+    ("Pantryküche",             "Pantrykeuken"),
+    ("Küchenleerblock",         "Keukenblok"),          # Never "Keukenleerblok"
+    ("Kücheninsel",             "Kookeiland"),          # TM: exact
+    ("Autarke Küchenzeile",     "Keukenblok"),          # TM: "Autarke Küchenzeile" → "Keukenblok"
+    ("Küchenzeile",             "Keukenblok"),          # TM: exact
+    ("Einbauküche",             "Inbouwkeuken"),
+    # Living room seating
+    ("Wohnlandschaft",          "Zithoek"),             # TM: "Wohnlandschaft Fardah" → "Zithoek Fardah"
+    ("Ecksofa",                 "Hoekbank"),            # TM: "Ecksofa BANDO" → "Hoekbank BANDO"
+    ("Polstergarnitur",         "bankstellen"),
+    ("Loungesessel",            "loungefauteuil"),      # TM: "Loungesessel" → "loungefauteuil"
+    ("Bigsofa",                 "XXL-bank"),
+    ("Big-Sofa",                "XXL-bank"),
+    ("XXL Sessel",              "XXL-fauteuil"),
+    ("Schlafsessel",            "slaapfauteuil"),
+    ("Drehsessel",              "draaifauteuil"),
+    ("Freischwinger",           "sledestoel"),
+    ("Armlehnenstuhl",          "stoel met armleuningen"),
+    ("Cocktailsessel",          "fauteuil"),
+    ("Loungesofa",              "Loungebank"),          # TM: "Loungesofa Valera" → "Loungebank Valera"
+    # Ottomane — always lowercase in NL
+    ("Ottomane",                "ottomane"),            # TM: "mit Ottomane" → "met ottomane"
+    ("Ottoman",                 "ottomane"),
     # TV furniture
-    ("TV-Lowboard",              "Tv-meubel"),
-    ("TV Lowboard",              "Tv-meubel"),
-    ("Fernsehsessel",            "tv-fauteuil"),
+    ("TV-Lowboard",             "Tv-meubel"),
+    ("TV Lowboard",             "Tv-meubel"),
+    ("Fernsehsessel",           "tv-fauteuil"),
+    # Sideboard — TM: "Sideboard Weallup" → "Dressoir Weallup"
+    ("Sideboard",               "Dressoir"),
+    # Kommode — TM: "Kommode Weallup" → "Kast Weallup"
+    ("Kommode",                 "Kast"),
     # Lighting — compound LED forms first
-    ("LED-Pendelleuchte",        "LED-hanglamp"),
-    ("LED-Deckenleuchte",        "LED-plafondlamp"),
-    ("LED-Wandleuchte",          "LED-wandlamp"),
-    ("LED-Tischleuchte",         "LED-tafellamp"),
-    ("LED-Stehleuchte",          "LED-staande lamp"),
-    ("LED-Deckenleuchten",       "LED-plafondlamp"),
-    ("Pendelleuchte",            "hanglamp"),
-    ("Tischleuchte",             "tafellamp"),
-    ("Deckenleuchten",           "plafondlamp"),
-    ("Deckenleuchte",            "plafondlamp"),
-    ("Wandleuchte",              "wandlamp"),
-    ("Stehleuchte",              "staande lamp"),
-    # Seating
-    ("Polstergarnitur",          "bankstellen"),
-    ("Loungesessel",             "loungestoel"),
-    ("Bigsofa",                  "XXL-bank"),
-    ("Big-Sofa",                 "XXL-bank"),
-    ("XXL Sessel",               "XXL-fauteuil"),
-    ("Schlafsessel",             "slaapfauteuil"),
-    ("Drehsessel",               "draaifauteuil"),
-    ("Freischwinger",            "sledestoel"),
-    ("Armlehnenstuhl",           "stoel met armleuningen"),
-    ("Cocktailsessel",           "fauteuil"),
-    # Bathroom sets
-    ("Badezimmerset",            "Badkamerset"),
-    ("Badset",                   "Badkamerset"),
-    ("Waschbeckenunterschrank",  "wastafelonderkast"),
-    ("Spiegelschrank",           "spiegelkast"),
-    ("Spiegelpaneel",            "spiegelpaneel"),
+    ("LED-Pendelleuchte",       "LED-hanglamp"),
+    ("LED-Deckenleuchte",       "LED-plafondlamp"),
+    ("LED-Wandleuchte",         "LED-wandlamp"),
+    ("LED-Tischleuchte",        "LED-tafellamp"),
+    ("LED-Stehleuchte",         "LED-staande lamp"),
+    ("LED-Deckenleuchten",      "LED-plafondlamp"),
+    ("Pendelleuchte",           "hanglamp"),
+    ("Tischleuchte",            "tafellamp"),
+    ("Deckenleuchten",          "plafondlamp"),
+    ("Deckenleuchte",           "plafondlamp"),
+    ("Wandleuchte",             "wandlamp"),
+    ("Stehleuchte",             "staande lamp"),
+    # Bathroom
+    ("Badezimmerset",           "Badkamerset"),
+    ("Badset",                  "Badkamerset"),
+    ("Waschbeckenunterschrank", "wastafelonderkast"),
+    ("Spiegelschrank",          "spiegelkast"),
+    ("Spiegelpaneel",           "spiegelpaneel"),
     # Textiles / decor
-    ("Dekokissen",               "sierkussen"),
-    ("Raffgardinenrollo",        "vouwgordijn"),
-    ("Wanddekoration",           "wanddecoratie"),
-    ("Wanduhr",                  "wandklok"),
+    ("Dekokissen",              "sierkussen"),
+    ("Raffgardinenrollo",       "vouwgordijn"),
+    ("Wanddekoration",          "wanddecoratie"),
+    ("Wanduhr",                 "wandklok"),
     # Tableware
-    ("Tellerset",                "bordenset"),
-    ("Trinkhalm-Set",            "set rietjes"),
-    ("Dekanter",                 "karaf"),
+    ("Tellerset",               "bordenset"),
+    ("Trinkhalm-Set",           "set rietjes"),
+    ("Dekanter",                "karaf"),
     # Storage
-    ("Steckregal",               "opbergrek"),
-    ("Kommode",                  "kast"),        # in product name context
+    ("Steckregal",              "opbergrek"),
     # Outdoor
-    ("Gartensitzgruppe",         "tuinset"),
-    ("Gartenessgruppe",          "tuinset"),
+    ("Gartensitzgruppe",        "tuinset"),
+    ("Gartenessgruppe",         "Outdoor-diningset"),   # TM: exact pattern
     # Column labels (appear as "Label:" prefixes in structured data)
-    ("Absetzung",                "afwerking"),
-    ("Füllung",                  "vulling"),
-    ("Abdeckplatte",             "afdekplaat"),
-    ("Oberplatte",               "bovenblad"),
-    ("Kleiderstange",            "kledingroede"),
-    ("Innenstoff",               "binnenstof"),
-    ("Belastbarkeit",            "draagkracht"),
-    ("Lieferumfang",             "leveringsomvang"),
-    ("Inklusive",                "inclusief"),
+    ("Absetzung",               "afwerking"),
+    ("Füllung",                 "vulling"),
+    ("Abdeckplatte",            "afdekplaat"),
+    ("Oberplatte",              "bovenblad"),
+    ("Kleiderstange",           "kledingroede"),
+    ("Innenstoff",              "binnenstof"),
+    ("Belastbarkeit",           "draagkracht"),
+    ("Lieferumfang",            "leveringsomvang"),
+    ("Inklusive",               "inclusief"),
+    # Variant/combo labels in product names
+    ("Variante",                "variant"),             # TM: "Variante A" → "variant A"
+    ("Kombi",                   "combi"),               # TM: "Kombi A" → "combi A"
 ]
 
 # Forbidden outputs → canonical replacements (detected post-AI, applied as correction)
 NL_FORBIDDEN_REPLACEMENTS: list[tuple[str, str]] = [
+    # Kitchen — wrong forms
+    ("Keukenleerblok",          "Keukenblok"),          # "Leerblok" is not Dutch
+    ("Enkele keuken",           "Mini keuken"),         # spec forbidden
+    ("Eenpersoonskeuken",       "Mini keuken"),         # spec forbidden
+    # Sofa/seating — wrong forms
+    ("Zits bank",               "zitsbank"),            # space is wrong
+    ("Woonlandschap",           "Zithoek"),             # TM says Zithoek
+    # Finish / dekor wrong forms
+    ("Zagerau",                 "grof gezaagde eikenlook"),
+    ("Notelaar look",           "notenlook"),
+    ("Notelaar dekor",          "notenlook"),
     # TV furniture wrong forms
-    ("TV lowboard",          "Tv-meubel"),
-    ("TV-lowboard",          "Tv-meubel"),
-    ("televisie meubel",     "Tv-meubel"),
-    ("televisie-meubel",     "Tv-meubel"),
-    ("televisiemeubel",      "Tv-meubel"),
-    ("Televisiemeubel",      "Tv-meubel"),
+    ("TV lowboard",             "Tv-meubel"),
+    ("TV-lowboard",             "Tv-meubel"),
+    ("televisie meubel",        "Tv-meubel"),
+    ("televisie-meubel",        "Tv-meubel"),
+    ("televisiemeubel",         "Tv-meubel"),
+    ("Televisiemeubel",         "Tv-meubel"),
     # Dekor anti-patterns
-    ("eiken decor",          "eikenlook"),
-    ("Eiken decor",          "eikenlook"),
-    ("decor eik",            "eikenlook"),
-    ("Decor eik",            "eikenlook"),
-    ("eikenhouten decor",    "eikenhouten look"),
-    # vaatwasserfront wrong forms
-    ("vaatwasserpaneel",     "vaatwasserfront"),
-    ("vaatwasser paneel",    "vaatwasserfront"),
-    ("vaatwasser front",     "vaatwasserfront"),
-    # Greeploos wrong forms
-    ("zonder greep",         "greeploos"),
-    ("zonder grepen",        "greeploos"),
+    ("eiken decor",             "eikenlook"),
+    ("Eiken decor",             "eikenlook"),
+    ("decor eik",               "eikenlook"),
+    ("Decor eik",               "eikenlook"),
+    ("eikenhouten decor",       "eikenhouten look"),
     # Rattan/weaving wrong forms
-    ("synthetisch rotan",    "kunststof vlechtwerk"),
-    ("kunststof rotan",      "kunststof vlechtwerk"),
+    ("synthetisch rotan",       "kunststof vlechtwerk"),
+    ("kunststof rotan",         "kunststof vlechtwerk"),
     # Gepoedercoat wrong form
-    ("poedergecoat",         "gepoedercoat"),
+    ("poedergecoat",            "gepoedercoat"),
     # Incorrect set composition wording
-    ("bestaand uit",         "bestaande uit"),
+    ("bestaand uit",            "bestaande uit"),
+    # Greeploos wrong forms
+    ("zonder greep",            "greeploos"),
+    ("zonder grepen",           "greeploos"),
+    # GSP wrong form — TM says vaatwasserpaneel, not vaatwasserfront
+    ("vaatwasserfront",         "vaatwasserpaneel"),
+    ("vaatwasser front",        "vaatwasserpaneel"),
+    ("vaatwasser paneel",       "vaatwasserpaneel"),
 ]
 
 
@@ -185,7 +223,11 @@ _NL_SLASH_SPACES = re.compile(
     re.UNICODE,
 )
 _NL_DEKOR_RESIDUE = re.compile(r'\bDekor\b', re.UNICODE)
-_NL_BHT    = re.compile(r'\bBHT\b|\bBxHxT\b|B\s*x\s*H\s*x\s*T\b', re.IGNORECASE)
+# TM shows BxHxD (no spaces): "B/H/T:" → "BxHxD:", "BHT" → "BxHxD"
+_NL_BHT    = re.compile(
+    r'\bBHT\b|\bBxHxT\b|B\s*x\s*H\s*x\s*T\b|B\s*/\s*H\s*/\s*T\b',
+    re.IGNORECASE,
+)
 _NL_TEILIG = re.compile(r'(\d+(?:[.,]\d+)?)-?teilig\b', re.IGNORECASE)
 _NL_TYP    = re.compile(r'\bTyp\b\s+([A-Z]\b)', re.UNICODE)
 _NL_SITZER = re.compile(r'(\d+(?:[.,]5)?)-?[Ss]itzer\b')
@@ -197,6 +239,10 @@ _NL_INKL       = re.compile(r'\binkl\.\b',    re.IGNORECASE)
 _NL_OHNE_DEKO  = re.compile(r'\bohne\s+Dekoration\b', re.IGNORECASE)
 _NL_BESTEHEND  = re.compile(r'\bbestehend\s+aus\b', re.IGNORECASE)
 _NL_SET_BEST   = re.compile(r'\bSet\s+bestehend\s+aus\b', re.IGNORECASE)
+# German "mit" (with) → Dutch "met" — unambiguously German, safe word-boundary replace
+_NL_MIT        = re.compile(r'\bmit\b', re.UNICODE)
+# "3-Zits" with capital Z → "3-zits"
+_NL_ZITS_UPPER = re.compile(r'(\d+(?:[.,]5)?)-Zits\b', re.UNICODE)
 
 
 def apply_nl_format_normalization(text: str) -> str:
@@ -209,8 +255,8 @@ def apply_nl_format_normalization(text: str) -> str:
     text = _NL_PCT_UPPER.sub(lambda m: f"{m.group(1)} {m.group(2).lower()}", text)
     # Slash: no spaces around (color/material combos)
     text = _NL_SLASH_SPACES.sub('/', text)
-    # BHT / BxHxT → B x H x D
-    text = _NL_BHT.sub('B x H x D', text)
+    # BHT / BxHxT / B/H/T → BxHxD (no spaces — TM canonical form)
+    text = _NL_BHT.sub('BxHxD', text)
     # Residual "Dekor" → "look"
     text = _NL_DEKOR_RESIDUE.sub('look', text)
     # "3-teilig" → "3-delig"
@@ -221,6 +267,8 @@ def apply_nl_format_normalization(text: str) -> str:
     text = _NL_SITZER_SOFA.sub(lambda m: f"{m.group(1).replace(',', '.')}-zitsbank", text)
     # "3-Sitzer" → "3-zits"
     text = _NL_SITZER.sub(lambda m: f"{m.group(1).replace(',', '.')}-zits", text)
+    # "3-Zits" (wrong capital) → "3-zits"
+    text = _NL_ZITS_UPPER.sub(lambda m: m.group(1) + '-zits', text)
     # "1-flammig" → "1-lichts"
     text = _NL_FLAMMIG.sub(lambda m: f"{m.group(1)}-lichts", text)
     # German connector words that slip through
@@ -229,6 +277,8 @@ def apply_nl_format_normalization(text: str) -> str:
     text = _NL_INCL.sub('inclusief', text)
     text = _NL_INKL.sub('incl.', text)
     text = _NL_OHNE_DEKO.sub('zonder decoratie', text)
+    # German "mit" → Dutch "met" (standalone word, always safe)
+    text = _NL_MIT.sub('met', text)
     # Collapse extra spaces
     text = re.sub(r'  +', ' ', text)
     return text.strip()
@@ -245,11 +295,7 @@ def apply_nl_dekor_patterns(text: str) -> str:
 
 
 def apply_nl_color_normalization(text: str) -> str:
-    """
-    Replace residual German color words in Dutch text with canonical NL forms.
-    Applied after AI translation to catch leftover German color terms.
-    Safe on Dutch text because the source words are unambiguously German.
-    """
+    """Replace residual German color words with canonical NL forms."""
     for de_color, nl_color in NL_COLOR_MAP:
         if de_color.lower() not in text.lower():
             continue
@@ -282,17 +328,201 @@ def apply_nl_forbidden_patterns(text: str) -> tuple[str, int]:
     return text, corrections
 
 
-def nl_post_process(text: str) -> str:
+# =============================================================================
+# POST-COLON LOWERCASE  — Dutch rule: after ":", values are lowercase
+# =============================================================================
+
+# Applies to structured attribute columns; skipped for product name column.
+_NL_POST_COLON_SAFE_CANONICALS = frozenset({
+    'colorDetail', 'materialDetail', 'textileCompositionCover1',
+    'qualityDetail', 'otherMeasurements', 'deliveryScope',
+})
+
+# Matches ": " followed by a word starting with uppercase then lowercase letters.
+# This avoids matching ALL-CAPS abbreviations (GSP, LED, MDF, etc.).
+_NL_COLON_UPPER_RE = re.compile(r'(:\s+)([A-ZÜÖÄ][a-züöäß])', re.UNICODE)
+
+
+def apply_nl_post_colon_lowercase(text: str, canonical: str = "") -> str:
+    """
+    Lowercase the first letter of the word immediately following ': '
+    in attribute columns (colors, materials, etc.).
+    Skipped for the product name column and ALL-CAPS terms.
+    """
+    if canonical == 'name' or not text:
+        return text
+    # Apply to all structural attribute columns (or if canonical is unspecified)
+    if not canonical or canonical in _NL_POST_COLON_SAFE_CANONICALS:
+        return _NL_COLON_UPPER_RE.sub(lambda m: m.group(1) + m.group(2).lower(), text)
+    return text
+
+
+# =============================================================================
+# CELL SEGMENTATION  — split cells into TM-matchable segments
+# =============================================================================
+
+_NL_SEG_BR = re.compile(r'(<br>)', re.IGNORECASE)
+_NL_LABEL_COLON = re.compile(r'^([^:]{1,40}:\s*)(.+)$', re.DOTALL)
+
+
+def segment_cell_for_tm_matching(text: str) -> list[tuple[str, str]]:
+    """
+    Split a cell value into TM-matchable segments.
+    Returns list of (segment_text, following_separator).
+    The caller reassembles by concatenating segment_text + separator for each tuple.
+
+    Example:
+      "Bekleding: Zwart<br>Poten: Zwart"
+      → [("Bekleding: ", ""), ("Zwart", "<br>"), ("Poten: ", ""), ("Zwart", "")]
+    """
+    if not text:
+        return []
+
+    segments: list[tuple[str, str]] = []
+
+    # Split on <br> first
+    br_parts = _NL_SEG_BR.split(text)
+
+    i = 0
+    while i < len(br_parts):
+        part = br_parts[i]
+        # <br> tag itself — skip, will be added as separator on the previous segment
+        if _NL_SEG_BR.fullmatch(part):
+            i += 1
+            continue
+
+        # Find the <br> separator that follows this part (if any)
+        br_sep = ""
+        if i + 1 < len(br_parts) and _NL_SEG_BR.fullmatch(br_parts[i + 1]):
+            br_sep = "<br>"
+
+        if not part.strip():
+            segments.append((part, br_sep))
+            i += 2 if br_sep else 1
+            continue
+
+        # Try to split on "Label: value" pattern
+        m = _NL_LABEL_COLON.match(part.strip())
+        if m:
+            label = m.group(1)   # "Bekleding: "
+            value = m.group(2)   # "Zwart"
+            segments.append((label, ""))
+            segments.append((value, br_sep))
+        else:
+            segments.append((part.strip(), br_sep))
+
+        i += 2 if br_sep else 1
+
+    return segments
+
+
+def reconstruct_from_segments(segments: list[tuple[str, str]]) -> str:
+    """Reassemble segments (each tuple: translated_text, separator) into a full cell value."""
+    return "".join(seg + sep for seg, sep in segments)
+
+
+# =============================================================================
+# SAFE PRODUCT NAME SHORTENER
+# =============================================================================
+
+# Words after which cutting is dangerous — the sentence is left incomplete
+_NL_DANGLING_WORDS = frozenset({
+    'met', 'van', 'voor', 'en', 'of', 'een', 'de', 'het', 'op', 'uit',
+    'keramische', 'schuin', 'schuine', 'recht', 'rechte', 'houten', 'eikenhouten',
+    'geïntegreerde', 'verstelbare', 'uitschuifbare', 'inklapbare',
+    'ingebouwde', 'kleine', 'grote', 'massieve', 'massief',
+    'gecoate', 'gepoedercoate', 'geslepen', 'gebogen',
+})
+
+# Connectors that introduce optional phrases — remove from here to end to shorten
+_NL_OPTIONAL_CONNECTOR = re.compile(
+    r'\s+(?:met|van|voor)\s+.+$',
+    re.IGNORECASE | re.UNICODE,
+)
+
+
+def _strip_dangling_ending(name: str) -> str:
+    """Remove trailing dangling adjective/connector words from a product name."""
+    words = name.split()
+    while words and words[-1].lower() in _NL_DANGLING_WORDS:
+        words.pop()
+    return ' '.join(words)
+
+
+def safe_shorten_product_name_nl(name: str, max_chars: int = 40) -> str:
+    """
+    Shorten a Dutch product name to ≤ max_chars without leaving dangling adjectives.
+
+    Strategy:
+    0. Always strip dangling endings first (even if name is short).
+    1. Return if already within limit after stripping.
+    2. Find last safe word boundary within max_chars.
+    3. Remove "met/van/voor ..." optional phrase if step 2 failed.
+    4. Hard-truncate at word boundary as last resort.
+    Never output names ending with: met, van, keramische, schuine, houten, etc.
+    """
+    if not name:
+        return name
+
+    # Always clean dangling endings regardless of length
+    name = _strip_dangling_ending(name)
+
+    if len(name) <= max_chars:
+        return name
+
+    words = name.split()
+
+    # Pass 1: find last safe cut at ≤ max_chars
+    running = ""
+    last_safe = ""
+    for i, word in enumerate(words):
+        candidate = (running + " " + word).strip()
+        if len(candidate) > max_chars:
+            # Cannot add this word — cut before it
+            if running and words[i - 1].lower() not in _NL_DANGLING_WORDS:
+                last_safe = running
+            break
+        running = candidate
+    else:
+        # All words fit
+        return running.strip()
+
+    if last_safe:
+        return last_safe.strip()
+
+    # Pass 2: remove "met/van/voor ..." optional connector phrase, try again
+    shortened = _NL_OPTIONAL_CONNECTOR.sub('', name).strip()
+    if shortened != name and len(shortened) <= max_chars:
+        return shortened
+
+    if len(shortened) > max_chars:
+        return safe_shorten_product_name_nl(shortened, max_chars)
+
+    # Pass 3: hard cut at word boundary, then remove any dangling tail
+    truncated = name[:max_chars].rsplit(' ', 1)[0].strip()
+    trunc_words = truncated.split()
+    while trunc_words and trunc_words[-1].lower() in _NL_DANGLING_WORDS:
+        trunc_words.pop()
+    return ' '.join(trunc_words) if trunc_words else name[:max_chars].strip()
+
+
+# =============================================================================
+# POST-PROCESSING PIPELINE
+# =============================================================================
+
+def nl_post_process(text: str, canonical: str = "") -> str:
     """
     Full Dutch post-processing pipeline (zero API calls).
     Applied after AI translation:
-      dekor → colors → furniture → forbidden → format.
+      dekor → colors → furniture → forbidden → format → post-colon lowercase.
     """
     text = apply_nl_dekor_patterns(text)
     text = apply_nl_color_normalization(text)
     text = apply_nl_furniture_canonical(text)
     text = apply_nl_forbidden_patterns(text)[0]
     text = apply_nl_format_normalization(text)
+    if canonical:
+        text = apply_nl_post_colon_lowercase(text, canonical)
     return text
 
 
@@ -323,12 +553,27 @@ def detect_nl_german_residue(text: str) -> list[str]:
 # NL QA ENGINE
 # =============================================================================
 
-def nl_qa_check(translation: str) -> list[dict]:
+# Product name endings that are always wrong (dangling adjective/connector)
+_NL_DANGLING_ENDING_RE = re.compile(
+    r'\s+(?:met|van|voor|keramische|schuine|rechte|houten|eikenhouten|'
+    r'geïntegreerde|verstelbare|en|of)\s*$',
+    re.IGNORECASE | re.UNICODE,
+)
+
+# Post-colon uppercase in attribute cells (a word starting uppercase after ": ")
+_NL_QA_COLON_UPPER_RE = re.compile(r':\s+[A-ZÜÖÄ][a-züöäß]', re.UNICODE)
+
+# "3-Zits" with wrong capital
+_NL_QA_ZITS_CAP_RE = re.compile(r'\d+-Zits\b', re.UNICODE)
+
+
+def nl_qa_check(translation: str, canonical: str = "") -> list[dict]:
     """
     Run QA checks on a Dutch translation.
     Returns list of issues [{severity, category, message}].
     """
     issues = []
+
     residues = detect_nl_german_residue(translation)
     if residues:
         issues.append({
@@ -336,24 +581,49 @@ def nl_qa_check(translation: str) -> list[dict]:
             "category": "German residue",
             "message":  f"German words in NL output: {', '.join(sorted(set(residues)))}",
         })
+
     if re.search(r'\bDekor\b', translation, re.UNICODE):
         issues.append({
             "severity": "High",
             "category": "Untranslated term",
             "message":  '"Dekor" not localized → should be "look"',
         })
+
     if re.search(r'\d\s+%', translation):
         issues.append({
             "severity": "Low",
             "category": "Formatting",
             "message":  'Space before % — should be "100%" not "100 %"',
         })
+
     if re.search(r'\bBHT\b', translation, re.IGNORECASE):
         issues.append({
             "severity": "Medium",
             "category": "Formatting",
-            "message":  "BHT not converted to B x H x D",
+            "message":  "BHT not converted to BxHxD",
         })
+
+    if _NL_QA_ZITS_CAP_RE.search(translation):
+        issues.append({
+            "severity": "High",
+            "category": "Capitalization",
+            "message":  '"3-Zits" has wrong capital — should be "3-zits"',
+        })
+
+    if canonical != 'name' and _NL_QA_COLON_UPPER_RE.search(translation):
+        issues.append({
+            "severity": "Medium",
+            "category": "Capitalization",
+            "message":  "Uppercase word after colon — should be lowercase (color/material)",
+        })
+
+    if canonical == 'name' and _NL_DANGLING_ENDING_RE.search(translation):
+        issues.append({
+            "severity": "High",
+            "category": "Product name",
+            "message":  "Product name ends with a dangling connector/adjective",
+        })
+
     for wrong, _ in NL_FORBIDDEN_REPLACEMENTS:
         if wrong.lower() in translation.lower():
             issues.append({
@@ -362,11 +632,12 @@ def nl_qa_check(translation: str) -> list[dict]:
                 "message":  f'Forbidden pattern detected: "{wrong}"',
             })
             break  # one report per cell is enough
+
     return issues
 
 
 # =============================================================================
-# HOME24 DUTCH CORPUS ENGINE
+# NORMALIZATION HELPER
 # =============================================================================
 
 def _normalize(text: str) -> str:
@@ -374,11 +645,53 @@ def _normalize(text: str) -> str:
     return re.sub(r'\s+', ' ', str(text).strip().lower())
 
 
+# =============================================================================
+# WORKBOOK CONSISTENCY MEMORY
+# =============================================================================
+
+class DutchWorkbookConsistencyMemory:
+    """
+    Tracks source → target choices within one workbook translation session.
+    Ensures the same German source always receives the same Dutch output.
+    """
+
+    def __init__(self) -> None:
+        self._memory: dict[str, str] = {}
+
+    def get(self, source: str) -> str | None:
+        return self._memory.get(_normalize(source))
+
+    def put(self, source: str, target: str) -> None:
+        key = _normalize(source)
+        if key not in self._memory:
+            self._memory[key] = target
+
+    def get_or_default(self, source: str, fallback: str) -> str:
+        existing = self.get(source)
+        if existing is not None:
+            return existing
+        self.put(source, fallback)
+        return fallback
+
+    def clear(self) -> None:
+        self._memory.clear()
+
+    def __len__(self) -> int:
+        return len(self._memory)
+
+
+# =============================================================================
+# HOME24 DUTCH CORPUS ENGINE
+# =============================================================================
+
 class Home24DutchCorpusEngine:
     """
     TM-powered Dutch localization engine.
-    Loads ~38k Trados TM entries and provides exact + fuzzy matching plus
-    terminology extraction for AI prompt guidance.
+    Loads ~38k Trados TM entries and provides:
+      - Exact match
+      - Segment-level match (split cell → match parts → reconstruct)
+      - Fuzzy match (SequenceMatcher, wider candidate scan)
+      - Terminology extraction for AI prompt guidance
     """
 
     def __init__(self, entries: list[dict]) -> None:
@@ -386,8 +699,6 @@ class Home24DutchCorpusEngine:
         entries: list of {"source": str, "target": str, "usage_count": int}
         """
         self._exact: dict[str, str] = {}
-        # Ordered list of (norm_source, target) for fuzzy scan — sorted by length
-        # so shorter, more specific entries (single terms) rank earlier in partial matching
         raw: list[tuple[str, str, int]] = []
 
         for e in entries:
@@ -399,12 +710,11 @@ class Home24DutchCorpusEngine:
             self._exact[key] = tgt
             raw.append((key, tgt, e.get("usage_count", 0)))
 
-        # Sort: higher usage_count first within same length bucket (for fuzzy scan quality)
+        # Sort: longer entries first, then by usage count (for fuzzy scan quality)
         raw.sort(key=lambda x: (-len(x[0]), -x[2]))
         self._entries: list[tuple[str, str]] = [(k, t) for k, t, _ in raw]
 
-        # Term index: short TM segments (≤5 tokens) → NL term
-        # Used for terminology extraction / prompt injection
+        # Short TM segments (≤5 tokens) → NL term for terminology injection
         self._term_index: dict[str, str] = {}
         term_candidates: dict[str, list[str]] = {}
         for src_norm, tgt, usage in raw:
@@ -420,18 +730,82 @@ class Home24DutchCorpusEngine:
         """Return exact TM match or None."""
         return self._exact.get(_normalize(source))
 
+    # ── Segment-level match ──────────────────────────────────────────────────
+
+    def segment_tm_match(
+        self,
+        source: str,
+        min_coverage: float = 0.6,
+        seg_fuzzy_threshold: float = 0.82,
+    ) -> str | None:
+        """
+        Split source into segments (by <br> and label: value patterns),
+        TM-match each segment individually, then reconstruct.
+        Returns assembled translation if ≥ min_coverage of non-empty segments matched.
+        """
+        segs = segment_cell_for_tm_matching(source)
+        if not segs:
+            return None
+
+        translated: list[tuple[str, str]] = []
+        match_count = 0
+        total_content_segs = 0
+
+        for seg_text, sep in segs:
+            stripped = seg_text.strip()
+            if not stripped:
+                translated.append((seg_text, sep))
+                continue
+
+            total_content_segs += 1
+
+            # Try exact TM match
+            exact = self.exact_match(stripped)
+            if exact:
+                translated.append((exact, sep))
+                match_count += 1
+                continue
+
+            # Try post-processing rules (dekor, color, furniture)
+            processed = apply_nl_dekor_patterns(stripped)
+            processed = apply_nl_color_normalization(processed)
+            processed = apply_nl_furniture_canonical(processed)
+            processed = apply_nl_format_normalization(processed)
+            if processed != stripped:
+                translated.append((processed, sep))
+                match_count += 1
+                continue
+
+            # Try fuzzy TM match on the segment
+            fuzzy = self.fuzzy_match(stripped, threshold=seg_fuzzy_threshold, max_candidates=300)
+            if fuzzy:
+                translated.append((fuzzy[0], sep))
+                match_count += 1
+                continue
+
+            # No match — keep original
+            translated.append((seg_text, sep))
+
+        if total_content_segs == 0:
+            return None
+        if match_count / total_content_segs < min_coverage:
+            return None
+
+        result = reconstruct_from_segments(translated)
+        return nl_post_process(result.strip())
+
     # ── Fuzzy match ──────────────────────────────────────────────────────────
 
     def fuzzy_match(
         self,
         source: str,
         threshold: float = 0.82,
-        max_candidates: int = 600,
+        max_candidates: int = 1200,
     ) -> tuple[str, float] | None:
         """
         Best fuzzy TM match via sequence similarity.
         Returns (translation, score) or None.
-        Capped at max_candidates to stay fast on 38k entries.
+        Increased max_candidates (was 600) for better recall on 38k entries.
         """
         src_norm = _normalize(source)
         slen = len(src_norm)
@@ -443,8 +817,8 @@ class Home24DutchCorpusEngine:
         checked = 0
 
         for tm_src, tm_tgt in self._entries:
-            # Quick length gate — skip if >45% length difference
-            if abs(len(tm_src) - slen) > slen * 0.45 + 5:
+            # Quick length gate — skip if >50% length difference
+            if abs(len(tm_src) - slen) > slen * 0.50 + 6:
                 continue
             ratio = SequenceMatcher(None, src_norm, tm_src, autojunk=False).ratio()
             if ratio > best_score:
@@ -460,9 +834,9 @@ class Home24DutchCorpusEngine:
 
     # ── Terminology extraction ────────────────────────────────────────────────
 
-    def extract_terminology(self, source: str, max_terms: int = 8) -> list[tuple[str, str]]:
+    def extract_terminology(self, source: str, max_terms: int = 10) -> list[tuple[str, str]]:
         """
-        Find TM short-segment matches that appear in source.
+        Find TM short-segment matches that appear in source text.
         Returns list of (de_term, nl_term) pairs for AI prompt injection.
         """
         results: list[tuple[str, str]] = []
@@ -483,11 +857,8 @@ class Home24DutchCorpusEngine:
     def get_prompt_guidance(self, source: str) -> str:
         """
         Return TM-derived guidance block for injection into the AI system prompt.
-        Empty string if no useful TM context found.
+        Exact match → strong instruction. Fuzzy + terms → softer guidance.
         """
-        lines: list[str] = []
-
-        # Exact match: tell the AI to use it directly
         exact = self.exact_match(source)
         if exact:
             return (
@@ -496,7 +867,8 @@ class Home24DutchCorpusEngine:
                 f"  NL: {exact}"
             )
 
-        # Fuzzy match ≥ 85%: strong guidance
+        lines: list[str] = []
+
         fuzzy = self.fuzzy_match(source, threshold=0.85)
         if fuzzy:
             tgt, score = fuzzy
@@ -505,8 +877,7 @@ class Home24DutchCorpusEngine:
                 f"  NL reference: {tgt}"
             )
 
-        # Terminology extraction
-        terms = self.extract_terminology(source, max_terms=6)
+        terms = self.extract_terminology(source, max_terms=8)
         if terms:
             lines.append("\nTM terminology — use these exact NL equivalents:")
             for de, nl in terms:
@@ -538,6 +909,7 @@ def parse_trados_xlsx(path: str) -> list[dict]:
     Parse Trados TM Export Excel file.
     Returns list of {"source": str, "target": str, "usage_count": int}.
     Skips identical source/target pairs (metadata fields, untranslated rows).
+    Uses explicit iter_rows bounds to bypass stale <dimension> XML tags.
     """
     try:
         import openpyxl
@@ -546,16 +918,29 @@ def parse_trados_xlsx(path: str) -> list[dict]:
     except Exception as exc:
         raise ValueError(f"Cannot read TM file: {exc}") from exc
 
+    # Bypass stale <dimension> tag — same fix as in scan_sheet()
+    _dim_rows = getattr(ws, "max_row", None) or 0
+    _dim_cols = getattr(ws, "max_column", None) or 0
+    _iter_max_row = max(_dim_rows + 1, 50000)
+    _iter_max_col = max(_dim_cols + 1, 10)
+
     entries: list[dict] = []
     header_skipped = False
 
-    for row in ws.iter_rows(values_only=True):
+    for row in ws.iter_rows(
+        min_row=1,
+        max_row=_iter_max_row,
+        max_col=_iter_max_col,
+        values_only=True,
+    ):
+        if not row or row[0] is None:
+            continue
         if not header_skipped:
             header_skipped = True
             continue  # skip header row
 
-        src  = row[1] if len(row) > 1 else None
-        tgt  = row[2] if len(row) > 2 else None
+        src   = row[1] if len(row) > 1 else None
+        tgt   = row[2] if len(row) > 2 else None
         usage = row[7] if len(row) > 7 else 0
 
         src = str(src).strip() if src is not None else ""
@@ -569,4 +954,5 @@ def parse_trados_xlsx(path: str) -> list[dict]:
             "usage_count": int(usage) if usage and str(usage).isdigit() else 0,
         })
 
+    wb.close()
     return entries

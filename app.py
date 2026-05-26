@@ -87,10 +87,14 @@ from intelligence import (
 )
 from nl_engine import (
     Home24DutchCorpusEngine,
+    DutchWorkbookConsistencyMemory,
     parse_trados_xlsx,
     nl_post_process,
     nl_qa_check,
     detect_nl_german_residue,
+    apply_nl_post_colon_lowercase,
+    safe_shorten_product_name_nl,
+    segment_cell_for_tm_matching,
 )
 from database import (
     db_nl_trados_import,
@@ -359,15 +363,20 @@ DEFAULT_NL_GLOSSARY_TERMS = {
     "Baumwolle":     "katoen",
     "Leinen":        "linnen",
     "Wolle":         "wol",
-    "Sofa":          "bank",
-    "Sessel":        "fauteuil",
-    "Ecksofa":       "hoekbank",
-    "Schlafsofa":    "slaapbank",
-    "Tisch":         "tafel",
-    "Stuhl":         "stoel",
-    "Schrank":       "kast",
-    "Kommode":       "ladekast",
-    "Regal":         "boekenrek",
+    "Sofa":              "bank",
+    "Sessel":            "fauteuil",
+    "Ecksofa":           "Hoekbank",      # TM: capital H in product names
+    "Wohnlandschaft":    "Zithoek",       # TM: "Wohnlandschaft Fardah" → "Zithoek Fardah"
+    "Ottomane":          "ottomane",      # TM: "mit Ottomane" → "met ottomane"
+    "Ottoman":           "ottomane",
+    "Schlafsofa":        "slaapbank",
+    "Kombi":             "combi",         # TM: "Kombi A" → "combi A"
+    "Variante":          "variant",       # TM: "Variante A" → "variant A"
+    "Tisch":             "tafel",
+    "Stuhl":             "stoel",
+    "Schrank":           "kast",
+    "Kommode":           "Kast",          # TM: "Kommode Weallup" → "Kast Weallup"
+    "Regal":             "boekenrek",
     "inkl.":         "incl.",
     "Schublade":     "lade",
     "Türen":         "deuren",
@@ -392,16 +401,17 @@ DEFAULT_NL_GLOSSARY_TERMS = {
     "Reißverschluss":                  "ritssluiting",
     "4-seitiger Reißverschluss":       "ritssluiting aan 4 zijden",
     "Abnehmbarer Bezug":               "afneembare hoes",
-    # Dishwasher / GSP
-    "GSP-Blende":                      "vaatwasserfront",
-    "GSP Blende":                      "vaatwasserfront",
-    "Geschirrspüler-Blende":           "vaatwasserfront",
-    "Geschirrspülerblende":            "vaatwasserfront",
+    # Dishwasher / GSP — TM: GSP-Blende → vaatwasserpaneel
+    "GSP-Blende":                      "vaatwasserpaneel",
+    "GSP Blende":                      "vaatwasserpaneel",
+    "Geschirrspüler-Blende":           "vaatwasserpaneel",
+    "Geschirrspülerblende":            "vaatwasserpaneel",
     "Geschirrspüler":                  "vaatwasser",
-    # Dimensions
-    "BHT":                             "B x H x D",
-    "BxHxT":                           "B x H x D",
-    "B x H x T":                       "B x H x D",
+    # Dimensions — TM canonical: no spaces (BxHxD)
+    "BHT":                             "BxHxD",
+    "BxHxT":                           "BxHxD",
+    "B x H x T":                       "BxHxD",
+    "B/H/T":                           "BxHxD",
     "Breite x Höhe x Tiefe":           "breedte x hoogte x diepte",
     # Handles
     "Grifflos":                        "greeploos",
@@ -414,7 +424,11 @@ DEFAULT_NL_GLOSSARY_TERMS = {
     "Schubkasten":                     "lade",
     "Schubladen":                      "lades",
     # Kitchen furniture
-    "Küchenzeile":                     "keukenblok",
+    "Singleküche":                     "Mini keuken",      # TM: exact
+    "Pantryküche":                     "Pantrykeuken",
+    "Küchenleerblock":                 "Keukenblok",       # never "Keukenleerblok"
+    "Kücheninsel":                     "Kookeiland",       # TM: exact
+    "Küchenzeile":                     "Keukenblok",       # TM: exact
     "Einbauküche":                     "inbouwkeuken",
     "Arbeitsplatte":                   "werkblad",
     "Spüle":                           "spoelbak",
@@ -3384,7 +3398,7 @@ def _build_system_prompt(
 
 
 _NL_SHARED_RULES = (
-    "- GSP / GSP-Blende / Geschirrspüler-Blende → \"vaatwasserfront\" (NEVER leave GSP untranslated)\n"
+    "- GSP / GSP-Blende / Geschirrspüler-Blende → \"vaatwasserpaneel\" (NEVER leave GSP untranslated)\n"
     "- BHT / BxHxT / \"B x H x T\" → \"B x H x D\"\n"
     "- Grifflos → \"greeploos\"\n"
     "- Unterflurauszug / Unterflurführung → \"onderliggende ladegeleider\"\n"
@@ -3440,18 +3454,25 @@ def _build_nl_system_prompt(canonical: str, glossary_block: str, tm_guidance: st
         return (
             _NL_SYSTEM_PREAMBLE
             + "Translate the German product name to Dutch:\n"
-            "- Maximum 40 characters total\n"
+            "- Maximum 40 characters — shorten ONLY at natural word boundaries\n"
+            "- NEVER leave dangling adjectives: never end with: met, van, keramische, schuine, houten, geïntegreerde, verstelbare\n"
+            "- If shortening needed: first remove 'met ...' phrase; if still long, drop whole optional clause; never cut mid-phrase\n"
             "- No commas, brackets, or parentheses\n"
             "- Natural, commercial Dutch product name\n"
-            "- \"Sofa\" → \"bank\" / \"Sessel\" → \"fauteuil\" / \"Ecksofa\" → \"hoekbank\"\n"
-            "- \"Schlafsofa\" → \"slaapbank\" / \"Sitzer\" → \"zits\"\n"
-            "- \"3-Sitzer Sofa\" → \"3-zitsbank\" / \"2,5-Sitzer Sofa\" → \"2,5-zitsbank\"\n"
+            "- \"Sofa\" → \"bank\" / \"Sessel\" → \"fauteuil\" / \"Ecksofa\" → \"Hoekbank\"\n"
+            "- \"Schlafsofa\" → \"slaapbank\" / \"Sitzer\" → \"zits\" / \"3-Sitzer Sofa\" → \"3-zitsbank\"\n"
             "- \"TV-Lowboard\" → \"Tv-meubel\" / \"Fernsehsessel\" → \"tv-fauteuil\"\n"
+            "- \"Singleküche\" → \"Mini keuken\" (NEVER \"Enkele keuken\" or \"Eenpersoonskeuken\")\n"
+            "- \"Pantryküche\" → \"Pantrykeuken\"\n"
+            "- \"Küchenzeile\" / \"Küchenleerblock\" → \"Keukenblok\" (NEVER \"Keukenleerblok\")\n"
+            "- \"Wohnlandschaft\" → \"Zithoek\"\n"
+            "- \"Ecksofa\" → \"Hoekbank\" / \"Ottomane\" → \"ottomane\" (lowercase)\n"
             "- \"Pendelleuchte\" → \"hanglamp\" / \"Tischleuchte\" → \"tafellamp\"\n"
             "- \"Deckenleuchte\" → \"plafondlamp\" / \"Stehleuchte\" → \"staande lamp\"\n"
             "- \"Badset\" → \"Badkamerset\"\n"
-            "- \"GSP-Blende\" → \"vaatwasserfront\" / \"Grifflos\" → \"greeploos\"\n"
-            "- Preserve model/collection names exactly: Arin, Bocca, Himalund, Asely, Mardenis\n"
+            "- \"GSP-Blende\" → \"vaatwasserpaneel\" / \"Grifflos\" → \"greeploos\"\n"
+            "- \"Kombi\" → \"combi\" / \"Variante\" → \"variant\"\n"
+            "- Preserve model/collection names exactly\n"
             + _NL_SHARED_RULES
             + f"{tm_block}{glossary_block}\n"
             "Return ONLY the translated text, nothing else."
@@ -3535,8 +3556,8 @@ def _build_nl_system_prompt(canonical: str, glossary_block: str, tm_guidance: st
             + "Translate German measurements/dimensions to Dutch:\n"
             "- Maße/Abmessungen → afmetingen\n"
             "- Breite → breedte / Höhe → hoogte / Tiefe → diepte / Länge → lengte\n"
-            "- BHT / BxHxT / \"B x H x T\" → \"B x H x D\"\n"
-            "  Example: \"Schubkasten (BHT): 50x10x30 cm\" → \"lade (B x H x D): 50x10x30 cm\"\n"
+            "- BHT / BxHxT / \"B x H x T\" / \"B/H/T\" → \"BxHxD\" (no spaces — TM canonical)\n"
+            "  Example: \"Schubkasten (BHT): 50x10x30 cm\" → \"lade (BxHxD): 50x10x30 cm\"\n"
             "- Preserve ALL numbers, units, and symbols exactly\n"
             "- Draagkracht for Belastbarkeit\n"
             "- Preserve <br> tags exactly"
@@ -3560,7 +3581,7 @@ def _build_nl_system_prompt(canonical: str, glossary_block: str, tm_guidance: st
             _NL_SYSTEM_PREAMBLE
             + "Translate German variant names to Home24 NL Dutch:\n"
             "- Natural, concise Dutch\n"
-            "- GSP-Blende → \"vaatwasserfront\" / Grifflos → \"greeploos\"\n"
+            "- GSP-Blende → \"vaatwasserpaneel\" / Grifflos → \"greeploos\"\n"
             "- Dekor patterns → eikenlook / eikenhouten look (see critical rules above)\n"
             "- Preserve model numbers and collection names exactly\n"
             "- Short and commercial — catalogue-ready"
@@ -3620,7 +3641,7 @@ def translate_batch(
                 "- \"Sofa\"→\"bank\", \"Sessel\"→\"fauteuil\", "
                 "\"Ecksofa\"→\"hoekbank\", \"Schlafsofa\"→\"slaapbank\", \"Sitzer\"→\"zits\"\n"
                 "- \"Taschenfederkernmatratze\"→\"pocketveringmatras\"\n"
-                "- \"GSP-Blende\"→\"vaatwasserfront\"\n"
+                "- \"GSP-Blende\"→\"vaatwasserpaneel\"\n"
                 "- \"Einzelwaschtisch\"→\"enkele wastafel\", \"Doppelwaschtisch\"→\"dubbele wastafel\"\n"
                 "- \"Grifflos\"→\"greeploos\"\n"
                 "- Preserve model/collection names exactly (Asely, Arin, Bocca, Level36, etc.)"
@@ -3631,7 +3652,7 @@ def translate_batch(
                 "- NEVER use semicolons (;) as property separators\n"
                 "- Natural Dutch furniture/kitchen/bathroom terminology\n"
                 "- Bezug→bekleding, Gestell→onderstel, Füße→poten\n"
-                "- GSP-Blende→vaatwasserfront, BHT→\"B x H x D\", Grifflos→greeploos\n"
+                "- GSP-Blende→vaatwasserpaneel, BHT→\"B x H x D\", Grifflos→greeploos\n"
                 "- Unterflurauszug→onderliggende ladegeleider\n"
                 "- Küchenzeile→keukenblok, Arbeitsplatte→werkblad, Spüle→spoelbak\n"
                 "- Unterschrank→onderkast, Hängeschrank→hangkast\n"
@@ -3641,7 +3662,7 @@ def translate_batch(
         elif canonical == "qualityDetail":
             batch_rules = (
                 "- Natural Dutch kitchen/bathroom/furniture e-commerce language\n"
-                "- GSP-Blende→vaatwasserfront, BHT→\"B x H x D\", Grifflos→greeploos\n"
+                "- GSP-Blende→vaatwasserpaneel, BHT→\"B x H x D\", Grifflos→greeploos\n"
                 "- Unterflurauszug→onderliggende ladegeleider\n"
                 "- Preserve <br> tags exactly\n"
                 "- Percentages: write \"80%\" not \"80 %\"; lowercase after %"
@@ -3650,14 +3671,14 @@ def translate_batch(
             batch_rules = (
                 "- Natural Dutch e-commerce language\n"
                 "- bestehend aus→bestaande uit, ohne Dekoration→zonder decoratie\n"
-                "- GSP-Blende→vaatwasserfront, Grifflos→greeploos\n"
+                "- GSP-Blende→vaatwasserpaneel, Grifflos→greeploos\n"
                 "- Preserve <br> tags exactly"
             )
         else:
             batch_rules = (
                 "- Natural Dutch, not literal German\n"
                 "- Remove all German traces\n"
-                "- GSP-Blende→vaatwasserfront, BHT→\"B x H x D\", Grifflos→greeploos\n"
+                "- GSP-Blende→vaatwasserpaneel, BHT→\"B x H x D\", Grifflos→greeploos\n"
                 "- Unterflurauszug→onderliggende ladegeleider\n"
                 "- Preserve <br> tags exactly\n"
                 "- Percentages: write \"80%\" not \"80 %\"; lowercase after %"
@@ -3876,7 +3897,7 @@ def fix_german_residue(
 
     # Step 1b: Dutch NL post-processing pass (dekor, furniture, format)
     if target_language == "Dutch":
-        text = nl_post_process(text)
+        text = nl_post_process(text, column_name)
         if not detect_german_residue(text, target_language):
             return text
 
@@ -3891,14 +3912,14 @@ def fix_german_residue(
             extra_rules = (
                 "\n- Maximum 40 characters, no commas or brackets"
                 "\n- \"Sofa\" → \"bank\" / \"Sessel\" → \"fauteuil\" / \"Sitzer\" → \"zits\""
-                "\n- GSP-Blende → \"vaatwasserfront\""
+                "\n- GSP-Blende → \"vaatwasserpaneel\""
                 "\n- Einzelwaschtisch → \"enkele wastafel\" / Doppelwaschtisch → \"dubbele wastafel\""
                 "\n- Grifflos → \"greeploos\""
             )
         elif column_name == "materialDetail":
             extra_rules = (
                 "\n- Bezug → bekleding / Füße → poten / Gestell → onderstel"
-                "\n- GSP-Blende → \"vaatwasserfront\" (NEVER leave GSP untranslated)"
+                "\n- GSP-Blende → \"vaatwasserpaneel\" (NEVER leave GSP untranslated)"
                 "\n- BHT / BxHxT / \"B x H x T\" → \"B x H x D\""
                 "\n- Grifflos → \"greeploos\""
                 "\n- Unterflurauszug → \"onderliggende ladegeleider\""
@@ -3911,7 +3932,7 @@ def fix_german_residue(
             )
         elif column_name in ("qualityDetail", "deliveryScope"):
             extra_rules = (
-                "\n- GSP-Blende → \"vaatwasserfront\""
+                "\n- GSP-Blende → \"vaatwasserpaneel\""
                 "\n- BHT / BxHxT → \"B x H x D\""
                 "\n- Grifflos → \"greeploos\""
                 "\n- Unterflurauszug → \"onderliggende ladegeleider\""
@@ -3922,7 +3943,7 @@ def fix_german_residue(
             )
         else:
             extra_rules = (
-                "\n- GSP-Blende → \"vaatwasserfront\""
+                "\n- GSP-Blende → \"vaatwasserpaneel\""
                 "\n- BHT / BxHxT → \"B x H x D\""
                 "\n- Grifflos → \"greeploos\""
                 "\n- Unterflurauszug → \"onderliggende ladegeleider\""
@@ -4318,6 +4339,7 @@ def apply_dutch_capitalization_rules(
       2. Lowercase capitalised word after % ("100% Polyester" → "100% polyester")
       3. Capitalise start of segment
       4. Restore known brand/model names
+      5. Post-colon lowercase (Dutch rule: after ":", values are lowercase)
     """
     if not text or not text.strip():
         return text
@@ -4345,6 +4367,8 @@ def apply_dutch_capitalization_rules(
             capitalize_next = False
         # Step 4: restore brand names
         part = _restore_brand_caps(part)
+        # Step 5: Dutch rule — after ":" values are lowercase (colors, materials, etc.)
+        part = apply_nl_post_colon_lowercase(part, canonical)
         result.append(part)
 
     return "".join(result)
@@ -5163,7 +5187,7 @@ def process_excel_with_progress(
             if not resolved and target_language == "Dutch" and _nl_corpus:
                 exact_tr = _nl_corpus.exact_match(text)
                 if exact_tr is not None:
-                    exact_tr = nl_post_process(exact_tr)
+                    exact_tr = nl_post_process(exact_tr, canonical)
                     results[(row_num, col_idx)] = exact_tr
                     tm_put(tm, text, exact_tr, col_type, target_language)
                     tie_stats["gpt_calls_avoided"]   += 1
@@ -5171,12 +5195,23 @@ def process_excel_with_progress(
                     tie_stats["trados_exact"]        += 1
                     resolved = True
 
+            # ── Dutch: segment-level TM match (split cell → match parts) ─────
+            if not resolved and target_language == "Dutch" and _nl_corpus:
+                seg_tr = _nl_corpus.segment_tm_match(text)
+                if seg_tr is not None:
+                    results[(row_num, col_idx)] = seg_tr
+                    tm_put(tm, text, seg_tr, col_type, target_language)
+                    tie_stats["gpt_calls_avoided"]         += 1
+                    tie_stats.setdefault("trados_segment", 0)
+                    tie_stats["trados_segment"]            += 1
+                    resolved = True
+
             # Glossary-only resolution
             if not resolved:
                 gl_tr = try_glossary_only(text, glossary, target_language)
                 if gl_tr is not None:
                     if target_language == "Dutch":
-                        gl_tr = nl_post_process(gl_tr)
+                        gl_tr = nl_post_process(gl_tr, canonical)
                     results[(row_num, col_idx)] = gl_tr
                     tm_put(tm, text, gl_tr, col_type, target_language)
                     tie_stats["glossary_only_count"] += 1
@@ -5198,7 +5233,7 @@ def process_excel_with_progress(
                 fuzzy_result = _nl_corpus.fuzzy_match(text, threshold=0.88)
                 if fuzzy_result is not None:
                     fuzzy_tr, _fscore = fuzzy_result
-                    fuzzy_tr = nl_post_process(fuzzy_tr)
+                    fuzzy_tr = nl_post_process(fuzzy_tr, canonical)
                     results[(row_num, col_idx)] = fuzzy_tr
                     tm_put(tm, text, fuzzy_tr, col_type, target_language)
                     tie_stats["gpt_calls_avoided"]   += 1
@@ -5212,7 +5247,7 @@ def process_excel_with_progress(
                 if sem is not None:
                     sem_tr, _score = sem
                     if target_language == "Dutch":
-                        sem_tr = nl_post_process(sem_tr)
+                        sem_tr = nl_post_process(sem_tr, canonical)
                     results[(row_num, col_idx)] = sem_tr
                     tm_put(tm, text, sem_tr, col_type, target_language)
                     tie_stats["semantic_tm_hits"]   += 1
