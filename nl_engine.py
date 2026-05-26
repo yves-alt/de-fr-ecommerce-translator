@@ -362,7 +362,8 @@ def apply_nl_post_colon_lowercase(text: str, canonical: str = "") -> str:
 # =============================================================================
 
 _NL_SEG_BR = re.compile(r'(<br>)', re.IGNORECASE)
-_NL_LABEL_COLON = re.compile(r'^([^:]{1,40}:\s*)(.+)$', re.DOTALL)
+# Group 1: "Label:", Group 2: whitespace after colon, Group 3: value
+_NL_LABEL_COLON = re.compile(r'^([^:]{1,40}:)(\s+)(.+)$', re.DOTALL)
 
 
 def segment_cell_for_tm_matching(text: str) -> list[tuple[str, str]]:
@@ -371,27 +372,30 @@ def segment_cell_for_tm_matching(text: str) -> list[tuple[str, str]]:
     Returns list of (segment_text, following_separator).
     The caller reassembles by concatenating segment_text + separator for each tuple.
 
+    The colon-space separator is stored as the separator of the label segment so it
+    is always preserved even if TM translation strips trailing whitespace.
+
     Example:
       "Bekleding: Zwart<br>Poten: Zwart"
-      → [("Bekleding: ", ""), ("Zwart", "<br>"), ("Poten: ", ""), ("Zwart", "")]
+      → [("Bekleding:", " "), ("Zwart", "<br>"), ("Poten:", " "), ("Zwart", "")]
     """
     if not text:
         return []
 
     segments: list[tuple[str, str]] = []
 
-    # Split on <br> first
+    # Split on <br> first — capturing group keeps the <br> in the result list
     br_parts = _NL_SEG_BR.split(text)
 
     i = 0
     while i < len(br_parts):
         part = br_parts[i]
-        # <br> tag itself — skip, will be added as separator on the previous segment
+        # <br> tag itself — skip (it is used as separator below)
         if _NL_SEG_BR.fullmatch(part):
             i += 1
             continue
 
-        # Find the <br> separator that follows this part (if any)
+        # Find the <br> separator following this part (if any)
         br_sep = ""
         if i + 1 < len(br_parts) and _NL_SEG_BR.fullmatch(br_parts[i + 1]):
             br_sep = "<br>"
@@ -404,9 +408,11 @@ def segment_cell_for_tm_matching(text: str) -> list[tuple[str, str]]:
         # Try to split on "Label: value" pattern
         m = _NL_LABEL_COLON.match(part.strip())
         if m:
-            label = m.group(1)   # "Bekleding: "
-            value = m.group(2)   # "Zwart"
-            segments.append((label, ""))
+            label_colon = m.group(1)   # "Bekleding:" (no trailing space)
+            colon_space = m.group(2)   # " " (the space(s) after the colon)
+            value       = m.group(3)   # "Zwart"
+            # Store colon_space as separator so it survives TM translation of the label
+            segments.append((label_colon, colon_space))
             segments.append((value, br_sep))
         else:
             segments.append((part.strip(), br_sep))
@@ -766,13 +772,16 @@ class Home24DutchCorpusEngine:
                 match_count += 1
                 continue
 
-            # Try post-processing rules (dekor, color, furniture)
-            processed = apply_nl_dekor_patterns(stripped)
-            processed = apply_nl_color_normalization(processed)
-            processed = apply_nl_furniture_canonical(processed)
-            processed = apply_nl_format_normalization(processed)
-            if processed != stripped:
-                translated.append((processed, sep))
+            # Try content rules (dekor, color, furniture — actual term translation)
+            # Only count as a match if these content rules changed the text, NOT
+            # if only format normalization changed it (format-only ≠ content translated).
+            content_processed = apply_nl_dekor_patterns(stripped)
+            content_processed = apply_nl_color_normalization(content_processed)
+            content_processed = apply_nl_furniture_canonical(content_processed)
+            if content_processed != stripped:
+                # Apply full formatting on top
+                content_processed = apply_nl_format_normalization(content_processed)
+                translated.append((content_processed, sep))
                 match_count += 1
                 continue
 
@@ -783,8 +792,9 @@ class Home24DutchCorpusEngine:
                 match_count += 1
                 continue
 
-            # No match — keep original
-            translated.append((seg_text, sep))
+            # Apply format normalization even if no content match (don't count toward coverage)
+            fmt_only = apply_nl_format_normalization(stripped)
+            translated.append((fmt_only, sep))
 
         if total_content_segs == 0:
             return None
@@ -792,7 +802,17 @@ class Home24DutchCorpusEngine:
             return None
 
         result = reconstruct_from_segments(translated)
-        return nl_post_process(result.strip())
+        result = nl_post_process(result.strip())
+
+        # Reject if significant German residue remains — let GPT handle it instead
+        residues = detect_nl_german_residue(result)
+        # Allow up to 1 residue word for short segments (labels like "Stuhl"), but
+        # reject if multiple distinct German content words survived in the output
+        unique_residues = set(w.lower() for w in residues)
+        if len(unique_residues) > 1:
+            return None
+
+        return result
 
     # ── Fuzzy match ──────────────────────────────────────────────────────────
 
