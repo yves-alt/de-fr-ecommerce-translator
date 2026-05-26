@@ -1310,25 +1310,41 @@ def inject_custom_css():
         margin: 12px 0 !important;
     }}
 
-    [data-testid="stSidebar"] [data-testid="stRadio"] label {{
+    [data-testid="stSidebar"] [data-testid="stRadio"] label[data-baseweb="radio"] {{
         font-size: 13.5px !important;
         font-weight: 500 !important;
         padding: 9px 12px !important;
         border-radius: 10px !important;
         cursor: pointer !important;
-        transition: color 0.18s, background 0.18s !important;
-        display: block !important;
-        color: {text3} !important;
+        transition: background 0.18s !important;
+        display: flex !important;
+        align-items: center !important;
         margin-bottom: 2px !important;
+        background: transparent !important;
     }}
-    [data-testid="stSidebar"] [data-testid="stRadio"] label:hover {{
-        color: {text} !important;
+    [data-testid="stSidebar"] [data-testid="stRadio"] label[data-baseweb="radio"] p {{
+        font-size: 13.5px !important;
+        font-weight: 500 !important;
+        color: {text3} !important;
+        transition: color 0.18s !important;
+        margin: 0 !important;
+    }}
+    [data-testid="stSidebar"] [data-testid="stRadio"] label[data-baseweb="radio"]:hover {{
         background: {hover_rb} !important;
     }}
-    [data-testid="stSidebar"] [data-testid="stRadio"] label:has(input:checked) {{
+    [data-testid="stSidebar"] [data-testid="stRadio"] label[data-baseweb="radio"]:hover p {{
+        color: {text} !important;
+    }}
+    [data-testid="stSidebar"] [data-testid="stRadio"] label[data-baseweb="radio"] > div:first-child {{
+        display: none !important;
+    }}
+    [data-testid="stSidebar"] [data-testid="stRadio"] label[data-baseweb="radio"]:has(input:checked) {{
         background: {primary_lt} !important;
+        border-radius: 10px !important;
+    }}
+    [data-testid="stSidebar"] [data-testid="stRadio"] label[data-baseweb="radio"]:has(input:checked) p {{
         color: {primary} !important;
-        font-weight: 600 !important;
+        font-weight: 700 !important;
     }}
 
     [data-testid="stSidebar"] .stButton > button {{
