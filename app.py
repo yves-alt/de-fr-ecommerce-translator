@@ -4476,7 +4476,15 @@ def _score_sheet_for_picking(ws, max_rows: int = 100) -> dict:
     real_max_col = 0
 
     try:
-        for row_tuple in ws.iter_rows(min_row=1):
+        # Force iter_rows to scan beyond a stale/corrupt <dimension> XML element.
+        # In read_only mode the iterator caps at ws.max_row (from the dimension
+        # tag). Files where that tag says "A1" instead of "A1:F264" would yield
+        # only the first cell unless we supply an explicit large bound.
+        _dim_rows = getattr(ws, "max_row", None) or 0
+        _dim_cols = getattr(ws, "max_column", None) or 0
+        _iter_max_row = max(_dim_rows + 1, max_rows + 1, 2000)
+        _iter_max_col = max(_dim_cols + 1, 256)
+        for row_tuple in ws.iter_rows(min_row=1, max_row=_iter_max_row, max_col=_iter_max_col):
             if not row_tuple:
                 continue
             row_num = getattr(row_tuple[0], "row", None)
@@ -4613,7 +4621,15 @@ def scan_sheet(
     row_buffer: dict[int, list[tuple[int, object]]] = {}
 
     try:
-        for row_tuple in ws.iter_rows(min_row=1):
+        # In read_only mode, openpyxl caps iter_rows at ws.max_row (from the
+        # <dimension> XML tag). Files with a stale tag (e.g. "A1" instead of
+        # "A1:F264") would stop after the first row. Passing explicit bounds
+        # that exceed the tag forces a full XML stream scan.
+        _dim_rows = getattr(ws, "max_row", None) or 0
+        _dim_cols = getattr(ws, "max_column", None) or 0
+        _iter_max_row = max(_dim_rows + 1, row_hard_limit)
+        _iter_max_col = max(_dim_cols + 1, 256)
+        for row_tuple in ws.iter_rows(min_row=1, max_row=_iter_max_row, max_col=_iter_max_col):
             if not row_tuple:
                 continue
             # openpyxl read_only mode yields EmptyCell for blank rows;
