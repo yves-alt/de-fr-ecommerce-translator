@@ -546,6 +546,109 @@ DUTCH_ACCEPTABLE_WORDS = [
     "creme", "bouclé", "boucle", "klein",
 ]
 
+# Dutch words that must never appear in French output — with their French equivalents.
+# Longest entries first so multi-word patterns replace before single words.
+DUTCH_IN_FRENCH_MAP: list[tuple[str, str]] = [
+    # Compound Dutch color descriptors
+    ("donkergrijs",       "gris foncé"),
+    ("lichtgrijs",        "gris clair"),
+    ("donkerbruin",       "marron foncé"),
+    ("lichtbruin",        "marron clair"),
+    ("donkerblauw",       "bleu foncé"),
+    ("lichtblauw",        "bleu clair"),
+    ("donkergroen",       "vert foncé"),
+    ("lichtgroen",        "vert clair"),
+    ("antracietkleurig",  "anthracite"),
+    ("grafietkleurig",    "graphite"),
+    ("zilverkleurig",     "argenté"),
+    ("goudkleurig",       "doré"),
+    ("crèmekleurig",      "crème"),
+    # Dutch fabric / texture names from TM
+    ("fijnbever",         "castorette fine"),
+    ("fijnbiber",         "castorette fine"),
+    ("kerstdeken",        "couverture de Noël"),
+    # Basic Dutch color words (title-case and lower-case)
+    ("Donkergrijs",       "Gris foncé"),
+    ("Lichtgrijs",        "Gris clair"),
+    ("Donkerbruin",       "Marron foncé"),
+    ("Lichtbruin",        "Marron clair"),
+    ("Antraciet",         "Anthracite"),
+    ("Bever",             "Castor"),
+    ("Bruin",             "Marron"),
+    ("Grijs",             "Gris"),
+    ("Groen",             "Vert"),
+    ("Rood",              "Rouge"),
+    ("Geel",              "Jaune"),
+    ("Blauw",             "Bleu"),
+    ("Zwart",             "Noir"),
+    ("Wit",               "Blanc"),
+    ("Roze",              "Rose"),
+    ("Oranje",            "Orange"),
+    ("Beige",             "Beige"),
+    # lower-case forms
+    ("bever",             "castor"),
+    ("bruin",             "marron"),
+    ("grijs",             "gris"),
+    ("groen",             "vert"),
+    ("rood",              "rouge"),
+    ("geel",              "jaune"),
+    ("blauw",             "bleu"),
+    ("zwart",             "noir"),
+    ("wit",               "blanc"),
+    ("roze",              "rose"),
+    ("oranje",            "orange"),
+    # Dutch furniture / product terms
+    ("hoekbank",          "canapé d'angle"),
+    ("zithoek",           "salon d'angle"),
+    ("dressoir",          "buffet"),
+    ("kookeiland",        "îlot de cuisine"),
+    ("vaatwasserpaneel",  "panneau lave-vaisselle"),
+    ("ottomane",          "méridienne"),
+    ("eikenlook",         "décor chêne"),
+    ("betonlook",         "béton ciré"),
+    ("notenlook",         "décor noyer"),
+    ("marmerlook",        "marbre"),
+    # Dutch structural words that leak
+    ("bestaande uit",     "composé de"),
+    ("inclusief",         "inclus"),
+    ("zonder",            "sans"),
+    ("met",               "avec"),
+]
+
+# Compiled regex patterns for Dutch-in-French detection (word-boundary aware)
+_DUTCH_FR_PATTERNS: list[tuple[re.Pattern, str]] = [
+    (re.compile(r'\b' + re.escape(nl) + r'\b', re.IGNORECASE | re.UNICODE), fr)
+    for nl, fr in DUTCH_IN_FRENCH_MAP
+]
+
+# Set of Dutch words (lowercase) for fast containment check
+_DUTCH_WORD_SET: set[str] = {nl.lower() for nl, _ in DUTCH_IN_FRENCH_MAP}
+
+
+def detect_dutch_in_french(text: str) -> list[str]:
+    """Return list of Dutch words found in text (for French QA)."""
+    if not text:
+        return []
+    found = []
+    tl = text.lower()
+    for nl, _ in DUTCH_IN_FRENCH_MAP:
+        nl_lower = nl.lower()
+        pattern = re.compile(r'\b' + re.escape(nl_lower) + r'\b', re.IGNORECASE | re.UNICODE)
+        if pattern.search(tl):
+            found.append(nl)
+    return found
+
+
+def apply_dutch_to_french_fixes(text: str) -> tuple[str, int]:
+    """Replace Dutch words in text with French equivalents. Returns (fixed_text, count)."""
+    count = 0
+    for pattern, fr_word in _DUTCH_FR_PATTERNS:
+        new = pattern.sub(fr_word, text)
+        if new != text:
+            count += 1
+            text = new
+    return text, count
+
 # Protected column detection — two tiers to avoid false positives on short words
 PROTECTED_SUBSTRINGS = [
     "articlenumber", "article_number", "articlenr", "artnummer", "artnr",
@@ -2716,6 +2819,8 @@ def render_sidebar() -> str:
             st.session_state["language_selected"] = False
             st.session_state.pop("target_language", None)
             st.session_state.pop("_tr_result", None)
+            st.session_state.pop("_tr_result_file", None)
+            st.session_state.pop("nl_corpus_engine", None)
             st.rerun()
 
         st.markdown("---")
@@ -5032,9 +5137,10 @@ def process_excel_with_progress(
         # Final QA
         "qa_issues_found":          0,
         # Localization quality engine
-        "forbidden_corrections":   0,
-        "context_reconstructions": 0,
-        "corpus_matches":          0,
+        "forbidden_corrections":        0,
+        "dutch_contamination_fixes":    0,
+        "context_reconstructions":      0,
+        "corpus_matches":               0,
         # Pipeline tracking
         "pipeline_refinement":      enable_refinement,
         "pipeline_consistency":     enable_consistency,
@@ -5707,6 +5813,14 @@ def process_excel_with_progress(
                     cell.value = text
                     stats["forbidden_corrections"] += fp_count
 
+            # Step 1e: Dutch-in-French contamination fix (language isolation guard)
+            if target_language == "French":
+                df_fixed, df_count = apply_dutch_to_french_fixes(text)
+                if df_count > 0:
+                    text = df_fixed
+                    cell.value = text
+                    stats["dutch_contamination_fixes"] += df_count
+
             # Step 2: Quick residue scan — if clean, done
             detected = detect_german_residue(text, target_language)
             if not detected:
@@ -5815,6 +5929,10 @@ def process_excel_with_progress(
                         val = apply_french_semantic_normalization(val)
                         val = apply_french_capitalization_rules(val, canonical, glossary)
                         val = apply_french_typography_rules(val)
+                        # Final Dutch-contamination sweep in formatting pass
+                        val, _dc = apply_dutch_to_french_fixes(val)
+                        if _dc > 0:
+                            stats["dutch_contamination_fixes"] += _dc
                         cell.value = val
         elif target_language == "Dutch":
             for row_num in range(data_start_row, worksheet.max_row + 1):
@@ -5859,6 +5977,16 @@ def process_excel_with_progress(
                             })
                         continue
                     text = str(cell.value)
+
+                    # Dutch-contamination auto-fix pass (French only) — catches anything
+                    # that slipped through Phase 3 (e.g. source already contained Dutch)
+                    if target_language == "French":
+                        df_fixed, df_count = apply_dutch_to_french_fixes(text)
+                        if df_count > 0:
+                            text = df_fixed
+                            cell.value = text
+                            stats["dutch_contamination_fixes"] += df_count
+
                     # Check for residue that slipped past Phases 3 & 4
                     residue = detect_german_residue(text, target_language)
                     if residue:
@@ -5878,6 +6006,23 @@ def process_excel_with_progress(
                                 "translated_text": text[:120],
                                 "reason":          f"German residue detected in Final QA: {', '.join(residue[:3])}",
                                 "suggested_fix":   "Retranslate manually",
+                                "timestamp":       ts_qa,
+                            })
+
+                    # Dutch-in-French contamination warning (for any Dutch that survived)
+                    if target_language == "French":
+                        dutch_words = detect_dutch_in_french(text)
+                        if dutch_words:
+                            qa_issues += 1
+                            all_warnings.append({
+                                "severity":        SEVERITY_HIGH,
+                                "category":        "Dutch contamination",
+                                "row":             row_num,
+                                "column":          col_header,
+                                "original_text":   "",
+                                "translated_text": text[:120],
+                                "reason":          f"Dutch words in French output: {', '.join(dutch_words[:3])}",
+                                "suggested_fix":   "Check source file — may contain Dutch variant names",
                                 "timestamp":       ts_qa,
                             })
             stats["qa_issues_found"] = qa_issues
@@ -6581,6 +6726,8 @@ def translator_page():
                     "consistency_detected":      stats.get("consistency_detected", 0),
                     "terms_harmonized":          stats.get("terms_harmonized", 0),
                     "qa_issues_found":           stats.get("qa_issues_found", 0),
+                    # Language isolation
+                    "dutch_contamination_fixes": stats.get("dutch_contamination_fixes", 0),
                 })
                 db_save_warnings(job_id, stats.get("all_warnings", []))
 

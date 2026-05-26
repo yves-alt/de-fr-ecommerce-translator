@@ -204,6 +204,7 @@ def init_db(
     _ensure_v7_migration()
     _ensure_v8_migration()
     _ensure_v9_migration()
+    _ensure_v10_migration()
     _migrate_json_if_needed()
     if default_glossary:
         _seed_glossary_if_empty(default_glossary, "French")
@@ -513,6 +514,7 @@ def db_save_history_record(record: dict) -> None:
         record.get("pattern_count", 0),
         record.get("gpt_calls_avoided", 0),
         record.get("detected_product_type", "generic"),
+        record.get("dutch_contamination_fixes", 0),
     )
 
     try:
@@ -535,10 +537,10 @@ def db_save_history_record(record: dict) -> None:
                     csv_delimiter, csv_encoding,
                     semantic_tm_hits, duplicate_groups, duplicate_cells_saved,
                     glossary_only_count, pattern_count, gpt_calls_avoided,
-                    detected_product_type
+                    detected_product_type, dutch_contamination_fixes
                 ) VALUES (
                     ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
-                    ?,?,?,?,?,?,?
+                    ?,?,?,?,?,?,?,?
                 )
                 """,
                 params,
@@ -1563,6 +1565,22 @@ def db_get_jira_stats() -> dict:
 # =============================================================================
 # V9 MIGRATION — NL Trados TM corpus table
 # =============================================================================
+
+def _ensure_v10_migration() -> None:
+    """Add dutch_contamination_fixes column to translation_jobs (language isolation tracking)."""
+    if _get_schema_version() >= 10:
+        return
+    try:
+        with _db() as conn:
+            existing = _table_columns(conn, "translation_jobs")
+            if "dutch_contamination_fixes" not in existing:
+                conn.execute(
+                    "ALTER TABLE translation_jobs ADD COLUMN dutch_contamination_fixes INTEGER DEFAULT 0"
+                )
+        _set_schema_version(10)
+    except Exception:
+        pass
+
 
 def _ensure_v9_migration() -> None:
     """Create nl_trados_tm table for the Dutch Home24 Trados corpus."""
