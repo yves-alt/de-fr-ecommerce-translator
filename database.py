@@ -205,6 +205,7 @@ def init_db(
     _ensure_v8_migration()
     _ensure_v9_migration()
     _ensure_v10_migration()
+    _ensure_v11_migration()
     _migrate_json_if_needed()
     if default_glossary:
         _seed_glossary_if_empty(default_glossary, "French")
@@ -677,7 +678,11 @@ def db_load_glossary(target_language: str = "French") -> dict | None:
         with _db() as conn:
             rows = conn.execute(
                 "SELECT source_term, target_term, hit_count "
-                "FROM glossary_terms WHERE target_language = ? ORDER BY rowid",
+                "FROM glossary_terms "
+                "WHERE target_language = ? "
+                "  AND COALESCE(active, 1) = 1 "
+                "  AND COALESCE(is_deleted, 0) = 0 "
+                "ORDER BY rowid",
                 (target_language,),
             ).fetchall()
 
@@ -1662,3 +1667,451 @@ def db_nl_trados_count() -> int:
             return conn.execute("SELECT COUNT(*) FROM nl_trados_tm").fetchone()[0]
     except Exception:
         return 0
+
+
+# =============================================================================
+# V11 MIGRATION — Full glossary management schema
+# =============================================================================
+
+def _ensure_v11_migration() -> None:
+    """Extend glossary_terms with management fields and create audit log table."""
+    if _get_schema_version() >= 11:
+        return
+    try:
+        new_cols = [
+            ("source_language",       "TEXT DEFAULT 'German'"),
+            ("category",              "TEXT DEFAULT ''"),
+            ("source_type",           "TEXT DEFAULT 'MANUAL'"),
+            ("confidence",            "REAL DEFAULT 1.0"),
+            ("priority",              "TEXT DEFAULT 'NORMAL'"),
+            ("active",                "INTEGER DEFAULT 1"),
+            ("is_deleted",            "INTEGER DEFAULT 0"),
+            ("last_used_at",          "TEXT DEFAULT ''"),
+            ("created_by",            "TEXT DEFAULT ''"),
+            ("created_at",            "TEXT DEFAULT ''"),
+            ("notes",                 "TEXT DEFAULT ''"),
+            ("forbidden_alternatives","TEXT DEFAULT ''"),
+            ("synonyms",              "TEXT DEFAULT ''"),
+        ]
+        with _db() as conn:
+            existing = _table_columns(conn, "glossary_terms")
+            for col_name, col_def in new_cols:
+                if col_name not in existing:
+                    conn.execute(
+                        f"ALTER TABLE glossary_terms ADD COLUMN {col_name} {col_def}"
+                    )
+            # Backfill created_at from updated_at for existing terms
+            conn.execute(
+                "UPDATE glossary_terms SET created_at = updated_at "
+                "WHERE created_at = '' AND updated_at IS NOT NULL AND updated_at != ''"
+            )
+            # Indexes
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_glossary_lang_active "
+                "ON glossary_terms(target_language, active, is_deleted)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_glossary_source_type "
+                "ON glossary_terms(source_type, target_language)"
+            )
+            # Audit log table
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS glossary_audit_log (
+                    id           TEXT PRIMARY KEY,
+                    source_term  TEXT NOT NULL,
+                    target_language TEXT NOT NULL,
+                    action       TEXT NOT NULL,
+                    old_value    TEXT DEFAULT '',
+                    new_value    TEXT DEFAULT '',
+                    changed_by   TEXT DEFAULT '',
+                    timestamp    TEXT NOT NULL
+                )
+            """)
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_gloss_audit_ts "
+                "ON glossary_audit_log(timestamp DESC)"
+            )
+        _set_schema_version(11)
+    except Exception:
+        pass
+
+
+# =============================================================================
+# GLOSSARY MANAGEMENT — full CRUD
+# =============================================================================
+
+_SOURCE_TYPE_LABELS = {
+    "MANUAL":            "👤 Manual",
+    "TM_IMPORTED":       "📚 TM Import",
+    "AI_GENERATED":      "🤖 AI",
+    "AUTO_LEARNED":      "⚡ Auto-learned",
+    "CORPUS_EXTRACTED":  "🔍 Corpus",
+}
+
+_PRIORITY_LABELS = {
+    "CRITICAL": "🔴 CRITICAL",
+    "HIGH":     "🟠 HIGH",
+    "NORMAL":   "🟢 NORMAL",
+    "LOW":      "⚪ LOW",
+}
+
+
+def db_glossary_get_all(
+    target_language: str | None = None,
+    include_deleted: bool = False,
+    include_inactive: bool = True,
+) -> list[dict]:
+    """Return all glossary terms with full management metadata."""
+    try:
+        clauses = []
+        params: list = []
+        if target_language:
+            clauses.append("target_language = ?")
+            params.append(target_language)
+        if not include_deleted:
+            clauses.append("COALESCE(is_deleted, 0) = 0")
+        if not include_inactive:
+            clauses.append("COALESCE(active, 1) = 1")
+        sql = (
+            "SELECT source_term, target_language, target_term, "
+            "COALESCE(source_language,'German') AS source_language, "
+            "COALESCE(category,'') AS category, "
+            "COALESCE(source_type,'MANUAL') AS source_type, "
+            "COALESCE(confidence,1.0) AS confidence, "
+            "COALESCE(priority,'NORMAL') AS priority, "
+            "COALESCE(active,1) AS active, "
+            "COALESCE(is_deleted,0) AS is_deleted, "
+            "COALESCE(hit_count,0) AS hit_count, "
+            "COALESCE(last_used_at,'') AS last_used_at, "
+            "COALESCE(created_by,'') AS created_by, "
+            "COALESCE(created_at, updated_at, '') AS created_at, "
+            "COALESCE(updated_at,'') AS updated_at, "
+            "COALESCE(notes,'') AS notes, "
+            "COALESCE(synonyms,'') AS synonyms, "
+            "COALESCE(forbidden_alternatives,'') AS forbidden_alternatives "
+            "FROM glossary_terms"
+        )
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY source_term COLLATE NOCASE"
+        with _db() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return [dict(r) for r in rows]
+    except Exception:
+        return []
+
+
+def db_glossary_add_term(
+    source_term: str,
+    target_term: str,
+    target_language: str = "French",
+    source_language: str = "German",
+    category: str = "",
+    source_type: str = "MANUAL",
+    confidence: float = 1.0,
+    priority: str = "NORMAL",
+    notes: str = "",
+    synonyms: str = "",
+    forbidden_alternatives: str = "",
+    created_by: str = "",
+) -> bool:
+    """Insert a new glossary term with full metadata. Returns False if it already exists."""
+    now = datetime.now().isoformat(timespec="seconds")
+    try:
+        with _db() as conn:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO glossary_terms
+                    (source_term, target_language, target_term,
+                     source_language, category, source_type,
+                     confidence, priority, active, is_deleted,
+                     hit_count, last_used_at, created_by, created_at, updated_at,
+                     notes, synonyms, forbidden_alternatives)
+                VALUES (?,?,?,?,?,?,?,?,1,0,0,'',?,?,?,?,?,?)
+                """,
+                (
+                    source_term.strip(), target_language, target_term.strip(),
+                    source_language, category, source_type,
+                    confidence, priority,
+                    created_by, now, now,
+                    notes, synonyms, forbidden_alternatives,
+                ),
+            )
+        db_log_glossary_audit(source_term, target_language, "CREATED", "", target_term, created_by)
+        return True
+    except Exception:
+        return False
+
+
+def db_glossary_update_term(
+    source_term: str,
+    target_language: str,
+    updates: dict,
+    edited_by: str = "",
+) -> bool:
+    """Update editable fields of a glossary term."""
+    allowed = {
+        "target_term", "category", "notes", "synonyms",
+        "forbidden_alternatives", "priority", "confidence",
+        "source_type",
+    }
+    fields = {k: v for k, v in updates.items() if k in allowed}
+    if not fields:
+        return False
+    now = datetime.now().isoformat(timespec="seconds")
+    fields["updated_at"] = now
+    set_clause = ", ".join(f"{k} = ?" for k in fields)
+    params = list(fields.values()) + [source_term, target_language]
+    try:
+        with _db() as conn:
+            conn.execute(
+                f"UPDATE glossary_terms SET {set_clause} "
+                "WHERE source_term = ? AND target_language = ?",
+                params,
+            )
+        old_target = updates.get("_old_target_term", "")
+        new_target = updates.get("target_term", "")
+        db_log_glossary_audit(
+            source_term, target_language, "UPDATED",
+            old_target, new_target, edited_by,
+        )
+        return True
+    except Exception:
+        return False
+
+
+def db_glossary_soft_delete(
+    source_term: str,
+    target_language: str,
+    deleted_by: str = "",
+) -> bool:
+    """Mark a term as deleted (soft delete)."""
+    now = datetime.now().isoformat(timespec="seconds")
+    try:
+        with _db() as conn:
+            conn.execute(
+                "UPDATE glossary_terms SET is_deleted=1, active=0, updated_at=? "
+                "WHERE source_term=? AND target_language=?",
+                (now, source_term, target_language),
+            )
+        db_log_glossary_audit(source_term, target_language, "DELETED", "active", "deleted", deleted_by)
+        return True
+    except Exception:
+        return False
+
+
+def db_glossary_restore(
+    source_term: str,
+    target_language: str,
+    restored_by: str = "",
+) -> bool:
+    """Restore a soft-deleted term."""
+    now = datetime.now().isoformat(timespec="seconds")
+    try:
+        with _db() as conn:
+            conn.execute(
+                "UPDATE glossary_terms SET is_deleted=0, active=1, updated_at=? "
+                "WHERE source_term=? AND target_language=?",
+                (now, source_term, target_language),
+            )
+        db_log_glossary_audit(source_term, target_language, "RESTORED", "deleted", "active", restored_by)
+        return True
+    except Exception:
+        return False
+
+
+def db_glossary_toggle_active(
+    source_term: str,
+    target_language: str,
+    user: str = "",
+) -> bool:
+    """Toggle active flag. Returns the new active state."""
+    try:
+        with _db() as conn:
+            row = conn.execute(
+                "SELECT COALESCE(active, 1) FROM glossary_terms "
+                "WHERE source_term=? AND target_language=?",
+                (source_term, target_language),
+            ).fetchone()
+            if not row:
+                return False
+            new_active = 0 if row[0] else 1
+            now = datetime.now().isoformat(timespec="seconds")
+            conn.execute(
+                "UPDATE glossary_terms SET active=?, updated_at=? "
+                "WHERE source_term=? AND target_language=?",
+                (new_active, now, source_term, target_language),
+            )
+        action = "ENABLED" if new_active else "DISABLED"
+        db_log_glossary_audit(source_term, target_language, action, "", str(new_active), user)
+        return bool(new_active)
+    except Exception:
+        return False
+
+
+def db_glossary_increment_usage(source_term: str, target_language: str) -> None:
+    """Increment hit_count and update last_used_at. Called from translation engine."""
+    now = datetime.now().isoformat(timespec="seconds")
+    try:
+        with _db() as conn:
+            conn.execute(
+                "UPDATE glossary_terms SET hit_count = hit_count + 1, last_used_at = ? "
+                "WHERE source_term = ? AND target_language = ?",
+                (now, source_term, target_language),
+            )
+    except Exception:
+        pass
+
+
+def db_log_glossary_audit(
+    source_term: str,
+    target_language: str,
+    action: str,
+    old_value: str,
+    new_value: str,
+    user: str,
+) -> None:
+    """Write an entry to the glossary audit log."""
+    now = datetime.now().isoformat(timespec="seconds")
+    try:
+        with _db() as conn:
+            conn.execute(
+                """
+                INSERT INTO glossary_audit_log
+                    (id, source_term, target_language, action, old_value, new_value, changed_by, timestamp)
+                VALUES (?,?,?,?,?,?,?,?)
+                """,
+                (str(uuid.uuid4()), source_term, target_language, action,
+                 old_value or "", new_value or "", user or "", now),
+            )
+    except Exception:
+        pass
+
+
+def db_get_glossary_audit_log(limit: int = 200) -> list[dict]:
+    """Return the most recent audit log entries."""
+    try:
+        with _db() as conn:
+            rows = conn.execute(
+                "SELECT * FROM glossary_audit_log ORDER BY timestamp DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+    except Exception:
+        return []
+
+
+def db_glossary_bulk_import(
+    rows: list[dict],
+    created_by: str = "",
+    overwrite: bool = False,
+) -> tuple[int, int]:
+    """
+    Bulk-import glossary terms from a list of dicts.
+    Expected keys: source_term, target_term, target_language, category, source_type, priority.
+    Returns (imported_count, skipped_count).
+    """
+    imported = 0
+    skipped = 0
+    now = datetime.now().isoformat(timespec="seconds")
+    for row in rows:
+        src  = str(row.get("source_term", "")).strip()
+        tgt  = str(row.get("target_term", "")).strip()
+        lang = str(row.get("target_language", "French")).strip()
+        if not src or not tgt:
+            skipped += 1
+            continue
+        cat       = str(row.get("category", "")).strip()
+        src_type  = str(row.get("source_type", "MANUAL")).strip().upper()
+        priority  = str(row.get("priority", "NORMAL")).strip().upper()
+        notes_val = str(row.get("notes", "")).strip()
+        if src_type not in ("MANUAL", "TM_IMPORTED", "AI_GENERATED", "AUTO_LEARNED", "CORPUS_EXTRACTED"):
+            src_type = "MANUAL"
+        if priority not in ("CRITICAL", "HIGH", "NORMAL", "LOW"):
+            priority = "NORMAL"
+        try:
+            with _db() as conn:
+                if overwrite:
+                    conn.execute(
+                        """
+                        INSERT INTO glossary_terms
+                            (source_term, target_language, target_term, category,
+                             source_type, priority, active, is_deleted, hit_count,
+                             created_by, created_at, updated_at, notes)
+                        VALUES (?,?,?,?,?,?,1,0,0,?,?,?,?)
+                        ON CONFLICT(source_term, target_language) DO UPDATE SET
+                            target_term  = excluded.target_term,
+                            category     = excluded.category,
+                            source_type  = excluded.source_type,
+                            priority     = excluded.priority,
+                            notes        = excluded.notes,
+                            updated_at   = excluded.updated_at
+                        """,
+                        (src, lang, tgt, cat, src_type, priority,
+                         created_by, now, now, notes_val),
+                    )
+                else:
+                    conn.execute(
+                        """
+                        INSERT OR IGNORE INTO glossary_terms
+                            (source_term, target_language, target_term, category,
+                             source_type, priority, active, is_deleted, hit_count,
+                             created_by, created_at, updated_at, notes)
+                        VALUES (?,?,?,?,?,?,1,0,0,?,?,?,?)
+                        """,
+                        (src, lang, tgt, cat, src_type, priority,
+                         created_by, now, now, notes_val),
+                    )
+            imported += 1
+        except Exception:
+            skipped += 1
+    return imported, skipped
+
+
+def db_glossary_get_stats(target_language: str | None = None) -> dict:
+    """Return summary statistics for the glossary management dashboard."""
+    try:
+        lang_clause = "WHERE target_language = ?" if target_language else ""
+        params = (target_language,) if target_language else ()
+        with _db() as conn:
+            total = conn.execute(
+                f"SELECT COUNT(*) FROM glossary_terms {lang_clause}", params
+            ).fetchone()[0]
+            active = conn.execute(
+                f"SELECT COUNT(*) FROM glossary_terms "
+                f"{'WHERE' if lang_clause else 'WHERE'} "
+                f"{'target_language=? AND ' if target_language else ''}"
+                f"COALESCE(active,1)=1 AND COALESCE(is_deleted,0)=0",
+                params,
+            ).fetchone()[0]
+            inactive = conn.execute(
+                f"SELECT COUNT(*) FROM glossary_terms "
+                f"WHERE {'target_language=? AND ' if target_language else ''}"
+                f"COALESCE(active,1)=0 AND COALESCE(is_deleted,0)=0",
+                params,
+            ).fetchone()[0]
+            deleted = conn.execute(
+                f"SELECT COUNT(*) FROM glossary_terms "
+                f"WHERE {'target_language=? AND ' if target_language else ''}"
+                f"COALESCE(is_deleted,0)=1",
+                params,
+            ).fetchone()[0]
+            total_hits = conn.execute(
+                f"SELECT COALESCE(SUM(hit_count),0) FROM glossary_terms {lang_clause}", params
+            ).fetchone()[0]
+            critical = conn.execute(
+                f"SELECT COUNT(*) FROM glossary_terms "
+                f"WHERE {'target_language=? AND ' if target_language else ''}"
+                f"priority='CRITICAL' AND COALESCE(is_deleted,0)=0",
+                params,
+            ).fetchone()[0]
+        return {
+            "total": total,
+            "active": active,
+            "inactive": inactive,
+            "deleted": deleted,
+            "total_hits": total_hits,
+            "critical": critical,
+        }
+    except Exception:
+        return {"total": 0, "active": 0, "inactive": 0, "deleted": 0, "total_hits": 0, "critical": 0}

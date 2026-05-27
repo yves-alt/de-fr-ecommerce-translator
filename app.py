@@ -62,6 +62,16 @@ from database import (
     db_get_issue_report_counts,
     db_update_jira_metadata,
     db_get_jira_stats,
+    db_glossary_get_all,
+    db_glossary_add_term,
+    db_glossary_update_term,
+    db_glossary_soft_delete,
+    db_glossary_restore,
+    db_glossary_toggle_active,
+    db_log_glossary_audit,
+    db_get_glossary_audit_log,
+    db_glossary_bulk_import,
+    db_glossary_get_stats,
 )
 from intelligence import (
     normalize_text,
@@ -7712,178 +7722,808 @@ def analytics_page():
 # PAGE: GLOSSARY MANAGEMENT
 # =============================================================================
 
+# =============================================================================
+# GLOSSARY MANAGEMENT — dialogs
+# =============================================================================
+
+@st.dialog("Edit Glossary Term")
+def _glossary_edit_dialog() -> None:
+    term = st.session_state.get("_gloss_edit")
+    if not term:
+        st.rerun()
+        return
+
+    src  = term["source_term"]
+    lang = term["target_language"]
+    lang_short = "NL" if lang == "Dutch" else "FR"
+
+    st.markdown(
+        f'<div style="background:#EAF2FF;border:1px solid #C7DEFF;border-radius:8px;'
+        f'padding:10px 14px;margin-bottom:16px;">'
+        f'<span style="font-size:11px;color:#6B7A99;font-weight:600;text-transform:uppercase;'
+        f'letter-spacing:.05em;">Editing</span><br>'
+        f'<span style="font-size:15px;font-weight:700;color:#0F3D9E;">{src}</span>'
+        f'<span style="margin-left:8px;font-size:12px;color:#6B7A99;">DE → {lang_short}</span>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+    with st.form("gloss_edit_form"):
+        new_target = st.text_input(
+            f"Target term ({lang_short})",
+            value=term.get("target_term", ""),
+        )
+        col_cat, col_prio = st.columns(2)
+        with col_cat:
+            new_cat = st.text_input("Category", value=term.get("category", ""))
+        with col_prio:
+            prio_opts = ["NORMAL", "CRITICAL", "HIGH", "LOW"]
+            cur_prio  = term.get("priority", "NORMAL")
+            if cur_prio not in prio_opts:
+                cur_prio = "NORMAL"
+            new_prio = st.selectbox("Priority", prio_opts, index=prio_opts.index(cur_prio))
+
+        col_src, col_conf = st.columns(2)
+        with col_src:
+            src_opts = ["MANUAL", "TM_IMPORTED", "AI_GENERATED", "AUTO_LEARNED", "CORPUS_EXTRACTED"]
+            cur_src  = term.get("source_type", "MANUAL")
+            if cur_src not in src_opts:
+                cur_src = "MANUAL"
+            new_src_type = st.selectbox("Origin", src_opts, index=src_opts.index(cur_src))
+        with col_conf:
+            new_conf = st.slider(
+                "Confidence",
+                0.0, 1.0,
+                float(term.get("confidence", 1.0)),
+                0.05,
+            )
+
+        new_notes = st.text_area("Notes", value=term.get("notes", ""), height=68)
+        col_syn, col_forb = st.columns(2)
+        with col_syn:
+            new_syn  = st.text_input("Synonyms (comma-separated)", value=term.get("synonyms", ""))
+        with col_forb:
+            new_forb = st.text_input("Forbidden alternatives", value=term.get("forbidden_alternatives", ""))
+
+        # Translation preview
+        if new_target.strip():
+            st.markdown(
+                f'<div style="background:#F0FBF5;border:1px solid #BBF7D0;border-radius:6px;'
+                f'padding:8px 12px;margin:8px 0;">'
+                f'<span style="font-size:11px;color:#15803D;font-weight:600;">PREVIEW</span><br>'
+                f'<span style="color:#1A2035;font-size:13px;">{src} Hayman</span>'
+                f'<span style="color:#6B7A99;margin:0 6px;">→</span>'
+                f'<span style="color:#0F3D9E;font-size:13px;font-weight:600;">'
+                f'{new_target.strip()} Hayman</span>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+
+        col_save, col_cancel = st.columns(2)
+        with col_save:
+            submitted = st.form_submit_button("Save changes", use_container_width=True, type="primary")
+        with col_cancel:
+            cancelled = st.form_submit_button("Cancel", use_container_width=True)
+
+    if submitted:
+        if not new_target.strip():
+            st.error("Target term cannot be empty.")
+        else:
+            user = st.session_state.get("user_email", "")
+            ok = db_glossary_update_term(
+                src, lang,
+                {
+                    "target_term":             new_target.strip(),
+                    "category":                new_cat.strip(),
+                    "priority":                new_prio,
+                    "source_type":             new_src_type,
+                    "confidence":              new_conf,
+                    "notes":                   new_notes.strip(),
+                    "synonyms":                new_syn.strip(),
+                    "forbidden_alternatives":  new_forb.strip(),
+                    "_old_target_term":        term.get("target_term", ""),
+                },
+                edited_by=user,
+            )
+            if ok:
+                # Keep translation engine cache in sync
+                glossary_obj = load_glossary(lang)
+                if glossary_obj and src in glossary_obj.get("terms", {}):
+                    glossary_obj["terms"][src] = new_target.strip()
+                    save_glossary(glossary_obj, lang)
+                st.session_state.pop("_gloss_edit", None)
+                st.rerun()
+            else:
+                st.error("Update failed.")
+    elif cancelled:
+        st.session_state.pop("_gloss_edit", None)
+        st.rerun()
+
+
+@st.dialog("Confirm Delete")
+def _glossary_delete_dialog() -> None:
+    term = st.session_state.get("_gloss_delete")
+    if not term:
+        st.rerun()
+        return
+
+    src  = term["source_term"]
+    lang = term["target_language"]
+    lang_short = "NL" if lang == "Dutch" else "FR"
+
+    st.markdown(
+        f'<div style="background:#FEF2F2;border:1px solid #FECACA;border-radius:8px;'
+        f'padding:12px 14px;margin-bottom:16px;">'
+        f'<span style="font-size:12px;color:#DC2626;font-weight:700;">SOFT DELETE</span><br>'
+        f'<span style="font-size:14px;color:#1A2035;margin-top:4px;display:block;">'
+        f'<strong>{src}</strong> → {term.get("target_term","")}'
+        f'<span style="color:#6B7A99;font-size:12px;margin-left:6px;">(DE→{lang_short})</span>'
+        f'</span></div>',
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        "The term will be **hidden from all future translations** and marked as deleted. "
+        "It remains in the audit history and can be restored by an administrator.",
+    )
+
+    col_del, col_cancel = st.columns(2)
+    with col_del:
+        if st.button("Delete term", use_container_width=True, type="primary"):
+            user = st.session_state.get("user_email", "")
+            db_glossary_soft_delete(src, lang, deleted_by=user)
+            # Remove from active glossary cache
+            glossary_obj = load_glossary(lang)
+            if glossary_obj and src in glossary_obj.get("terms", {}):
+                del glossary_obj["terms"][src]
+                save_glossary(glossary_obj, lang)
+            st.session_state.pop("_gloss_delete", None)
+            st.rerun()
+    with col_cancel:
+        if st.button("Cancel", use_container_width=True):
+            st.session_state.pop("_gloss_delete", None)
+            st.rerun()
+
+
+# =============================================================================
+# PAGE: GLOSSARY MANAGEMENT
+# =============================================================================
+
 def glossary_page():
     render_page_header(
         "Glossary Management",
-        "Terminology enforced consistently across all translations",
+        "Enterprise terminology management — edit, disable, audit, and import/export terms",
     )
 
-    # Language filter
-    gloss_lang = st.radio(
-        "Show glossary for:",
-        ["French (FR)", "Dutch (NL)"],
-        horizontal=True,
-        key="gloss_lang_filter",
+    # ── Dialog triggers (must precede all other rendering) ───────────────────
+    if st.session_state.get("_gloss_edit"):
+        _glossary_edit_dialog()
+    if st.session_state.get("_gloss_delete"):
+        _glossary_delete_dialog()
+
+    user_email = st.session_state.get("user_email", "")
+    user_role  = st.session_state.get("user_role", "")
+
+    # ── Top filter bar ────────────────────────────────────────────────────────
+    col_lang, col_status, col_search = st.columns([2, 2, 4])
+    with col_lang:
+        lang_filter = st.selectbox(
+            "Language", ["All", "French (FR)", "Dutch (NL)"],
+            key="gm_lang", label_visibility="collapsed",
+        )
+        st.caption("Language")
+    with col_status:
+        status_filter = st.selectbox(
+            "Status", ["Active only", "All", "Inactive", "Deleted"],
+            key="gm_status", label_visibility="collapsed",
+        )
+        st.caption("Status")
+    with col_search:
+        search_q = st.text_input(
+            "Search", placeholder="Search source or target term…",
+            key="gm_search", label_visibility="collapsed",
+        )
+        st.caption("Search")
+
+    lang_for_query = None
+    if "French" in lang_filter:
+        lang_for_query = "French"
+    elif "Dutch" in lang_filter:
+        lang_for_query = "Dutch"
+
+    include_deleted  = status_filter in ("All", "Deleted")
+    include_inactive = status_filter in ("All", "Inactive")
+    all_terms_raw = db_glossary_get_all(
+        target_language=lang_for_query,
+        include_deleted=True,
+        include_inactive=True,
     )
-    active_lang = "Dutch" if "Dutch" in gloss_lang else "French"
 
-    glossary    = load_glossary(active_lang)
-    terms       = glossary.get("terms", {})
-    gloss_stats = glossary.get("stats", {})
-    term_counts = gloss_stats.get("term_counts", {})
-
-    # ── Stats ──
-    total_hits  = gloss_stats.get("total_hits", 0)
-    total_terms = len(terms)
-    used_terms  = len([t for t in terms if t in term_counts])
+    # ── KPIs (always over full dataset for the chosen language) ──────────────
+    active_cnt   = sum(1 for t in all_terms_raw if t.get("active", 1) and not t.get("is_deleted"))
+    inactive_cnt = sum(1 for t in all_terms_raw if not t.get("active", 1) and not t.get("is_deleted"))
+    deleted_cnt  = sum(1 for t in all_terms_raw if t.get("is_deleted"))
+    critical_cnt = sum(1 for t in all_terms_raw if t.get("priority") == "CRITICAL" and not t.get("is_deleted"))
+    total_hits   = sum(t.get("hit_count", 0) for t in all_terms_raw if not t.get("is_deleted"))
 
     st.markdown(f"""
-    <div class="kpi-row-3">
+    <div class="kpi-row">
         <div class="kpi">
-            <div class="kpi-label">Total Terms</div>
-            <div class="kpi-value accent">{total_terms}</div>
-            <div class="kpi-sub">Defined mappings</div>
+            <div class="kpi-label">Active Terms</div>
+            <div class="kpi-value success">{active_cnt}</div>
+            <div class="kpi-sub">Used in translation</div>
         </div>
         <div class="kpi">
-            <div class="kpi-label">Terms Used</div>
-            <div class="kpi-value success">{used_terms}</div>
-            <div class="kpi-sub">Matched in source texts</div>
+            <div class="kpi-label">Inactive</div>
+            <div class="kpi-value" style="color:#D97706;">{inactive_cnt}</div>
+            <div class="kpi-sub">Disabled temporarily</div>
+        </div>
+        <div class="kpi">
+            <div class="kpi-label">Critical Terms</div>
+            <div class="kpi-value" style="color:#DC2626;">{critical_cnt}</div>
+            <div class="kpi-sub">Override AI strongly</div>
         </div>
         <div class="kpi">
             <div class="kpi-label">Total Hits</div>
-            <div class="kpi-value">{total_hits:,}</div>
+            <div class="kpi-value accent">{total_hits:,}</div>
             <div class="kpi-sub">Across all translations</div>
         </div>
     </div>
     """, unsafe_allow_html=True)
 
-    target_col_label = "Dutch" if active_lang == "Dutch" else "French"
+    # ── Apply status filter to displayed set ─────────────────────────────────
+    if status_filter == "Active only":
+        displayed_terms = [t for t in all_terms_raw if t.get("active", 1) and not t.get("is_deleted")]
+    elif status_filter == "Inactive":
+        displayed_terms = [t for t in all_terms_raw if not t.get("active", 1) and not t.get("is_deleted")]
+    elif status_filter == "Deleted":
+        displayed_terms = [t for t in all_terms_raw if t.get("is_deleted")]
+    else:
+        displayed_terms = all_terms_raw
 
-    # ── Glossary table ──
-    st.markdown(f'<div class="section-label">Term List — DE→{target_col_label}</div>', unsafe_allow_html=True)
+    # ── Apply search ──────────────────────────────────────────────────────────
+    if search_q.strip():
+        q = search_q.strip().lower()
+        displayed_terms = [
+            t for t in displayed_terms
+            if q in t.get("source_term", "").lower()
+            or q in t.get("target_term", "").lower()
+            or q in t.get("category", "").lower()
+        ]
 
-    rows = []
-    for de, target in sorted(terms.items()):
-        rows.append({
-            "German":             de,
-            target_col_label:     target,
-            "Times Used":         term_counts.get(de, 0),
-        })
+    # ── Tabs ──────────────────────────────────────────────────────────────────
+    tab_names = ["Term List", "Add Term", "Import / Export", "Suggested Terms"]
+    if user_role == "admin":
+        tab_names.append("Audit Log")
+    tabs = st.tabs(tab_names)
 
-    st.dataframe(rows, use_container_width=True, hide_index=True)
-
-    # ── Add new term ──
-    st.markdown('<div class="section-label">Add / Update Term</div>', unsafe_allow_html=True)
-
-    with st.form("add_term_form"):
-        col_de, col_tgt = st.columns(2)
-        with col_de:
-            new_de = st.text_input("German term", placeholder="e.g. Kopfteil")
-        with col_tgt:
-            new_target = st.text_input(
-                f"{target_col_label} translation",
-                placeholder=("e.g. hoofdbord" if active_lang == "Dutch" else "e.g. Tête de lit"),
+    # ════════════════════════════════════════════════════════════════════════
+    # TAB 1 — Term List
+    # ════════════════════════════════════════════════════════════════════════
+    with tabs[0]:
+        # Sub-filters
+        col_cat, col_prio, col_src_type = st.columns(3)
+        with col_cat:
+            all_cats = sorted({t.get("category", "") for t in displayed_terms if t.get("category")})
+            cat_filter = st.selectbox("Category", ["All"] + all_cats, key="gm_cat")
+        with col_prio:
+            prio_filter = st.selectbox(
+                "Priority", ["All", "CRITICAL", "HIGH", "NORMAL", "LOW"],
+                key="gm_prio",
             )
-        add_submitted = st.form_submit_button("Add term →", use_container_width=True)
+        with col_src_type:
+            origin_filter = st.selectbox(
+                "Origin",
+                ["All", "MANUAL", "TM_IMPORTED", "AI_GENERATED", "AUTO_LEARNED", "CORPUS_EXTRACTED"],
+                key="gm_origin",
+            )
 
-    if add_submitted:
-        new_de     = new_de.strip()
-        new_target = new_target.strip()
-        if new_de and new_target:
-            glossary["terms"][new_de] = new_target
-            save_glossary(glossary, active_lang)
-            st.success(f"Added: **{new_de}** → **{new_target}** ({active_lang})")
-            st.rerun()
+        if cat_filter != "All":
+            displayed_terms = [t for t in displayed_terms if t.get("category") == cat_filter]
+        if prio_filter != "All":
+            displayed_terms = [t for t in displayed_terms if t.get("priority") == prio_filter]
+        if origin_filter != "All":
+            displayed_terms = [t for t in displayed_terms if t.get("source_type") == origin_filter]
+
+        _PRIO_EMOJI = {"CRITICAL": "🔴 CRITICAL", "HIGH": "🟠 HIGH", "NORMAL": "🟢 NORMAL", "LOW": "⚪ LOW"}
+        _SRC_EMOJI  = {
+            "MANUAL":           "👤 Manual",
+            "TM_IMPORTED":      "📚 TM Import",
+            "AI_GENERATED":     "🤖 AI",
+            "AUTO_LEARNED":     "⚡ Auto",
+            "CORPUS_EXTRACTED": "🔍 Corpus",
+        }
+
+        st.markdown(
+            f'<div class="section-label">'
+            f'Terms — {len(displayed_terms)} result(s)'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+
+        if not displayed_terms:
+            st.info("No terms match the current filters.")
         else:
-            st.error("Both fields are required.")
+            table_rows = []
+            for t in displayed_terms:
+                is_del   = bool(t.get("is_deleted"))
+                is_act   = bool(t.get("active", 1))
+                if is_del:
+                    status_str = "🗑 Deleted"
+                elif is_act:
+                    status_str = "● Active"
+                else:
+                    status_str = "○ Inactive"
+                table_rows.append({
+                    "Source (DE)": t["source_term"],
+                    "Target":      t["target_term"],
+                    "Lang":        "NL" if t.get("target_language") == "Dutch" else "FR",
+                    "Category":    t.get("category") or "—",
+                    "Origin":      _SRC_EMOJI.get(t.get("source_type", "MANUAL"), t.get("source_type", "")),
+                    "Priority":    _PRIO_EMOJI.get(t.get("priority", "NORMAL"), t.get("priority", "")),
+                    "Conf.":       f"{int(float(t.get('confidence', 1.0)) * 100)}%",
+                    "Usage":       int(t.get("hit_count", 0)),
+                    "Status":      status_str,
+                    "Created":     (t.get("created_at") or "")[:10],
+                    "Modified":    (t.get("updated_at") or "")[:10],
+                })
 
-    # ── Reset to defaults ──
-    st.markdown('<div class="section-label">Reset</div>', unsafe_allow_html=True)
-    default_terms = DEFAULT_NL_GLOSSARY_TERMS if active_lang == "Dutch" else DEFAULT_GLOSSARY_TERMS
-    if st.button(f"Reset {target_col_label} glossary to defaults"):
-        glossary["terms"] = default_terms.copy()
-        save_glossary(glossary, active_lang)
-        st.success(f"{target_col_label} glossary reset to defaults.")
-        st.rerun()
+            sel_result = st.dataframe(
+                table_rows,
+                use_container_width=True,
+                hide_index=True,
+                selection_mode="single-row",
+                on_select="rerun",
+                key="gloss_table_sel",
+                column_config={
+                    "Conf.":    st.column_config.TextColumn(width="small"),
+                    "Usage":    st.column_config.NumberColumn(width="small"),
+                    "Lang":     st.column_config.TextColumn(width="small"),
+                    "Status":   st.column_config.TextColumn(width="small"),
+                    "Created":  st.column_config.TextColumn(width="small"),
+                    "Modified": st.column_config.TextColumn(width="small"),
+                },
+            )
 
-    # ── Auto-learned furniture terms ─────────────────────────────────────────
-    st.markdown('<div class="section-label">Auto-learned Terminology</div>', unsafe_allow_html=True)
-    furniture_map = FURNITURE_TERM_MAP_FR if active_lang == "French" else FURNITURE_TERM_MAP_NL
-    auto_in_glossary = {
-        de: tr for de, tr in furniture_map.items()
-        if de in terms
-    }
-    auto_missing = {
-        de: tr for de, tr in furniture_map.items()
-        if de not in terms
-    }
+            selected_rows = []
+            try:
+                selected_rows = sel_result.selection.rows
+            except AttributeError:
+                pass
 
-    if auto_in_glossary:
-        st.markdown(
-            f'<div class="alert alert-success">'
-            f'<span class="alert-icon">✓</span>'
-            f'<span><strong>{len(auto_in_glossary)} furniture term(s) active</strong> — '
-            f'learned automatically from translation jobs.</span></div>',
-            unsafe_allow_html=True,
-        )
+            if selected_rows:
+                sel_idx   = selected_rows[0]
+                sel_term  = displayed_terms[sel_idx]
+                sel_src   = sel_term["source_term"]
+                sel_lang  = sel_term["target_language"]
+                is_deleted_sel = bool(sel_term.get("is_deleted"))
+                is_active_sel  = bool(sel_term.get("active", 1))
 
-    if auto_missing:
-        st.markdown(
-            f'<div class="alert alert-info">'
-            f'<span class="alert-icon">ℹ</span>'
-            f'<span>{len(auto_missing)} furniture term(s) will be added automatically '
-            f'when they appear in source files (min. 2 occurrences).</span></div>',
-            unsafe_allow_html=True,
-        )
-        if st.button(f"Add all {len(auto_missing)} furniture terms now", key="add_all_furniture"):
-            for de, tr in auto_missing.items():
-                glossary["terms"].setdefault(de, tr)
-            save_glossary(glossary, active_lang)
-            st.success(f"Added {len(auto_missing)} furniture terms to glossary.")
-            st.rerun()
-
-    # ── Unknown term suggestions (for terms not in furniture map) ────────────
-    suggestions = db_load_glossary_suggestions(target_language=active_lang, status="pending")
-    unknown_suggestions = [
-        s for s in suggestions
-        if s["term"] not in furniture_map
-    ]
-
-    if unknown_suggestions:
-        st.markdown('<div class="section-label">Unknown Terms — Review Required</div>', unsafe_allow_html=True)
-        st.markdown(
-            f'<div class="alert alert-warn"><span class="alert-icon">💡</span>'
-            f'<span><strong>{len(unknown_suggestions)} unknown term(s)</strong> detected from recent jobs. '
-            f'These are not in the furniture vocabulary — review and add if needed.</span></div>',
-            unsafe_allow_html=True,
-        )
-        for s in unknown_suggestions:
-            sid  = s["id"]
-            term = s["term"]
-            occ  = s["occurrences"]
-            ctx  = s.get("example_context", "")[:80]
-            col_a, col_b, col_c = st.columns([3, 1, 1])
-            with col_a:
-                proposed = st.text_input(
-                    f"**{term}** ({occ}× in source):",
-                    key=f"sug_input_{sid}",
-                    placeholder=f"Type {target_col_label} translation…",
-                    help=f"Context: {ctx}" if ctx else "",
+                st.markdown(
+                    f'<div class="section-label" style="margin-top:16px;">'
+                    f'Actions — <strong>{sel_src}</strong> → {sel_term["target_term"]}'
+                    f'</div>',
+                    unsafe_allow_html=True,
                 )
-            with col_b:
-                if st.button("Accept", key=f"sug_acc_{sid}", use_container_width=True):
-                    if proposed.strip():
-                        glossary["terms"][term] = proposed.strip()
-                        save_glossary(glossary, active_lang)
-                        db_update_suggestion_status(sid, "accepted")
-                        st.success(f"Added **{term}** → **{proposed.strip()}**")
-                        st.rerun()
-                    else:
-                        st.error("Enter a translation first.")
-            with col_c:
-                if st.button("Reject", key=f"sug_rej_{sid}", use_container_width=True):
-                    db_update_suggestion_status(sid, "rejected")
+                col_e, col_d, col_t, col_r = st.columns(4)
+
+                with col_e:
+                    if not is_deleted_sel:
+                        if st.button("✏ Edit", key="gact_edit", use_container_width=True):
+                            st.session_state["_gloss_edit"] = sel_term
+                            st.rerun()
+
+                with col_d:
+                    if not is_deleted_sel:
+                        if st.button("🗑 Delete", key="gact_del", use_container_width=True):
+                            st.session_state["_gloss_delete"] = sel_term
+                            st.rerun()
+
+                with col_t:
+                    if not is_deleted_sel:
+                        btn_label = "⊘ Disable" if is_active_sel else "✓ Enable"
+                        if st.button(btn_label, key="gact_toggle", use_container_width=True):
+                            new_active = db_glossary_toggle_active(sel_src, sel_lang, user_email)
+                            # Sync with translation engine cache
+                            glossary_obj = load_glossary(sel_lang)
+                            if glossary_obj:
+                                if new_active:
+                                    glossary_obj["terms"][sel_src] = sel_term["target_term"]
+                                else:
+                                    glossary_obj["terms"].pop(sel_src, None)
+                                save_glossary(glossary_obj, sel_lang)
+                            action_word = "enabled" if new_active else "disabled"
+                            st.success(f"Term {action_word}: {sel_src}")
+                            st.rerun()
+
+                with col_r:
+                    if is_deleted_sel and user_role == "admin":
+                        if st.button("↩ Restore", key="gact_restore", use_container_width=True):
+                            db_glossary_restore(sel_src, sel_lang, restored_by=user_email)
+                            glossary_obj = load_glossary(sel_lang)
+                            if glossary_obj:
+                                glossary_obj["terms"][sel_src] = sel_term["target_term"]
+                                save_glossary(glossary_obj, sel_lang)
+                            st.success(f"Restored: {sel_src}")
+                            st.rerun()
+
+                # Notes / metadata preview
+                if sel_term.get("notes"):
+                    st.markdown(
+                        f'<div class="alert alert-info" style="margin-top:8px;">'
+                        f'<span class="alert-icon">ℹ</span>'
+                        f'<span><strong>Notes:</strong> {sel_term["notes"]}</span></div>',
+                        unsafe_allow_html=True,
+                    )
+                if sel_term.get("synonyms"):
+                    st.caption(f"Synonyms: {sel_term['synonyms']}")
+                if sel_term.get("forbidden_alternatives"):
+                    st.caption(f"Forbidden alternatives: {sel_term['forbidden_alternatives']}")
+
+    # ════════════════════════════════════════════════════════════════════════
+    # TAB 2 — Add Term
+    # ════════════════════════════════════════════════════════════════════════
+    with tabs[1]:
+        st.markdown('<div class="section-label">New Glossary Term</div>', unsafe_allow_html=True)
+        with st.form("gm_add_form"):
+            col_src, col_tgt = st.columns(2)
+            with col_src:
+                add_source = st.text_input("German term *", placeholder="e.g. Kopfteil")
+            with col_tgt:
+                add_target = st.text_input("Target translation *", placeholder="e.g. Tête de lit")
+
+            col_lang_add, col_cat_add = st.columns(2)
+            with col_lang_add:
+                add_lang = st.selectbox("Target language *", ["French", "Dutch"])
+            with col_cat_add:
+                add_cat = st.text_input("Category", placeholder="e.g. bedroom, kitchen…")
+
+            col_prio_add, col_src_type_add, col_conf_add = st.columns(3)
+            with col_prio_add:
+                add_prio = st.selectbox("Priority", ["NORMAL", "CRITICAL", "HIGH", "LOW"])
+            with col_src_type_add:
+                add_src_type = st.selectbox(
+                    "Origin",
+                    ["MANUAL", "TM_IMPORTED", "AI_GENERATED", "AUTO_LEARNED", "CORPUS_EXTRACTED"],
+                )
+            with col_conf_add:
+                add_conf = st.slider("Confidence", 0.0, 1.0, 1.0, 0.05)
+
+            add_notes = st.text_area("Notes", placeholder="Context, usage guidance…", height=68)
+
+            col_syn_add, col_forb_add = st.columns(2)
+            with col_syn_add:
+                add_syn  = st.text_input("Synonyms (comma-separated)")
+            with col_forb_add:
+                add_forb = st.text_input("Forbidden alternatives")
+
+            add_submitted = st.form_submit_button("Add term →", use_container_width=True, type="primary")
+
+        if add_submitted:
+            src_val = add_source.strip()
+            tgt_val = add_target.strip()
+            if not src_val or not tgt_val:
+                st.error("German term and target translation are required.")
+            else:
+                ok = db_glossary_add_term(
+                    source_term=src_val,
+                    target_term=tgt_val,
+                    target_language=add_lang,
+                    category=add_cat.strip(),
+                    source_type=add_src_type,
+                    confidence=add_conf,
+                    priority=add_prio,
+                    notes=add_notes.strip(),
+                    synonyms=add_syn.strip(),
+                    forbidden_alternatives=add_forb.strip(),
+                    created_by=user_email,
+                )
+                if ok:
+                    glossary_obj = load_glossary(add_lang)
+                    if glossary_obj is None:
+                        glossary_obj = {"terms": {}, "target_language": add_lang, "stats": {}}
+                    glossary_obj["terms"][src_val] = tgt_val
+                    save_glossary(glossary_obj, add_lang)
+                    st.success(f"Added: **{src_val}** → **{tgt_val}** ({add_lang})")
                     st.rerun()
+                else:
+                    st.warning("A term with this source already exists for this language. Use Edit to update it.")
+
+        # ── Reset to defaults ──
+        st.markdown('<div class="section-label" style="margin-top:24px;">Reset to Defaults</div>', unsafe_allow_html=True)
+        st.markdown(
+            '<div class="alert alert-warn"><span class="alert-icon">⚠</span>'
+            '<span>This replaces the live glossary cache with the built-in default terms. '
+            'Custom terms added since deployment will remain in the database.</span></div>',
+            unsafe_allow_html=True,
+        )
+        col_rst_fr, col_rst_nl = st.columns(2)
+        with col_rst_fr:
+            if st.button("Reset French to defaults", use_container_width=True):
+                glossary_obj = load_glossary("French") or {"terms": {}, "target_language": "French", "stats": {}}
+                glossary_obj["terms"] = DEFAULT_GLOSSARY_TERMS.copy()
+                save_glossary(glossary_obj, "French")
+                st.success("French glossary reset to defaults.")
+                st.rerun()
+        with col_rst_nl:
+            if st.button("Reset Dutch to defaults", use_container_width=True):
+                glossary_obj = load_glossary("Dutch") or {"terms": {}, "target_language": "Dutch", "stats": {}}
+                glossary_obj["terms"] = DEFAULT_NL_GLOSSARY_TERMS.copy()
+                save_glossary(glossary_obj, "Dutch")
+                st.success("Dutch glossary reset to defaults.")
+                st.rerun()
+
+        # ── Auto-learned furniture terms ──────────────────────────────────────
+        st.markdown('<div class="section-label" style="margin-top:24px;">Auto-learned Furniture Terms</div>', unsafe_allow_html=True)
+        furn_lang = st.radio("Language", ["French", "Dutch"], horizontal=True, key="gm_furn_lang")
+        furniture_map = FURNITURE_TERM_MAP_FR if furn_lang == "French" else FURNITURE_TERM_MAP_NL
+        g_obj   = load_glossary(furn_lang) or {"terms": {}}
+        g_terms = g_obj.get("terms", {})
+        auto_in   = {de: tr for de, tr in furniture_map.items() if de in g_terms}
+        auto_miss = {de: tr for de, tr in furniture_map.items() if de not in g_terms}
+
+        if auto_in:
+            st.markdown(
+                f'<div class="alert alert-success"><span class="alert-icon">✓</span>'
+                f'<span><strong>{len(auto_in)} furniture term(s) active</strong> in {furn_lang} glossary.</span></div>',
+                unsafe_allow_html=True,
+            )
+        if auto_miss:
+            st.markdown(
+                f'<div class="alert alert-info"><span class="alert-icon">ℹ</span>'
+                f'<span>{len(auto_miss)} furniture term(s) not yet in glossary.</span></div>',
+                unsafe_allow_html=True,
+            )
+            if st.button(f"Add all {len(auto_miss)} missing furniture terms", key="gm_add_furniture"):
+                added = 0
+                for de, tr in auto_miss.items():
+                    if db_glossary_add_term(
+                        de, tr, furn_lang,
+                        category="furniture",
+                        source_type="AUTO_LEARNED",
+                        created_by=user_email,
+                    ):
+                        added += 1
+                g_obj_fresh = load_glossary(furn_lang) or {"terms": {}, "target_language": furn_lang, "stats": {}}
+                for de, tr in auto_miss.items():
+                    g_obj_fresh["terms"].setdefault(de, tr)
+                save_glossary(g_obj_fresh, furn_lang)
+                st.success(f"Added {added} furniture terms.")
+                st.rerun()
+
+    # ════════════════════════════════════════════════════════════════════════
+    # TAB 3 — Import / Export
+    # ════════════════════════════════════════════════════════════════════════
+    with tabs[2]:
+        col_exp, col_imp = st.columns(2)
+
+        # ── Export ────────────────────────────────────────────────────────
+        with col_exp:
+            st.markdown('<div class="section-label">Export</div>', unsafe_allow_html=True)
+            exp_lang = st.selectbox("Export language", ["All", "French", "Dutch"], key="gm_exp_lang")
+            exp_format = st.radio("Format", ["CSV", "XLSX"], horizontal=True, key="gm_exp_fmt")
+            exp_deleted = st.checkbox("Include deleted terms", key="gm_exp_del")
+
+            exp_lang_q = None if exp_lang == "All" else exp_lang
+            export_terms = db_glossary_get_all(
+                target_language=exp_lang_q,
+                include_deleted=exp_deleted,
+                include_inactive=True,
+            )
+
+            st.caption(f"{len(export_terms)} term(s) to export")
+
+            if exp_format == "CSV":
+                import io as _io
+                output = _io.StringIO()
+                writer = csv.writer(output)
+                writer.writerow([
+                    "source_term", "target_term", "target_language",
+                    "category", "source_type", "priority", "confidence",
+                    "active", "is_deleted", "usage_count", "notes",
+                    "synonyms", "forbidden_alternatives", "created_at", "updated_at",
+                ])
+                for t in export_terms:
+                    writer.writerow([
+                        t.get("source_term", ""),
+                        t.get("target_term", ""),
+                        t.get("target_language", ""),
+                        t.get("category", ""),
+                        t.get("source_type", ""),
+                        t.get("priority", ""),
+                        t.get("confidence", 1.0),
+                        t.get("active", 1),
+                        t.get("is_deleted", 0),
+                        t.get("hit_count", 0),
+                        t.get("notes", ""),
+                        t.get("synonyms", ""),
+                        t.get("forbidden_alternatives", ""),
+                        t.get("created_at", ""),
+                        t.get("updated_at", ""),
+                    ])
+                st.download_button(
+                    "⬇ Download CSV",
+                    data=output.getvalue().encode("utf-8-sig"),
+                    file_name=f"glossary_{exp_lang.lower()}_{datetime.now().strftime('%Y%m%d')}.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                )
+            else:
+                from openpyxl import Workbook as _WB
+                wb  = _WB()
+                ws  = wb.active
+                ws.title = "Glossary"
+                headers = [
+                    "source_term", "target_term", "target_language",
+                    "category", "source_type", "priority", "confidence",
+                    "active", "is_deleted", "usage_count", "notes",
+                    "synonyms", "forbidden_alternatives", "created_at", "updated_at",
+                ]
+                ws.append(headers)
+                for t in export_terms:
+                    ws.append([
+                        t.get("source_term", ""),
+                        t.get("target_term", ""),
+                        t.get("target_language", ""),
+                        t.get("category", ""),
+                        t.get("source_type", ""),
+                        t.get("priority", ""),
+                        t.get("confidence", 1.0),
+                        t.get("active", 1),
+                        t.get("is_deleted", 0),
+                        t.get("hit_count", 0),
+                        t.get("notes", ""),
+                        t.get("synonyms", ""),
+                        t.get("forbidden_alternatives", ""),
+                        t.get("created_at", ""),
+                        t.get("updated_at", ""),
+                    ])
+                buf = BytesIO()
+                wb.save(buf)
+                st.download_button(
+                    "⬇ Download XLSX",
+                    data=buf.getvalue(),
+                    file_name=f"glossary_{exp_lang.lower()}_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                )
+
+        # ── Import ────────────────────────────────────────────────────────
+        with col_imp:
+            st.markdown('<div class="section-label">Import</div>', unsafe_allow_html=True)
+            st.markdown(
+                '<div class="alert alert-info"><span class="alert-icon">ℹ</span>'
+                '<span>Required columns: <strong>source_term</strong>, '
+                '<strong>target_term</strong>, <strong>target_language</strong>. '
+                'Optional: category, source_type, priority, notes.</span></div>',
+                unsafe_allow_html=True,
+            )
+            imp_overwrite = st.checkbox("Overwrite existing terms", key="gm_imp_ow")
+            imp_file = st.file_uploader(
+                "Upload CSV or XLSX", type=["csv", "xlsx"], key="gm_imp_file"
+            )
+
+            if imp_file is not None:
+                try:
+                    import pandas as _pd
+                    if imp_file.name.endswith(".xlsx"):
+                        df_imp = _pd.read_excel(imp_file)
+                    else:
+                        df_imp = _pd.read_csv(imp_file)
+
+                    df_imp.columns = [c.strip().lower() for c in df_imp.columns]
+                    required = {"source_term", "target_term", "target_language"}
+                    missing_cols = required - set(df_imp.columns)
+                    if missing_cols:
+                        st.error(f"Missing required columns: {', '.join(missing_cols)}")
+                    else:
+                        preview_rows = df_imp.head(5)
+                        st.markdown(f"**Preview — {len(df_imp)} row(s):**")
+                        st.dataframe(preview_rows, use_container_width=True, hide_index=True)
+
+                        if st.button("Import terms", key="gm_imp_btn", use_container_width=True, type="primary"):
+                            rows_to_import = df_imp.fillna("").to_dict("records")
+                            imported_n, skipped_n = db_glossary_bulk_import(
+                                rows_to_import,
+                                created_by=user_email,
+                                overwrite=imp_overwrite,
+                            )
+                            # Sync into translation engine caches
+                            for lang_sync in ("French", "Dutch"):
+                                g_sync = load_glossary(lang_sync) or {"terms": {}, "target_language": lang_sync, "stats": {}}
+                                fresh  = db_glossary_get_all(target_language=lang_sync, include_inactive=False)
+                                g_sync["terms"] = {t["source_term"]: t["target_term"] for t in fresh if not t.get("is_deleted")}
+                                save_glossary(g_sync, lang_sync)
+                            st.success(f"Imported {imported_n} term(s). Skipped {skipped_n}.")
+                            st.rerun()
+                except Exception as e:
+                    st.error(f"Import error: {e}")
+
+    # ════════════════════════════════════════════════════════════════════════
+    # TAB 4 — Suggested Terms
+    # ════════════════════════════════════════════════════════════════════════
+    with tabs[3]:
+        st.markdown('<div class="section-label">AI / TM Suggested Terms — Review Queue</div>', unsafe_allow_html=True)
+        sug_lang_sel = st.radio(
+            "Language",
+            ["French", "Dutch"],
+            horizontal=True,
+            key="gm_sug_lang",
+        )
+        furniture_map_sug = FURNITURE_TERM_MAP_FR if sug_lang_sel == "French" else FURNITURE_TERM_MAP_NL
+        suggestions = db_load_glossary_suggestions(target_language=sug_lang_sel, status="pending")
+        unknown_sug = [s for s in suggestions if s["term"] not in furniture_map_sug]
+        g_obj_sug   = load_glossary(sug_lang_sel) or {"terms": {}, "target_language": sug_lang_sel, "stats": {}}
+        tgt_label   = "Dutch" if sug_lang_sel == "Dutch" else "French"
+
+        if not unknown_sug:
+            st.markdown(
+                '<div class="alert alert-success"><span class="alert-icon">✓</span>'
+                '<span>No pending suggestions. The queue is empty.</span></div>',
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                f'<div class="alert alert-warn"><span class="alert-icon">💡</span>'
+                f'<span><strong>{len(unknown_sug)} term(s)</strong> detected from recent '
+                f'translation jobs — review and approve or reject each.</span></div>',
+                unsafe_allow_html=True,
+            )
+            for s in unknown_sug:
+                sid  = s["id"]
+                term = s["term"]
+                occ  = s["occurrences"]
+                ctx  = (s.get("example_context") or "")[:100]
+                with st.container():
+                    col_a, col_b, col_c = st.columns([4, 1, 1])
+                    with col_a:
+                        proposed = st.text_input(
+                            f"**{term}** ({occ}× in source)",
+                            key=f"sug_input_{sid}",
+                            placeholder=f"Enter {tgt_label} translation…",
+                            help=f"Example context: {ctx}" if ctx else None,
+                        )
+                    with col_b:
+                        if st.button("Approve", key=f"sug_acc_{sid}", use_container_width=True, type="primary"):
+                            if proposed.strip():
+                                db_glossary_add_term(
+                                    term, proposed.strip(), sug_lang_sel,
+                                    source_type="AI_GENERATED",
+                                    created_by=user_email,
+                                )
+                                g_obj_sug["terms"][term] = proposed.strip()
+                                save_glossary(g_obj_sug, sug_lang_sel)
+                                db_update_suggestion_status(sid, "accepted")
+                                st.rerun()
+                            else:
+                                st.error("Enter a translation first.")
+                    with col_c:
+                        if st.button("Reject", key=f"sug_rej_{sid}", use_container_width=True):
+                            db_update_suggestion_status(sid, "rejected")
+                            st.rerun()
+
+    # ════════════════════════════════════════════════════════════════════════
+    # TAB 5 — Audit Log (admin only)
+    # ════════════════════════════════════════════════════════════════════════
+    if user_role == "admin":
+        with tabs[4]:
+            st.markdown('<div class="section-label">Glossary Audit Log</div>', unsafe_allow_html=True)
+            audit_entries = db_get_glossary_audit_log(limit=200)
+            if not audit_entries:
+                st.info("No audit entries yet.")
+            else:
+                audit_rows = []
+                for e in audit_entries:
+                    audit_rows.append({
+                        "Timestamp":  (e.get("timestamp") or "")[:19].replace("T", " "),
+                        "Term":       e.get("source_term", ""),
+                        "Language":   "NL" if e.get("target_language") == "Dutch" else "FR",
+                        "Action":     e.get("action", ""),
+                        "Old value":  (e.get("old_value") or "")[:50],
+                        "New value":  (e.get("new_value") or "")[:50],
+                        "Changed by": e.get("changed_by", ""),
+                    })
+                st.dataframe(audit_rows, use_container_width=True, hide_index=True)
+                st.caption(f"Showing last {len(audit_rows)} entries")
 
 
 # =============================================================================
