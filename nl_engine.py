@@ -192,6 +192,10 @@ NL_FURNITURE_CANONICAL: list[tuple[str, str]] = [
     ("Belastbarkeit",           "draagkracht"),
     ("Lieferumfang",            "leveringsomvang"),
     ("Inklusive",               "inclusief"),
+    # Castors on furniture — lowercase, never "wielen" (vehicle wheels)
+    ("Rollen",                  "rollen"),
+    # Iron material — German Eisen → Dutch IJzer (capital IJ digraph mandatory)
+    ("Eisen",                   "IJzer"),
     # Variant/combo labels in product names
     ("Variante",                "variant"),             # TM: "Variante A" → "variant A"
     ("Kombi",                   "combi"),               # TM: "Kombi A" → "combi A"
@@ -257,6 +261,12 @@ NL_FORBIDDEN_REPLACEMENTS: list[tuple[str, str]] = [
     ("vaatwasserfront",         "vaatwasserpaneel"),
     ("vaatwasser front",        "vaatwasserpaneel"),
     ("vaatwasser paneel",       "vaatwasserpaneel"),
+    # Furniture castors — "wielen" (vehicle wheels) is wrong; use "rollen"
+    ("Wielen",                  "rollen"),
+    # "IJs" (ice) as translation of "Eisen" (iron) — semantic error
+    ("IJs",                     "IJzer"),
+    # Note: "Ijzer" → "IJzer" is handled by normalize_ij_capitalization, not here,
+    # because a case-insensitive replacement would falsely match the correct "IJzer".
     # Typos
     ("opbervolume",             "opbergvolume"),
     # Nonsense word — replace with safest option
@@ -294,6 +304,8 @@ _NL_SET_BEST   = re.compile(r'\bSet\s+bestehend\s+aus\b', re.IGNORECASE)
 _NL_MIT        = re.compile(r'\bmit\b', re.UNICODE)
 # "3-Zits" with capital Z → "3-zits"
 _NL_ZITS_UPPER = re.compile(r'(\d+(?:[.,]5)?)-Zits\b', re.UNICODE)
+# "2er-Set" → "set van 2" (German quantity compound → Dutch)
+_NL_ER_SET = re.compile(r'\b(\d+)er-[Ss]et\b')
 
 
 def apply_nl_format_normalization(text: str) -> str:
@@ -330,6 +342,8 @@ def apply_nl_format_normalization(text: str) -> str:
     text = _NL_OHNE_DEKO.sub('zonder decoratie', text)
     # German "mit" → Dutch "met" (standalone word, always safe)
     text = _NL_MIT.sub('met', text)
+    # "2er-Set" → "set van 2"
+    text = _NL_ER_SET.sub(lambda m: f"set van {m.group(1)}", text)
     # Collapse extra spaces
     text = re.sub(r'  +', ' ', text)
     return text.strip()
@@ -405,6 +419,42 @@ def apply_nl_post_colon_lowercase(text: str, canonical: str = "") -> str:
     # Apply to all structural attribute columns (or if canonical is unspecified)
     if not canonical or canonical in _NL_POST_COLON_SAFE_CANONICALS:
         return _NL_COLON_UPPER_RE.sub(lambda m: m.group(1) + m.group(2).lower(), text)
+    return text
+
+
+# =============================================================================
+# IJ DIGRAPH + CASE NORMALIZATION  — Dutch-specific rules
+# =============================================================================
+
+# "Ij..." at word boundary → "IJ..." (Dutch digraph always capitalised as a unit)
+_NL_IJ_RE = re.compile(r'\bIj(?=[a-zA-ZäöüèéêëÄÖÜ])', re.UNICODE)
+
+# First capitalised word after /, & or <br> in attribute columns → lowercase.
+# The <br> pattern uses a negative lookahead to skip label words (e.g. "Poten:").
+_NL_SLASH_UPPER_RE = re.compile(r'(?<=/)\s*([A-ZÜÖÄ][a-züöäß])', re.UNICODE)
+_NL_AMP_UPPER_RE   = re.compile(r'(?<=&)\s+([A-ZÜÖÄ][a-züöäß])', re.UNICODE)
+_NL_BR_UPPER_RE    = re.compile(
+    r'<br>([A-ZÜÖÄ][a-züöäß][a-zA-ZüöäßÜÖÄ]*)(?!\w)(?!\s*:)',
+    re.UNICODE,
+)
+
+
+def normalize_ij_capitalization(text: str) -> str:
+    """Fix Dutch IJ digraph: 'Ij...' → 'IJ...' (e.g. Ijzer → IJzer, Ijsland → IJsland)."""
+    return _NL_IJ_RE.sub('IJ', text)
+
+
+def normalize_dutch_case(text: str, canonical: str = "") -> str:
+    """
+    Lowercase the first word after '/', '&' and '<br>' in attribute columns.
+    Skipped for product name column and ALL-CAPS abbreviations.
+    """
+    if canonical == 'name' or not text:
+        return text
+    if not canonical or canonical in _NL_POST_COLON_SAFE_CANONICALS:
+        text = _NL_SLASH_UPPER_RE.sub(lambda m: m.group(1).lower(), text)
+        text = _NL_AMP_UPPER_RE.sub(lambda m: ' ' + m.group(1).lower(), text)
+        text = _NL_BR_UPPER_RE.sub(lambda m: '<br>' + m.group(1)[0].lower() + m.group(1)[1:], text)
     return text
 
 
@@ -571,15 +621,19 @@ def nl_post_process(text: str, canonical: str = "") -> str:
     """
     Full Dutch post-processing pipeline (zero API calls).
     Applied after AI translation:
-      dekor → colors → furniture → forbidden → format → post-colon lowercase.
+      dekor → colors → furniture → forbidden → format → IJ digraph →
+      post-colon lowercase → extended case normalization.
     """
     text = apply_nl_dekor_patterns(text)
     text = apply_nl_color_normalization(text)
     text = apply_nl_furniture_canonical(text)
     text = apply_nl_forbidden_patterns(text)[0]
+    text = nl_naturalness_rewrite(text)
     text = apply_nl_format_normalization(text)
+    text = normalize_ij_capitalization(text)
     if canonical:
         text = apply_nl_post_colon_lowercase(text, canonical)
+        text = normalize_dutch_case(text, canonical)
     return text
 
 
@@ -639,6 +693,12 @@ _NL_QA_CRITICAL_FORBIDDEN: list[tuple[str, str]] = [
     ("opbervolume",         "opbergvolume"),
     ("vloerweefsel",        "vloerglijders"),
     ("Herenstandaard",      "herenknecht"),
+    # IJ digraph enforcement — case-SENSITIVE (tuple[str, str, bool])
+    ("Ijzer",               "IJzer",    True),  # wrong IJ casing; "IJzer" must not be flagged
+    # Semantic error: "IJs" (ice) for source "Eisen" (iron) — case-sensitive
+    ("IJs",                 "IJzer",    True),  # completely wrong translation
+    # Furniture castors — "wielen" is for vehicles, not furniture
+    ("Wielen",              "rollen"),
 ]
 
 # Untranslated German terms that should always be caught
@@ -707,9 +767,13 @@ def nl_qa_check(translation: str, canonical: str = "") -> list[dict]:
             "message":  "Product name ends with a dangling connector/adjective",
         })
 
-    # Critical forbidden patterns — each gets its own entry
-    for wrong, correct in _NL_QA_CRITICAL_FORBIDDEN:
-        if wrong.lower() in t_lower:
+    # Critical forbidden patterns — each gets its own entry.
+    # Tuple is (wrong, correct) or (wrong, correct, case_sensitive).
+    for entry in _NL_QA_CRITICAL_FORBIDDEN:
+        wrong, correct = entry[0], entry[1]
+        case_sensitive = entry[2] if len(entry) > 2 else False
+        matched = (wrong in translation) if case_sensitive else (wrong.lower() in t_lower)
+        if matched:
             issues.append({
                 "severity": "Critical",
                 "category": "Forbidden pattern",
@@ -739,6 +803,57 @@ def nl_qa_check(translation: str, canonical: str = "") -> list[dict]:
 
 
 # =============================================================================
+# HYBRID LANGUAGE DETECTOR
+# =============================================================================
+
+# Known German-Dutch hybrid words — partial translations AI is prone to generating
+_NL_HYBRID_PATTERNS: list[tuple[str, str]] = [
+    ("Keukeninsel",             "kookeiland"),          # NL prefix + DE root
+    ("Kookfeld",                "kookplaat"),           # NL prefix + DE root
+    ("Keukenleerblok",          "Keukenblok"),          # NL + non-existent hybrid
+    ("Kookplaatunterkast",      "kookplaatonderkast"),  # NL prefix + DE suffix
+    ("Kookplaatonderschrank",   "kookplaatonderkast"),  # NL + DE hybrid
+    ("Enkeleküche",             "mini keuken"),         # NL adjective + DE noun
+    ("Einzelküche",             "mini keuken"),         # alternative DE form
+    ("Ijzer Dekor",             "grof gezaagde eikenlook"),  # wrong IJ context
+]
+
+
+def detect_hybrid_language_words(text: str) -> list[tuple[str, str]]:
+    """
+    Detect partial translations (German-Dutch hybrids) in NL output.
+    Returns list of (wrong_form, canonical_nl) pairs found in the text.
+    """
+    found: list[tuple[str, str]] = []
+    t_lower = text.lower()
+    for wrong, correct in _NL_HYBRID_PATTERNS:
+        if wrong.lower() in t_lower:
+            found.append((wrong, correct))
+    return found
+
+
+# =============================================================================
+# DUTCH NATURALNESS REWRITER  — fixes common unnatural AI phrasing
+# =============================================================================
+
+_NL_NAT_RULES: list[tuple[re.Pattern, str]] = [
+    # "is gemaakt van" → "van" (AI verbosity in attribute descriptions)
+    (re.compile(r'\bis gemaakt van\b', re.IGNORECASE | re.UNICODE), 'van'),
+    # "die bestaat uit" → "bestaande uit" (grammatically more natural in NL)
+    (re.compile(r'\bdie bestaat uit\b', re.IGNORECASE | re.UNICODE), 'bestaande uit'),
+    # "wordt geleverd met" → "inclusief" (shorter, standard Home24 NL wording)
+    (re.compile(r'\bwordt geleverd met\b', re.IGNORECASE | re.UNICODE), 'inclusief'),
+]
+
+
+def nl_naturalness_rewrite(text: str) -> str:
+    """Fix common unnatural Dutch constructions produced by AI translation."""
+    for pat, replacement in _NL_NAT_RULES:
+        text = pat.sub(replacement, text)
+    return text
+
+
+# =============================================================================
 # NORMALIZATION HELPER
 # =============================================================================
 
@@ -755,28 +870,41 @@ class DutchWorkbookConsistencyMemory:
     """
     Tracks source → target choices within one workbook translation session.
     Ensures the same German source always receives the same Dutch output.
+    Stores optional metadata (origin, confidence, hit count) per entry.
     """
 
     def __init__(self) -> None:
         self._memory: dict[str, str] = {}
+        self._meta: dict[str, dict] = {}
 
     def get(self, source: str) -> str | None:
-        return self._memory.get(_normalize(source))
+        key = _normalize(source)
+        if key in self._memory:
+            if key in self._meta:
+                self._meta[key]["count"] += 1
+        return self._memory.get(key)
 
-    def put(self, source: str, target: str) -> None:
+    def put(self, source: str, target: str, *, origin: str = "", confidence: float = 1.0) -> None:
+        """Record source→target. First write wins; subsequent calls increment hit count."""
         key = _normalize(source)
         if key not in self._memory:
             self._memory[key] = target
+            self._meta[key] = {"origin": origin, "confidence": confidence, "count": 1}
 
-    def get_or_default(self, source: str, fallback: str) -> str:
+    def get_meta(self, source: str) -> dict | None:
+        """Return metadata dict for a source term, or None if not recorded."""
+        return self._meta.get(_normalize(source))
+
+    def get_or_default(self, source: str, fallback: str, *, origin: str = "", confidence: float = 1.0) -> str:
         existing = self.get(source)
         if existing is not None:
             return existing
-        self.put(source, fallback)
+        self.put(source, fallback, origin=origin, confidence=confidence)
         return fallback
 
     def clear(self) -> None:
         self._memory.clear()
+        self._meta.clear()
 
     def __len__(self) -> int:
         return len(self._memory)
