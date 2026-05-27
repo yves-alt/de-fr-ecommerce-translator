@@ -40,6 +40,9 @@ NL_DEKOR_MAP: list[tuple[str, str]] = [
     ("Nussbaum Dekor",         "notenlook"),                  # TM-derived; never "Notelaar Dekor"
     ("Beton Dekor",            "betonlook"),
     ("Artisan Dekor",          "Artisan look"),
+    # Sägerau without "Eiche" prefix
+    ("Sägerau Dekor",          "grof gezaagde eikenlook"),
+    ("Sägerau",                "grof gezaagd eiken"),
     # Single-word forms — must come after compounds
     ("Eiche Dekor",            "eikenlook"),                  # TM pattern
     ("Eiche",                  "eiken"),                      # raw wood, not dekor
@@ -89,14 +92,21 @@ NL_COLOR_MAP: list[tuple[str, str]] = [
 
 # Canonical furniture/product name map — TM-verified (longest first)
 NL_FURNITURE_CANONICAL: list[tuple[str, str]] = [
-    # Kitchen — specific forms first
-    ("Singleküche",             "Mini keuken"),         # TM: "Singleküche Kinneloa" → "Mini keuken Kinneloa"
+    # Kitchen — most specific forms first (compound forms before simple)
+    ("Kochfeldunterkast",       "kookplaatonderkast"),  # German-Dutch hybrid → correct NL
+    ("Kochfeldunterschrank",    "kookplaatonderkast"),
+    ("Singleküche",             "mini keuken"),         # TM: "Singleküche Kinneloa" → "Mini keuken Kinneloa"
     ("Pantryküche",             "Pantrykeuken"),
     ("Küchenleerblock",         "Keukenblok"),          # Never "Keukenleerblok"
-    ("Kücheninsel",             "Kookeiland"),          # TM: exact
+    ("Kücheninsel",             "kookeiland"),          # TM: exact (lowercase — Dutch convention)
     ("Autarke Küchenzeile",     "Keukenblok"),          # TM: "Autarke Küchenzeile" → "Keukenblok"
     ("Küchenzeile",             "Keukenblok"),          # TM: exact
     ("Einbauküche",             "Inbouwkeuken"),
+    ("Kochfeld",                "kookplaat"),           # TM: Kochfeld = kookplaat
+    ("Kochplatte",              "kookplaat"),           # keramische Kochplatte
+    ("Dunstabzugshaube",        "afzuigkap"),
+    ("Arbeitsplatte",           "werkblad"),            # Home24 NL standard
+    ("Korpus",                  "Body"),                # Home24 NL: Body not Romp
     # Living room seating
     ("Wohnlandschaft",          "Zithoek"),             # TM: "Wohnlandschaft Fardah" → "Zithoek Fardah"
     ("Ecksofa",                 "Hoekbank"),            # TM: "Ecksofa BANDO" → "Hoekbank BANDO"
@@ -150,11 +160,28 @@ NL_FURNITURE_CANONICAL: list[tuple[str, str]] = [
     ("Tellerset",               "bordenset"),
     ("Trinkhalm-Set",           "set rietjes"),
     ("Dekanter",                "karaf"),
+    ("Tellerstand",             "bordenstandaard"),     # plate rack; never "Tellerstand" untranslated
+    ("Tablett",                 "dienblad"),            # tray; never "Tablett" untranslated
     # Storage
     ("Steckregal",              "opbergrek"),
     # Outdoor
     ("Gartensitzgruppe",        "tuinset"),
     ("Gartenessgruppe",         "Outdoor-diningset"),   # TM: exact pattern
+    # Bathroom / cleaning
+    ("Badewannenmatte",         "badkuipmat"),          # bathtub mat ≠ badmat
+    ("Badematte",               "badmat"),              # regular bath mat
+    ("Duschmatte",              "douchemat"),           # shower mat; singular, not "Douchematt"
+    # Iron board
+    ("Bügelbrettbezug",         "strijkplankhoes"),     # never "strijkplankbekleding"
+    ("Bügelbrett-Bezug",        "strijkplankhoes"),
+    # Multi-color — one standard, no variants
+    ("Mehrfarbig",              "meerdere kleuren"),    # never Multikleur/Multikleurig
+    ("Multicolor",              "meerdere kleuren"),
+    # Fireplace
+    ("Kaminset",                "haardset"),
+    ("Kamingarnitur",           "haardgarnituur"),
+    # Valet stand
+    ("Herrendiener",            "herenknecht"),         # never "Herenstandaard"
     # Column labels (appear as "Label:" prefixes in structured data)
     ("Absetzung",               "afwerking"),
     ("Füllung",                 "vulling"),
@@ -172,17 +199,28 @@ NL_FURNITURE_CANONICAL: list[tuple[str, str]] = [
 
 # Forbidden outputs → canonical replacements (detected post-AI, applied as correction)
 NL_FORBIDDEN_REPLACEMENTS: list[tuple[str, str]] = [
-    # Kitchen — wrong forms
+    # Kitchen — German-Dutch hybrids and wrong forms
     ("Keukenleerblok",          "Keukenblok"),          # "Leerblok" is not Dutch
-    ("Enkele keuken",           "Mini keuken"),         # spec forbidden
-    ("Eenpersoonskeuken",       "Mini keuken"),         # spec forbidden
+    ("Enkele keuken",           "mini keuken"),         # spec forbidden
+    ("Eenpersoonskeuken",       "mini keuken"),         # spec forbidden
+    ("Keukeninsel",             "kookeiland"),          # German-Dutch hybrid
+    ("Kookfeld",                "kookplaat"),           # German-Dutch hybrid
+    ("Keuken eiland",           "kookeiland"),          # wrong space
+    ("Kookkom",                 "kookplaat"),           # wrong word entirely
+    # Kitchen structure — "Body" not "Romp" in Home24 NL
+    ("Romp & werkblad",         "Body & werkblad"),
+    ("Romp & Werkblad",         "Body & werkblad"),
+    ("Body & Werkblad",         "Body & werkblad"),     # capital W wrong after &
     # Sofa/seating — wrong forms
     ("Zits bank",               "zitsbank"),            # space is wrong
     ("Woonlandschap",           "Zithoek"),             # TM says Zithoek
     # Finish / dekor wrong forms
+    ("Zaagruw Decor",           "grof gezaagde eikenlook"),
+    ("Zaagruw decor",           "grof gezaagde eikenlook"),
     ("Zagerau",                 "grof gezaagde eikenlook"),
     ("Notelaar look",           "notenlook"),
     ("Notelaar dekor",          "notenlook"),
+    ("Notelaar",                "notenlook"),           # wrong for Nussbaum Dekor context
     # TV furniture wrong forms
     ("TV lowboard",             "Tv-meubel"),
     ("TV-lowboard",             "Tv-meubel"),
@@ -196,6 +234,15 @@ NL_FORBIDDEN_REPLACEMENTS: list[tuple[str, str]] = [
     ("decor eik",               "eikenlook"),
     ("Decor eik",               "eikenlook"),
     ("eikenhouten decor",       "eikenhouten look"),
+    # Multi-color wrong variants — only "meerdere kleuren" is allowed
+    ("Multikleur",              "meerdere kleuren"),
+    ("Multikleurig",            "meerdere kleuren"),
+    # Bath/cleaning wrong forms
+    ("Douchematt",              "douchemat"),           # typo (double t)
+    ("Douchematten",            "douchemat"),           # wrong plural for singular source
+    ("Strijkplankbekleding",    "strijkplankhoes"),     # wrong term
+    # Valet stand — wrong term
+    ("Herenstandaard",          "herenknecht"),
     # Rattan/weaving wrong forms
     ("synthetisch rotan",       "kunststof vlechtwerk"),
     ("kunststof rotan",         "kunststof vlechtwerk"),
@@ -210,6 +257,10 @@ NL_FORBIDDEN_REPLACEMENTS: list[tuple[str, str]] = [
     ("vaatwasserfront",         "vaatwasserpaneel"),
     ("vaatwasser front",        "vaatwasserpaneel"),
     ("vaatwasser paneel",       "vaatwasserpaneel"),
+    # Typos
+    ("opbervolume",             "opbergvolume"),
+    # Nonsense word — replace with safest option
+    ("vloerweefsel",            "vloerglijders"),
 ]
 
 
@@ -335,7 +386,7 @@ def apply_nl_forbidden_patterns(text: str) -> tuple[str, int]:
 # Applies to structured attribute columns; skipped for product name column.
 _NL_POST_COLON_SAFE_CANONICALS = frozenset({
     'colorDetail', 'materialDetail', 'textileCompositionCover1',
-    'qualityDetail', 'otherMeasurements', 'deliveryScope',
+    'qualityDetail', 'otherMeasurements', 'deliveryScope', 'variantName',
 })
 
 # Matches ": " followed by a word starting with uppercase then lowercase letters.
@@ -544,6 +595,8 @@ _NL_GERMAN_RESIDUE_RE = re.compile(
     r'Badset|Spiegel|Füße|Füsse|Korpus|Breite|Höhe|Tiefe|Länge|Maße|'
     r'Baumwolle|Polyester|Wolle|Leinen|Viskose|'
     r'Schwarz|Weiß|Grau|Braun|Blau|Grün|Rot|Anthrazit|Graphit|Silber|'
+    r'Kochfeld|Kochplatte|Dunstabzugshaube|Kaminset|Herrendiener|'
+    r'Tablett|Tellerstand|Bügelbrettbezug|Duschmatte|Badewannenmatte|'
     r'teilig|Sitzer|flammig|Fernsehsessel|Typ\b'
     r')\b',
     re.UNICODE,
@@ -573,12 +626,36 @@ _NL_QA_COLON_UPPER_RE = re.compile(r':\s+[A-ZÜÖÄ][a-züöäß]', re.UNICODE)
 _NL_QA_ZITS_CAP_RE = re.compile(r'\d+-Zits\b', re.UNICODE)
 
 
+# Specific forbidden strings that get their own critical QA entry
+_NL_QA_CRITICAL_FORBIDDEN: list[tuple[str, str]] = [
+    ("Douchematt",          "douchemat"),
+    ("Strijkplankbekleding","strijkplankhoes"),
+    ("Keukeninsel",         "kookeiland"),
+    ("Kookfeld",            "kookplaat"),
+    ("Keuken eiland",       "kookeiland"),
+    ("Kookkom",             "kookplaat"),
+    ("Zaagruw Decor",       "grof gezaagde eikenlook"),
+    ("Zagerau",             "grof gezaagde eikenlook"),
+    ("opbervolume",         "opbergvolume"),
+    ("vloerweefsel",        "vloerglijders"),
+    ("Herenstandaard",      "herenknecht"),
+]
+
+# Untranslated German terms that should always be caught
+_NL_QA_UNTRANSLATED: list[tuple[str, str]] = [
+    ("Tablett",             "dienblad"),
+    ("Tellerstand",         "bordenstandaard"),
+    ("Kaminset",            "haardset"),
+]
+
+
 def nl_qa_check(translation: str, canonical: str = "") -> list[dict]:
     """
     Run QA checks on a Dutch translation.
     Returns list of issues [{severity, category, message}].
     """
     issues = []
+    t_lower = translation.lower()
 
     residues = detect_nl_german_residue(translation)
     if residues:
@@ -630,8 +707,27 @@ def nl_qa_check(translation: str, canonical: str = "") -> list[dict]:
             "message":  "Product name ends with a dangling connector/adjective",
         })
 
+    # Critical forbidden patterns — each gets its own entry
+    for wrong, correct in _NL_QA_CRITICAL_FORBIDDEN:
+        if wrong.lower() in t_lower:
+            issues.append({
+                "severity": "Critical",
+                "category": "Forbidden pattern",
+                "message":  f'"{wrong}" is forbidden → use "{correct}"',
+            })
+
+    # Untranslated German terms
+    for term, correct in _NL_QA_UNTRANSLATED:
+        if re.search(r'(?<!\w)' + re.escape(term) + r'(?!\w)', translation, re.IGNORECASE):
+            issues.append({
+                "severity": "High",
+                "category": "Untranslated term",
+                "message":  f'"{term}" not translated → should be "{correct}"',
+            })
+
+    # General forbidden replacements (any remaining)
     for wrong, _ in NL_FORBIDDEN_REPLACEMENTS:
-        if wrong.lower() in translation.lower():
+        if wrong.lower() in t_lower:
             issues.append({
                 "severity": "High",
                 "category": "Forbidden pattern",
