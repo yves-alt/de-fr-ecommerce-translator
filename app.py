@@ -72,6 +72,12 @@ from database import (
     db_get_glossary_audit_log,
     db_glossary_bulk_import,
     db_glossary_get_stats,
+    db_dutch_glossary_load_all,
+    db_dutch_glossary_lookup,
+    db_dutch_glossary_fuzzy_lookup,
+    db_dutch_glossary_import_excel,
+    db_dutch_glossary_add_term,
+    db_dutch_glossary_get_stats,
 )
 from intelligence import (
     normalize_text,
@@ -1134,7 +1140,21 @@ def save_glossary(glossary: dict, target_language: str = "French") -> None:
     db_save_glossary(glossary, target_language)
 
 
-def _glossary_prompt_block(glossary: dict) -> str:
+def _glossary_prompt_block(glossary: dict, target_language: str = "French") -> str:
+    """Build glossary prompt block. For Dutch, also loads from dutch_glossary_terms."""
+    if target_language == "Dutch":
+        # Load from dedicated Dutch glossary table
+        try:
+            nl_terms = db_dutch_glossary_load_all(active_only=True)
+            if nl_terms:
+                lines = [
+                    f"- {t['source_term_de']} → {t['target_term_nl']}"
+                    for t in nl_terms[:25]
+                ]
+                return "\nGlossary terms to use exactly:\n" + "\n".join(lines)
+        except Exception:
+            pass
+    # French (default) — use the passed glossary dict
     terms = glossary.get("terms", {})
     if not terms:
         return ""
@@ -5299,6 +5319,28 @@ def process_excel_with_progress(
             col_type = _tm_col_type(canonical)
             resolved = False
 
+            # ── Dutch: exact glossary match (dutch_glossary_terms) ──────────
+            if not resolved and target_language == "Dutch":
+                _dg_exact = db_dutch_glossary_lookup(text)
+                if _dg_exact:
+                    _dg_exact = nl_post_process(_dg_exact, canonical)
+                    results[(row_num, col_idx)] = _dg_exact
+                    tm_put(tm, text, _dg_exact, col_type, target_language)
+                    tie_stats["glossary_only_count"] += 1
+                    tie_stats["gpt_calls_avoided"]   += 1
+                    resolved = True
+
+            # ── Dutch: fuzzy glossary match (dutch_glossary_terms, ≥0.85) ────
+            if not resolved and target_language == "Dutch":
+                _dg_fuzzy = db_dutch_glossary_fuzzy_lookup(text, threshold=0.85)
+                if _dg_fuzzy:
+                    _dg_fuzzy = nl_post_process(_dg_fuzzy, canonical)
+                    results[(row_num, col_idx)] = _dg_fuzzy
+                    tm_put(tm, text, _dg_fuzzy, col_type, target_language)
+                    tie_stats["glossary_only_count"] += 1
+                    tie_stats["gpt_calls_avoided"]   += 1
+                    resolved = True
+
             # ── Dutch: Trados TM exact match (highest priority) ───────────────
             if not resolved and target_language == "Dutch" and _nl_corpus:
                 exact_tr = _nl_corpus.exact_match(text)
@@ -7885,6 +7927,149 @@ def _glossary_delete_dialog() -> None:
 
 
 # =============================================================================
+# DUTCH GLOSSARY SUB-PAGE
+# =============================================================================
+
+def _glossary_page_dutch(user_email: str = "", user_role: str = "") -> None:
+    """Render the Dutch glossary management sub-page (dutch_glossary_terms table)."""
+    st.markdown("### Dutch Glossary (NL)")
+
+    # ── Stats KPIs ────────────────────────────────────────────────────────────
+    stats = db_dutch_glossary_get_stats()
+    kpi_cols = st.columns(4)
+    kpi_cols[0].metric("Total Terms", stats.get("total", 0))
+    kpi_cols[1].metric("Active Terms", stats.get("active", 0))
+    kpi_cols[2].metric("Total Frequency", stats.get("total_freq", 0))
+    by_type = stats.get("by_type", {})
+    kpi_cols[3].metric(
+        "Source Types",
+        ", ".join(f"{k}:{v}" for k, v in by_type.items()) or "—",
+    )
+
+    # ── Tabs ──────────────────────────────────────────────────────────────────
+    nl_tabs = st.tabs(["Term List", "Add Term", "Import Excel", "Export"])
+
+    # ── Tab 1: Term List ──────────────────────────────────────────────────────
+    with nl_tabs[0]:
+        search_nl = st.text_input(
+            "Search", placeholder="Search German or Dutch term…",
+            key="nl_gloss_search", label_visibility="collapsed",
+        )
+        all_nl = db_dutch_glossary_load_all(active_only=False)
+        if search_nl.strip():
+            q = search_nl.strip().lower()
+            all_nl = [
+                t for t in all_nl
+                if q in t.get("source_term_de", "").lower()
+                or q in t.get("target_term_nl", "").lower()
+            ]
+        if not all_nl:
+            st.info("No Dutch glossary terms found.")
+        else:
+            rows = [
+                {
+                    "Source (DE)":   t["source_term_de"],
+                    "Target (NL)":   t["target_term_nl"],
+                    "Category":      t.get("category") or "—",
+                    "Source type":   t.get("source_type", "MANUAL"),
+                    "Confidence":    f"{int(float(t.get('confidence', 1.0)) * 100)}%",
+                    "Frequency":     int(t.get("frequency", 0)),
+                    "Active":        "Yes" if t.get("active", 1) else "No",
+                }
+                for t in all_nl
+            ]
+            st.dataframe(rows, use_container_width=True, hide_index=True)
+
+    # ── Tab 2: Add Term ───────────────────────────────────────────────────────
+    with nl_tabs[1]:
+        with st.form("nl_add_term_form"):
+            add_de = st.text_input("German term *", placeholder="e.g. Kaminset")
+            add_nl = st.text_input("Dutch translation *", placeholder="e.g. haardset")
+            add_cat = st.text_input("Category", placeholder="e.g. fireplace")
+            add_conf = st.slider("Confidence", 0.0, 1.0, 1.0, 0.05)
+            add_submitted = st.form_submit_button("Add Term", type="primary")
+            if add_submitted:
+                if add_de.strip() and add_nl.strip():
+                    ok = db_dutch_glossary_add_term(
+                        add_de.strip(), add_nl.strip(),
+                        category=add_cat.strip(),
+                        source_type="MANUAL",
+                        confidence=add_conf,
+                    )
+                    if ok:
+                        st.success(f"Added: {add_de.strip()} → {add_nl.strip()}")
+                    else:
+                        st.warning("Term already exists or could not be added.")
+                else:
+                    st.error("Both German and Dutch terms are required.")
+
+    # ── Tab 3: Import Excel ───────────────────────────────────────────────────
+    with nl_tabs[2]:
+        st.markdown(
+            "Upload the DE→NL glossary Excel file.  "
+            "Expected format: sheet **'Clean Technical Glossary'**, "
+            "Column A = German, Column B = Dutch."
+        )
+        uploaded = st.file_uploader(
+            "Glossary Excel file",
+            type=["xlsx"],
+            key="nl_gloss_import",
+            label_visibility="collapsed",
+        )
+        if uploaded is not None:
+            import tempfile, os as _os
+            with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as tmp:
+                tmp.write(uploaded.read())
+                tmp_path = tmp.name
+            try:
+                imported, skipped = db_dutch_glossary_import_excel(tmp_path)
+                st.success(f"Imported {imported} terms, skipped {skipped}.")
+            except Exception as exc:
+                st.error(f"Import failed: {exc}")
+            finally:
+                try:
+                    _os.unlink(tmp_path)
+                except Exception:
+                    pass
+
+    # ── Tab 4: Export ─────────────────────────────────────────────────────────
+    with nl_tabs[3]:
+        all_nl_export = db_dutch_glossary_load_all(active_only=False)
+        if not all_nl_export:
+            st.info("No terms to export.")
+        else:
+            try:
+                import openpyxl as _xl
+                from io import BytesIO as _BytesIO
+                wb = _xl.Workbook()
+                ws = wb.active
+                ws.title = "Dutch Glossary"
+                ws.append(["Source (DE)", "Target (NL)", "Category",
+                            "Source Type", "Confidence", "Frequency", "Active"])
+                for t in all_nl_export:
+                    ws.append([
+                        t["source_term_de"],
+                        t["target_term_nl"],
+                        t.get("category", ""),
+                        t.get("source_type", "MANUAL"),
+                        t.get("confidence", 1.0),
+                        t.get("frequency", 0),
+                        "Yes" if t.get("active", 1) else "No",
+                    ])
+                buf = _BytesIO()
+                wb.save(buf)
+                buf.seek(0)
+                st.download_button(
+                    "Download Dutch Glossary (.xlsx)",
+                    data=buf,
+                    file_name="dutch_glossary_export.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            except Exception as exc:
+                st.error(f"Export error: {exc}")
+
+
+# =============================================================================
 # PAGE: GLOSSARY MANAGEMENT
 # =============================================================================
 
@@ -7894,6 +8079,25 @@ def glossary_page():
         "Enterprise terminology management — edit, disable, audit, and import/export terms",
     )
 
+    # ── Language selector (FR / NL) — top of page ─────────────────────────────
+    lang_tab = st.radio(
+        "Glossary language",
+        ["French (FR)", "Dutch (NL)"],
+        horizontal=True,
+        key="glossary_lang_tab",
+        label_visibility="collapsed",
+    )
+    is_nl_glossary = lang_tab == "Dutch (NL)"
+
+    # ── Dutch Glossary branch ─────────────────────────────────────────────────
+    if is_nl_glossary:
+        _glossary_page_dutch(
+            user_email=st.session_state.get("user_email", ""),
+            user_role=st.session_state.get("user_role", ""),
+        )
+        return
+
+    # ── French Glossary branch (existing code) ────────────────────────────────
     # ── Dialog triggers (must precede all other rendering) ───────────────────
     if st.session_state.get("_gloss_edit"):
         _glossary_edit_dialog()

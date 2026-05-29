@@ -271,6 +271,12 @@ NL_FORBIDDEN_REPLACEMENTS: list[tuple[str, str]] = [
     ("opbervolume",             "opbergvolume"),
     # Nonsense word — replace with safest option
     ("vloerweefsel",            "vloerglijders"),
+    # Sägerau residue — "zaagsnede" is not the correct NL term
+    ("zaagsnede",               "grof gezaagde eikenlook"),
+    # Generic "Decor" residue not caught by compound patterns
+    ("Decor",                   "look"),
+    # "Badmat" used where "badkuipmat" (bathtub mat) is required
+    ("Badmat",                  "badkuipmat"),
 ]
 
 
@@ -699,6 +705,15 @@ _NL_QA_CRITICAL_FORBIDDEN: list[tuple[str, str]] = [
     ("IJs",                 "IJzer",    True),  # completely wrong translation
     # Furniture castors — "wielen" is for vehicles, not furniture
     ("Wielen",              "rollen"),
+    # Sägerau residue
+    ("zaagsnede",           "grof gezaagde eikenlook"),
+    # Generic Decor residue (lowercase match — case-insensitive by default)
+    ("Decor",               "look"),
+    # Bathtub mat context — Badmat used instead of badkuipmat
+    ("Badmat",              "badkuipmat"),
+    # Plural shower mat
+    ("Douchematten",        "douchemat"),
+    ("3-Zits",              "3-zits"),
 ]
 
 # Untranslated German terms that should always be caught
