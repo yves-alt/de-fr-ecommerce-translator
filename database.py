@@ -1,7 +1,6 @@
 """
-SQLite database backend for the Home24 Localization Platform.
-Supports DE→FR and DE→NL translation memory, multilingual glossary,
-user roles, and login activity tracking.
+SQLite database backend for the Home24 DE→FR Localization Platform.
+Manages French translation memory, glossary, user roles, and login activity.
 """
 
 import json
@@ -192,7 +191,6 @@ def _db():
 
 def init_db(
     default_glossary: dict | None = None,
-    default_nl_glossary: dict | None = None,
 ) -> None:
     with _db() as conn:
         conn.executescript(_SCHEMA)
@@ -210,8 +208,6 @@ def init_db(
     _migrate_json_if_needed()
     if default_glossary:
         _seed_glossary_if_empty(default_glossary, "French")
-    if default_nl_glossary:
-        _seed_glossary_if_empty(default_nl_glossary, "Dutch")
 
 
 def _get_schema_version() -> int:
@@ -466,7 +462,7 @@ def db_save_history_record(record: dict) -> None:
 
     # Derive output_prefix from target_language when not explicitly set
     target_lang = record.get("target_language", "French")
-    output_prefix = record.get("output_prefix", "NL" if target_lang == "Dutch" else "FR")
+    output_prefix = record.get("output_prefix", "FR")
 
     params = (
         record.get("id") or str(uuid.uuid4()),
@@ -801,9 +797,6 @@ def db_get_admin_stats() -> dict:
             fr_jobs = conn.execute(
                 "SELECT COUNT(*) FROM translation_jobs WHERE target_language='French'"
             ).fetchone()[0]
-            nl_jobs = conn.execute(
-                "SELECT COUNT(*) FROM translation_jobs WHERE target_language='Dutch'"
-            ).fetchone()[0]
             jobs_by_user = conn.execute(
                 """
                 SELECT user_email, COUNT(*) as job_count,
@@ -820,13 +813,12 @@ def db_get_admin_stats() -> dict:
             "total_cost":    total_cost or 0.0,
             "total_cells":   total_cells or 0,
             "fr_jobs":       fr_jobs,
-            "nl_jobs":       nl_jobs,
             "jobs_by_user":  [dict(r) for r in jobs_by_user],
         }
     except Exception:
         return {
             "total_jobs": 0, "total_logins": 0, "total_cost": 0.0,
-            "total_cells": 0, "fr_jobs": 0, "nl_jobs": 0, "jobs_by_user": [],
+            "total_cells": 0, "fr_jobs": 0, "jobs_by_user": [],
         }
 
 
@@ -1569,7 +1561,7 @@ def db_get_jira_stats() -> dict:
 
 
 # =============================================================================
-# V9 MIGRATION — NL Trados TM corpus table
+# V9 + V10 MIGRATIONS — kept as no-ops to preserve existing DB schemas
 # =============================================================================
 
 def _ensure_v10_migration() -> None:
@@ -1612,62 +1604,6 @@ def _ensure_v9_migration() -> None:
         pass
 
 
-# =============================================================================
-# NL TRADOS TM — CRUD
-# =============================================================================
-
-def db_nl_trados_import(entries: list[dict]) -> int:
-    """
-    Bulk-replace the nl_trados_tm table with new entries.
-    entries: list of {"source": str, "target": str, "usage_count": int}
-    Returns count of imported rows.
-    """
-    import re as _re
-    now = datetime.utcnow().isoformat()
-
-    def _norm(t: str) -> str:
-        return _re.sub(r'\s+', ' ', str(t).strip().lower())
-
-    rows = []
-    for e in entries:
-        src = str(e.get("source", "")).strip()
-        tgt = str(e.get("target", "")).strip()
-        if not src or not tgt or src == tgt:
-            continue
-        rows.append((src, tgt, _norm(src), int(e.get("usage_count", 0)), now))
-
-    try:
-        with _db() as conn:
-            conn.execute("DELETE FROM nl_trados_tm")
-            conn.executemany(
-                "INSERT INTO nl_trados_tm(source_de, target_nl, source_norm, usage_count, imported_at)"
-                " VALUES (?, ?, ?, ?, ?)",
-                rows,
-            )
-        return len(rows)
-    except Exception:
-        return 0
-
-
-def db_nl_trados_load_all() -> list[dict]:
-    """Load all NL Trados TM entries from DB for engine initialization."""
-    try:
-        with _db() as conn:
-            rows = conn.execute(
-                "SELECT source_de, target_nl, usage_count FROM nl_trados_tm ORDER BY usage_count DESC"
-            ).fetchall()
-        return [{"source": r[0], "target": r[1], "usage_count": r[2]} for r in rows]
-    except Exception:
-        return []
-
-
-def db_nl_trados_count() -> int:
-    """Return number of TM entries stored in the DB."""
-    try:
-        with _db() as conn:
-            return conn.execute("SELECT COUNT(*) FROM nl_trados_tm").fetchone()[0]
-    except Exception:
-        return 0
 
 
 # =============================================================================
@@ -2119,285 +2055,11 @@ def db_glossary_get_stats(target_language: str | None = None) -> dict:
 
 
 # =============================================================================
-# V12 MIGRATION — Dutch glossary dedicated table
+# V12 MIGRATION — kept as no-op (Dutch glossary table may exist in older DBs)
 # =============================================================================
 
 def _ensure_v12_migration() -> None:
-    """Create dutch_glossary_terms table with full-text and fuzzy lookup support."""
+    """No-op — Dutch glossary table kept for backward compatibility only."""
     if _get_schema_version() >= 12:
         return
-    try:
-        with _db() as conn:
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS dutch_glossary_terms (
-                    id              TEXT PRIMARY KEY,
-                    source_term_de  TEXT NOT NULL,
-                    target_term_nl  TEXT NOT NULL,
-                    normalized_source TEXT NOT NULL,
-                    normalized_target TEXT NOT NULL,
-                    category        TEXT DEFAULT '',
-                    frequency       INTEGER DEFAULT 0,
-                    confidence      REAL DEFAULT 1.0,
-                    source_type     TEXT DEFAULT 'MANUAL',
-                    active          INTEGER DEFAULT 1,
-                    created_at      TEXT NOT NULL,
-                    updated_at      TEXT NOT NULL,
-                    UNIQUE(source_term_de)
-                )
-            """)
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_dutch_gloss_source "
-                "ON dutch_glossary_terms(normalized_source)"
-            )
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_dutch_gloss_active "
-                "ON dutch_glossary_terms(active, source_type)"
-            )
-        _set_schema_version(12)
-    except Exception:
-        pass
-
-
-# =============================================================================
-# DUTCH GLOSSARY — CRUD
-# =============================================================================
-
-def _normalize_gloss(text: str) -> str:
-    """Normalize for Dutch glossary lookup: lower, strip, collapse spaces."""
-    import re as _re
-    return _re.sub(r'\s+', ' ', str(text).strip().lower())
-
-
-def db_dutch_glossary_load_all(active_only: bool = True) -> list[dict]:
-    """Load all Dutch glossary terms. Optionally filter to active only."""
-    try:
-        with _db() as conn:
-            if active_only:
-                rows = conn.execute(
-                    "SELECT * FROM dutch_glossary_terms WHERE active=1 "
-                    "ORDER BY source_term_de COLLATE NOCASE"
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    "SELECT * FROM dutch_glossary_terms "
-                    "ORDER BY source_term_de COLLATE NOCASE"
-                ).fetchall()
-        return [dict(r) for r in rows]
-    except Exception:
-        return []
-
-
-def db_dutch_glossary_lookup(source_term: str) -> str | None:
-    """Exact match lookup by normalized_source. Returns Dutch target or None."""
-    norm = _normalize_gloss(source_term)
-    try:
-        with _db() as conn:
-            row = conn.execute(
-                "SELECT target_term_nl FROM dutch_glossary_terms "
-                "WHERE normalized_source = ? AND active = 1",
-                (norm,),
-            ).fetchone()
-        return row[0] if row else None
-    except Exception:
-        return None
-
-
-def db_dutch_glossary_fuzzy_lookup(source_term: str, threshold: float = 0.85) -> str | None:
-    """
-    Fuzzy match using SequenceMatcher against all active normalized sources.
-    Returns best Dutch target above the threshold or None.
-    """
-    from difflib import SequenceMatcher
-    norm = _normalize_gloss(source_term)
-    if not norm:
-        return None
-    try:
-        with _db() as conn:
-            rows = conn.execute(
-                "SELECT normalized_source, target_term_nl FROM dutch_glossary_terms WHERE active=1"
-            ).fetchall()
-        best_score = 0.0
-        best_tgt: str | None = None
-        for row in rows:
-            score = SequenceMatcher(None, norm, row[0], autojunk=False).ratio()
-            if score > best_score:
-                best_score = score
-                best_tgt = row[1]
-        if best_score >= threshold and best_tgt:
-            return best_tgt
-        return None
-    except Exception:
-        return None
-
-
-def db_dutch_glossary_import_excel(path: str) -> tuple[int, int]:
-    """
-    Parse DE→NL glossary Excel (sheet: "Clean Technical Glossary").
-    Column A: German term, Column B: Dutch term.
-    Strips whitespace, skips empty/identical/digit-only/punctuation-only rows.
-    Returns (imported, skipped).
-    """
-    import re as _re
-    try:
-        import openpyxl
-    except ImportError:
-        return 0, 0
-
-    try:
-        wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
-        ws = wb["Clean Technical Glossary"]
-    except Exception:
-        try:
-            wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
-            ws = wb.active
-        except Exception:
-            return 0, 0
-
-    rows_to_import: list[tuple[str, str]] = []
-    header_skipped = False
-    for row in ws.iter_rows(values_only=True):
-        if not header_skipped:
-            header_skipped = True
-            continue
-        if not row:
-            continue
-        de = str(row[0]).strip() if row[0] is not None else ""
-        nl = str(row[1]).strip() if len(row) > 1 and row[1] is not None else ""
-        if not de or not nl:
-            continue
-        if de == nl:
-            continue
-        if _re.match(r'^\d+$', de):
-            continue
-        if _re.match(r'^[^\w]+$', de):
-            continue
-        rows_to_import.append((de, nl))
-
-    try:
-        wb.close()
-    except Exception:
-        pass
-
-    return db_dutch_glossary_bulk_import([
-        {
-            "source_term_de": de,
-            "target_term_nl": nl,
-            "source_type":    "IMPORTED_EXCEL",
-            "frequency":      1,
-            "confidence":     0.9,
-        }
-        for de, nl in rows_to_import
-    ])
-
-
-def db_dutch_glossary_bulk_import(rows: list[dict]) -> tuple[int, int]:
-    """
-    Bulk-import Dutch glossary rows.
-    Each row: {source_term_de, target_term_nl, source_type, frequency, confidence, category}.
-    Uses ON CONFLICT(source_term_de) DO UPDATE if new confidence is higher.
-    Returns (imported, skipped).
-    """
-    imported = 0
-    skipped = 0
-    now = datetime.now().isoformat(timespec="seconds")
-    for row in rows:
-        de  = str(row.get("source_term_de", "")).strip()
-        nl  = str(row.get("target_term_nl", "")).strip()
-        if not de or not nl:
-            skipped += 1
-            continue
-        norm_de = _normalize_gloss(de)
-        norm_nl = _normalize_gloss(nl)
-        src_type = str(row.get("source_type", "MANUAL")).upper()
-        freq     = int(row.get("frequency", 0))
-        conf     = float(row.get("confidence", 1.0))
-        category = str(row.get("category", "")).strip()
-        try:
-            with _db() as conn:
-                conn.execute(
-                    """
-                    INSERT INTO dutch_glossary_terms
-                        (id, source_term_de, target_term_nl,
-                         normalized_source, normalized_target,
-                         category, frequency, confidence, source_type,
-                         active, created_at, updated_at)
-                    VALUES (?,?,?,?,?,?,?,?,?,1,?,?)
-                    ON CONFLICT(source_term_de) DO UPDATE SET
-                        target_term_nl    = CASE WHEN excluded.confidence > confidence
-                                                 THEN excluded.target_term_nl
-                                                 ELSE target_term_nl END,
-                        normalized_target = CASE WHEN excluded.confidence > confidence
-                                                 THEN excluded.normalized_target
-                                                 ELSE normalized_target END,
-                        confidence        = MAX(excluded.confidence, confidence),
-                        frequency         = frequency + excluded.frequency,
-                        updated_at        = excluded.updated_at
-                    """,
-                    (str(uuid.uuid4()), de, nl, norm_de, norm_nl,
-                     category, freq, conf, src_type, now, now),
-                )
-            imported += 1
-        except Exception:
-            skipped += 1
-    return imported, skipped
-
-
-def db_dutch_glossary_add_term(
-    source_term_de: str,
-    target_term_nl: str,
-    category: str = "",
-    source_type: str = "MANUAL",
-    confidence: float = 1.0,
-) -> bool:
-    """Add a single Dutch glossary term. Returns True on success."""
-    now = datetime.now().isoformat(timespec="seconds")
-    de  = source_term_de.strip()
-    nl  = target_term_nl.strip()
-    if not de or not nl:
-        return False
-    try:
-        with _db() as conn:
-            conn.execute(
-                """
-                INSERT OR IGNORE INTO dutch_glossary_terms
-                    (id, source_term_de, target_term_nl,
-                     normalized_source, normalized_target,
-                     category, frequency, confidence, source_type,
-                     active, created_at, updated_at)
-                VALUES (?,?,?,?,?,?,0,?,?,1,?,?)
-                """,
-                (str(uuid.uuid4()), de, nl,
-                 _normalize_gloss(de), _normalize_gloss(nl),
-                 category, confidence, source_type.upper(), now, now),
-            )
-        return True
-    except Exception:
-        return False
-
-
-def db_dutch_glossary_get_stats() -> dict:
-    """Return summary statistics for the Dutch glossary."""
-    try:
-        with _db() as conn:
-            total = conn.execute(
-                "SELECT COUNT(*) FROM dutch_glossary_terms"
-            ).fetchone()[0]
-            active = conn.execute(
-                "SELECT COUNT(*) FROM dutch_glossary_terms WHERE active=1"
-            ).fetchone()[0]
-            by_type = conn.execute(
-                "SELECT source_type, COUNT(*) as cnt "
-                "FROM dutch_glossary_terms GROUP BY source_type"
-            ).fetchall()
-            total_freq = conn.execute(
-                "SELECT COALESCE(SUM(frequency),0) FROM dutch_glossary_terms"
-            ).fetchone()[0]
-        return {
-            "total":      total,
-            "active":     active,
-            "inactive":   total - active,
-            "total_freq": total_freq,
-            "by_type":    {r["source_type"]: r["cnt"] for r in by_type},
-        }
-    except Exception:
-        return {"total": 0, "active": 0, "inactive": 0, "total_freq": 0, "by_type": {}}
+    _set_schema_version(12)

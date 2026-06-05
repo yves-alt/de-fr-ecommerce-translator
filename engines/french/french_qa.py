@@ -1,7 +1,6 @@
 """
 French QA engine.
-Checks: German residue in FR output, Dutch words in FR output.
-Never imports from nl_engine.py.
+Checks: German residue in FR output, untranslated terms.
 """
 
 import re
@@ -18,19 +17,6 @@ _FR_GERMAN_RESIDUE_RE = re.compile(
     r'teilig|Sitzer|flammig|Typ\b'
     r')\b',
     re.UNICODE,
-)
-
-# Dutch words that should never appear in French output
-_DUTCH_IN_FRENCH_RE = re.compile(
-    r'\b(?:'
-    r'zwart|wit|grijs|bruin|blauw|groen|rood|geel|roze|oranje|beige|'
-    r'eiken|eikenlook|notenlook|betonlook|marmerlook|'
-    r'bank|stoel|tafel|kast|lade|plank|lamp|hanglamp|staande lamp|'
-    r'werkblad|kookplaat|kookeiland|afzuigkap|'
-    r'inclusief|bestaande uit|set van|'
-    r'zwarte|witte|grijze|bruine|blauwe|groene|rode'
-    r')\b',
-    re.IGNORECASE | re.UNICODE,
 )
 
 
@@ -51,15 +37,6 @@ class FrenchQA:
                 "severity": "High",
                 "category": "German residue",
                 "message":  f"German words in FR output: {', '.join(sorted(set(german_matches)))}",
-            })
-
-        # Dutch contamination check
-        dutch_matches = _DUTCH_IN_FRENCH_RE.findall(text)
-        if dutch_matches:
-            issues.append({
-                "severity": "Critical",
-                "category": "Language contamination",
-                "message":  f"Dutch words in FR output: {', '.join(sorted(set(w.lower() for w in dutch_matches)))}",
             })
 
         # Residual "Dekor" not localized

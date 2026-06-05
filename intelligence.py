@@ -1,7 +1,7 @@
 """
 Translation Intelligence Engine
 Hybrid pipeline: Normalization → Exact TM → Semantic TM → Glossary-Only → Pattern → GPT
-Applies to both German→French and German→Dutch modes.
+DE→FR only.
 """
 
 import re
@@ -216,30 +216,6 @@ _FIBER_NAMES_FR: dict[str, str] = {
     "polyurethan":  "polyuréthane",
 }
 
-_FIBER_NAMES_NL: dict[str, str] = {
-    "polyester":    "polyester",
-    "baumwolle":    "katoen",
-    "wolle":        "wol",
-    "seide":        "zijde",
-    "leinen":       "linnen",
-    "viskose":      "viscose",
-    "polyamid":     "polyamide",
-    "polypropylen": "polypropyleen",
-    "acryl":        "acryl",
-    "modacryl":     "modacryl",
-    "elasthan":     "elasthaan",
-    "kokos":        "kokos",
-    "kokosfaser":   "kokosvezel",
-    "gummi":        "rubber",
-    "jute":         "jute",
-    "sisal":        "sisal",
-    "nylon":        "nylon",
-    "mikrofaser":   "microvezel",
-    "leder":        "leer",
-    "kunstleder":   "kunstleer",
-}
-
-
 def _translate_pct_composition(
     text: str,
     glossary: dict,
@@ -249,7 +225,7 @@ def _translate_pct_composition(
     Translate '60 % Baumwolle / 40 % Polyester' using built-in fiber map + glossary.
     Output format: 'X % material' (EU standard — space before %).
     """
-    fiber_map = _FIBER_NAMES_FR if target_language != "Dutch" else _FIBER_NAMES_NL
+    fiber_map = _FIBER_NAMES_FR
     glos_terms = {k.lower(): v.lower() for k, v in glossary.get("terms", {}).items()}
 
     # Split on comma or slash separators
@@ -293,7 +269,7 @@ def semantic_tm_match(
     Capped at 300 candidates per col_type for performance.
     Returns (translation, score) or None.
     """
-    lang_prefix = "nl:" if target_language == "Dutch" else "fr:"
+    lang_prefix = "fr:"
     text_norm = normalize_lower(text)
 
     if len(text_norm) < 8 or len(text_norm) > 150:
@@ -436,41 +412,11 @@ _CATEGORY_FR_HINTS: dict[str, str] = {
     ),
 }
 
-_CATEGORY_NL_HINTS: dict[str, str] = {
-    "sofa":     "Product: BANK/ZITMEUBEL — prefer: zitting, rugleuning, armleuning, onderstel, schuimvulling, bekleding.",
-    "bed":      "Product: BED — prefer: hoofdbord, lattenbodem, bedframe, poten.",
-    "table":    "Product: TAFEL — prefer: tafelblad, onderstel, uitschuifbaar, verlengstuk.",
-    "wardrobe": "Product: OPBERGEN — prefer: kledingkast, lade, legplank, draaideuren.",
-    "kitchen": (
-        "Product: KEUKEN — gebruik: keukenblok, inbouwkeuken, werkblad, spoelbak, spoelkast, "
-        "onderkast, hangkast, bovenkast, hoge kast, apothekerskast, frontpaneel, plint. "
-        "GSP / GSP-Blende / Geschirrspüler-Blende → vaatwasserfront (ALTIJD). "
-        "BHT / BxHxT / B x H x T → B x H x D. Grifflos → greeploos. "
-        "Unterflurauszug → onderliggende ladegeleider."
-    ),
-    "bathroom": (
-        "Product: BADKAMER — gebruik: wastafelmeubel, wastafel, wastafelonderkast, spiegel, opbergkast. "
-        "Einzelwaschtisch → enkele wastafel. Doppelwaschtisch → dubbele wastafel. "
-        "Unterflurauszug → onderliggende ladegeleider. Armatur → kraan. "
-        "Soft-Close / Softclose → soft-close. Dämpfung → demping."
-    ),
-    "office":   "Product: KANTOOR — prefer: bureau, ladeblok, in hoogte verstelbaar.",
-    "textile":  "Product: TEXTIEL — prefer: hoes, vulling, wasbaar.",
-    "outdoor":  "Product: BUITEN — prefer: UV-bestendig, weerbestendig, stapelbaar.",
-    "lighting": "Product: VERLICHTING — prefer: lamp inbegrepen, fitting E27, dimbaar.",
-    "mattress": (
-        "Product: MATRAS — prefer: pocketveringmatras, tijk, kokoslaag, ritssluiting, afneembare hoes. "
-        "Preserve model names exactly (Asely, Arin, etc.)."
-    ),
-}
-
-
 def get_product_type_hint(category: str, target_language: str = "French") -> str:
     """Return a short prompt hint for the detected product category."""
     if category == "generic":
         return ""
-    hints = _CATEGORY_NL_HINTS if target_language == "Dutch" else _CATEGORY_FR_HINTS
-    hint = hints.get(category, "")
+    hint = _CATEGORY_FR_HINTS.get(category, "")
     return f"\n{hint}" if hint else ""
 
 
@@ -655,123 +601,19 @@ FURNITURE_TERM_MAP_FR: dict[str, str] = {
     "Matratze":                       "matelas",
 }
 
-FURNITURE_TERM_MAP_NL: dict[str, str] = {
-    # Garden / outdoor
-    "Gartenessgruppe":    "tuinset",
-    "Gartengruppe":       "tuinset",
-    "Gartenset":          "tuinset",
-    "Loungeset":          "loungeset",
-    "Sofaelement":        "canapémodule",
-    "Sofamodul":          "canapémodule",
-    "Gartenstuhl":        "tuinstoel",
-    "Gartentisch":        "tuintafel",
-    "Gartenbank":         "tuinbank",
-    "Gartenliege":        "tuinligstoel",
-    "Gartenmöbel":        "tuinmeubelen",
-    "Terrassenmöbel":     "terrasmeubilair",
-    "Terrassenset":       "tuinset",
-    "pulverbeschichtet":  "gepoedercoat",
-    "Pulverbeschichtung": "poedercoating",
-    "Geflecht":           "vlechtwerk",
-    "Kunststoffgeflecht": "kunststof vlechtwerk",
-    "Polyrattan":         "kunststof vlechtwerk",
-    "Rattan":             "rotan",
-    "Tischgestell":       "tafelpoten",
-    "Untergestell":       "onderframe",
-    "Zargen":             "verbindingsstukken",
-    "Set bestehend aus":  "set bestaande uit",
-    "bestehend aus":      "bestaande uit",
-    "ohne Dekoration":    "zonder decoratie",
-    "Ausziehbar":         "uitschuifbaar",
-    "Absetzung":          "contrasterende rand",
-    "Dekoration":         "decoratie",
-    # Mattress / bedding
-    "7-Zonen-Taschenfederkernmatratze": "7-zones pocketveringmatras",
-    "9-Zonen-Taschenfederkernmatratze": "9-zones pocketveringmatras",
-    "Taschenfederkernmatratze":         "pocketveringmatras",
-    "Taschenfederkern":                 "pocketveringkern",
-    "4-seitiger Reißverschluss":        "ritssluiting aan 4 zijden",
-    "Einseitige Kokosmatte":            "kokoslaag aan één zijde",
-    "Abnehmbarer Bezug":                "afneembare hoes",
-    "Kokosmatte":                       "kokoslaag",
-    "Kokosschicht":                     "kokoslaag",
-    "Doppeltuch":                       "dubbeldoek",
-    "Reißverschluss":                   "ritssluiting",
-    "Matratze":                         "matras",
-    # Dishwasher / GSP — longest compound forms first
-    "Geschirrspülerblende":             "vaatwasserfront",
-    "Geschirrspüler-Blende":            "vaatwasserfront",
-    "Geschirrspüler Blende":            "vaatwasserfront",
-    "GSP-Blende":                       "vaatwasserfront",
-    "GSP Blende":                       "vaatwasserfront",
-    "Geschirrspüler":                   "vaatwasser",
-    # Drawer runners — longest first
-    "Waschbeckenunterschrank":          "wastafelonderkast",
-    "Unterflurführung":                 "onderliggende ladegeleider",
-    "Unterflur-Auszug":                 "onderliggende ladegeleider",
-    "Unterflurauszug":                  "onderliggende ladegeleider",
-    # Dimensions
-    "Breite x Höhe x Tiefe":            "breedte x hoogte x diepte",
-    "B x H x T":                        "B x H x D",
-    "BxHxT":                            "B x H x D",
-    "BHT":                              "B x H x D",
-    # Handles
-    "Grifflos":                         "greeploos",
-    # Kitchen furniture — compound forms before simple ones
-    "Doppelwaschtisch":                 "dubbele wastafel",
-    "Einzelwaschtisch":                 "enkele wastafel",
-    "Spülenschrank":                    "spoelkast",
-    "Apothekerschrank":                 "apothekerskast",
-    "Einbauküche":                      "inbouwkeuken",
-    "Küchenzeile":                      "keukenblok",
-    "Oberschrank":                      "bovenkast",
-    "Hängeschrank":                     "hangkast",
-    "Unterschrank":                     "onderkast",
-    "Hochschrank":                      "hoge kast",
-    "Arbeitsplatte":                    "werkblad",
-    "Waschtisch":                       "wastafelmeubel",
-    "Waschbecken":                      "wastafel",
-    "Schubkasten":                      "lade",
-    "Schubladen":                       "lades",
-    "Schublade":                        "lade",
-    "Auszug":                           "lade",
-    "Spüle":                            "spoelbak",
-    "Blende":                           "frontpaneel",
-    "Korpus":                           "romp",
-    "Sockel":                           "plint",
-    "Griffe":                           "grepen",
-    "Griff":                            "greep",
-    # Bathroom fittings
-    "Armatur":                          "kraan",
-    "Siphon":                           "sifon",
-    "Überlauf":                         "overloop",
-    "Soft-Close":                       "soft-close",
-    "Softclose":                        "soft-close",
-    "Dämpfung":                         "demping",
-    "Ablage":                           "legplank",
-}
-
 # Sorted once by length descending so multi-word phrases replace before substrings
 _FURNITURE_TERMS_FR_SORTED = sorted(FURNITURE_TERM_MAP_FR.keys(), key=len, reverse=True)
-_FURNITURE_TERMS_NL_SORTED = sorted(FURNITURE_TERM_MAP_NL.keys(), key=len, reverse=True)
 
 
 def apply_furniture_terms(text: str, target_language: str = "French") -> str:
-    """Replace known German furniture terms with target-language equivalents (fast, no API)."""
+    """Replace known German furniture terms with French equivalents (fast, no API)."""
     if not text:
         return text
-    if target_language == "Dutch":
-        term_map = FURNITURE_TERM_MAP_NL
-        sorted_keys = _FURNITURE_TERMS_NL_SORTED
-    else:
-        term_map = FURNITURE_TERM_MAP_FR
-        sorted_keys = _FURNITURE_TERMS_FR_SORTED
-
-    for de_term in sorted_keys:
+    for de_term in _FURNITURE_TERMS_FR_SORTED:
         if de_term.lower() not in text.lower():
             continue
         pattern = re.compile(r'(?<!\w)' + re.escape(de_term) + r'(?!\w)', re.IGNORECASE | re.UNICODE)
-        text = pattern.sub(term_map[de_term], text)
+        text = pattern.sub(FURNITURE_TERM_MAP_FR[de_term], text)
     return text
 
 
@@ -785,7 +627,7 @@ def auto_learn_glossary_from_source(
     Scan source texts for known furniture terms not yet in the glossary.
     Returns list of {source_term, target_term, occurrences} dicts for auto-adding.
     """
-    term_map = FURNITURE_TERM_MAP_FR if target_language == "French" else FURNITURE_TERM_MAP_NL
+    term_map = FURNITURE_TERM_MAP_FR
     existing_lower = {k.lower() for k in glossary.get("terms", {}).keys()}
 
     freq: Counter = Counter()
@@ -856,26 +698,7 @@ CONSISTENCY_VARIANTS_FR: dict[str, str] = {
     "tapis ras":                      "tapis à poils courts",
 }
 
-# Wrong AI-generated Dutch variants → preferred canonical
-CONSISTENCY_VARIANTS_NL: dict[str, str] = {
-    "synthetisch rotan":          "kunststof vlechtwerk",
-    "kunststof rotan":            "kunststof vlechtwerk",
-    "poedercoating":              "gepoedercoat",
-    "bevat":                      "bestaande uit",
-    "omvat":                      "bestaande uit",
-    # Kitchen/bathroom wrong variants
-    "vaatwasser front":           "vaatwasserfront",
-    "vaatwasserpaneel":           "vaatwasserfront",
-    "lade geleider":              "onderliggende ladegeleider",
-    "onderliggende lader":        "onderliggende ladegeleider",
-    "breedte x hoogte x diepte":  "B x H x D",
-    "zonder greep":               "greeploos",
-    "zonder grepen":              "greeploos",
-    "gootsteen":                  "spoelbak",
-}
-
 _CONSISTENCY_KEYS_FR = sorted(CONSISTENCY_VARIANTS_FR.keys(), key=len, reverse=True)
-_CONSISTENCY_KEYS_NL = sorted(CONSISTENCY_VARIANTS_NL.keys(), key=len, reverse=True)
 
 
 def run_local_consistency_pass(
@@ -895,8 +718,8 @@ def run_local_consistency_pass(
     """
     from collections import defaultdict
 
-    variant_map  = CONSISTENCY_VARIANTS_FR if target_language == "French" else CONSISTENCY_VARIANTS_NL
-    sorted_keys  = _CONSISTENCY_KEYS_FR    if target_language == "French" else _CONSISTENCY_KEYS_NL
+    variant_map  = CONSISTENCY_VARIANTS_FR
+    sorted_keys  = _CONSISTENCY_KEYS_FR
     glos_terms   = {k.lower(): v for k, v in glossary.get("terms", {}).items()}
 
     # Stage 1 — group by normalized source text
