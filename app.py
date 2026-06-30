@@ -139,6 +139,25 @@ class _JiraFileProxy:
         return self._data
 
 
+def _ensure_xlsx_bytes(raw_bytes: bytes) -> bytes:
+    """Return bytes that openpyxl can open.
+
+    Handles two .xls cases transparently:
+    - ZIP magic (PK) — file is really XLSX with a wrong extension, returned as-is.
+    - BIFF magic (D0CF) — true legacy XLS, converted sheet-by-sheet via xlrd+pandas.
+    """
+    if raw_bytes[:4] == b"PK\x03\x04":
+        return raw_bytes
+    import pandas as pd
+    sheets = pd.read_excel(
+        BytesIO(raw_bytes), sheet_name=None, header=None,
+        engine="xlrd", dtype=object, keep_default_na=False,
+    )
+    buf = BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        for sname, df in sheets.items():
+            df.to_excel(writer, sheet_name=sname, index=False, header=False)
+    return buf.getvalue()
 
 
 # =============================================================================
@@ -5563,11 +5582,16 @@ def translator_page():
     else:
         uploaded_file = st.file_uploader(
             "Upload your German Excel file",
-            type=["xlsx"],
+            type=["xlsx", "xls"],
             label_visibility="visible",
         )
 
     if uploaded_file is not None:
+        # Normalize .xls → .xlsx so openpyxl works throughout the pipeline
+        if uploaded_file.name.lower().endswith(".xls") and not uploaded_file.name.lower().endswith(".xlsx"):
+            _xlsx_bytes = _ensure_xlsx_bytes(uploaded_file.getvalue())
+            uploaded_file = _JiraFileProxy(uploaded_file.name[:-4] + ".xlsx", _xlsx_bytes)
+
         # Clear stale results when the user switches to a different file
         if st.session_state.get("_tr_result_file") != uploaded_file.name:
             st.session_state.pop("_tr_result", None)
