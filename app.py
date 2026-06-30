@@ -376,9 +376,11 @@ PROTECTED_SUBSTRINGS = [
     "articlenumber", "article_number", "articlenr", "artnummer", "artnr",
     "artikelnummer", "artikelnr", "sku", "productid", "product_id",
     "produktid", "gtin", "barcode", "ean13", "ean8",
+    "jirakey",
 ]
 PROTECTED_EXACT = {
     "id", "ean", "article", "artikel", "ref", "reference", "reference id",
+    "jira key",
 }
 # Keep old name for backward compat with any callers
 PROTECTED_KEYWORDS = PROTECTED_SUBSTRINGS
@@ -3850,11 +3852,27 @@ def generate_csv_export(
                     exclude_name = str(h).strip()
                     break
 
-    if exclude_idx is None:
+    # Always exclude Jira Key if present
+    jira_key_idx = None
+    for i, h in enumerate(headers):
+        if str(h).strip() == "Jira Key":
+            jira_key_idx = i
+            break
+
+    exclude_idxs: set[int] = set()
+    excluded_names: list[str] = []
+    if exclude_idx is not None:
+        exclude_idxs.add(exclude_idx)
+        excluded_names.append(exclude_name)
+    if jira_key_idx is not None and jira_key_idx not in exclude_idxs:
+        exclude_idxs.add(jira_key_idx)
+        excluded_names.append("Jira Key")
+
+    if not exclude_idxs:
         return None, None, None
 
     # Build CSV content
-    keep_cols = [i for i in range(len(headers)) if i != exclude_idx]
+    keep_cols = [i for i in range(len(headers)) if i not in exclude_idxs]
     base_name = original_filename.replace(".xlsx", "").replace(".xls", "")
     # Strip any existing language prefix before adding the correct one
     if base_name.startswith("FR-"):
@@ -3876,7 +3894,7 @@ def generate_csv_export(
 
     content = "\n".join(lines)
     csv_bytes = "﻿".encode("utf-8") + content.encode("utf-8")
-    return csv_bytes, csv_filename, exclude_name
+    return csv_bytes, csv_filename, ", ".join(excluded_names)
 
 
 # =============================================================================
