@@ -193,6 +193,7 @@ CANDIDATE_SHEETS = ["Tabelle1", "Translations", "Sheet1"]
 COLUMNS_TO_TRANSLATE = [
     "name", "colorDetail", "deliveryScope", "materialDetail",
     "otherMeasurements", "qualityDetail", "textileCompositionCover1", "variantName",
+    "warningsAndSafetyInformation",
 ]
 
 OPENAI_MODEL           = "gpt-4o-mini"
@@ -408,6 +409,7 @@ IMPORTANT_KEYWORDS = [
     "name", "color", "colour", "delivery", "measurement",
     "quality", "textile", "composition", "material", "variant",
     "farbe", "liefer", "masse", "qualitat", "beschreibung",
+    "warning", "safety", "warnhinweis", "sicherheit",
 ]
 
 # Keywords used to score candidate header rows
@@ -509,6 +511,15 @@ TRANSLATE_ALIASES_T1 = {
         "option", "option name", "optionname", "model", "modell",
         "uitvoering", "variantbenaming",
     ],
+    "warningsAndSafetyInformation": [
+        "warningsandsafetyinformation", "warnings and safety information",
+        "warning and safety information", "safety information",
+        "safetyinformation", "warnings", "warning",
+        "warnhinweise", "warnhinweis", "sicherheitshinweise", "sicherheitshinweis",
+        "warnhinweise und sicherheitsinformationen",
+        "avertissements", "consignes de securite", "consignesdesecurite",
+        "informations de securite",
+    ],
 }
 
 # T2: substring match against normalized header (word-boundary safe substrings)
@@ -523,6 +534,9 @@ TRANSLATE_ALIASES_T2 = {
     "qualityDetail":     ["quality", "qualite", "qualitat", "qualitaet", "pflege"],
     "variantName":       ["variante", "ausfuhrung"],
     "name":              ["designation", "bezeichnung"],
+    "warningsAndSafetyInformation": [
+        "warning", "warnhinweis", "safety", "sicherheit",
+    ],
 }
 
 # T3: word-set matching for compound/scrambled headers (≥2 matching words required)
@@ -551,6 +565,10 @@ CANONICAL_WORD_SETS: dict[str, set[str]] = {
     },
     "variantName": {
         "variant", "ausfuhrung", "ausfuehrung", "variante", "ausführung",
+    },
+    "warningsAndSafetyInformation": {
+        "warning", "warnings", "safety", "information", "warnhinweise",
+        "warnhinweis", "sicherheitshinweise", "sicherheit",
     },
 }
 
@@ -613,6 +631,14 @@ HOME24_TRANSLATABLE_CANONICAL: dict[str, str] = {
     "ausfuhrung":                        "variantName",
     "ausfuehrung":                       "variantName",
     "ausführung":                        "variantName",
+    # warningsAndSafetyInformation variants
+    "warnings and safety information":   "warningsAndSafetyInformation",
+    "warningsandsafetyinformation":      "warningsAndSafetyInformation",
+    "warning and safety information":    "warningsAndSafetyInformation",
+    "safety information":                "warningsAndSafetyInformation",
+    "warnhinweise":                      "warningsAndSafetyInformation",
+    "warnhinweise und sicherheitsinformationen": "warningsAndSafetyInformation",
+    "sicherheitshinweise":               "warningsAndSafetyInformation",
 }
 
 # Set of all known normalized Home24 translatable headers for O(1) lookup
@@ -991,6 +1017,33 @@ def compute_quality_score(warnings: list) -> int:
     for w in warnings:
         score -= SEVERITY_DEDUCTION.get(w.get("severity", SEVERITY_LOW), 1)
     return max(0, score)
+
+
+# Categories that mean "this cell was never actually translated" — as opposed
+# to German-residue warnings, which mean it WAS translated but imperfectly.
+_COVERAGE_MISSING_CATEGORIES = frozenset({"Missing translation", "API failure"})
+
+
+def compute_coverage_problems(stats: dict) -> dict:
+    """
+    Translation coverage validation (spec section 7): before export, verify
+    every non-empty translatable cell was actually processed.
+
+    Returns:
+      {
+        "missed_columns": [...],   # Home24-like columns the classifier skipped entirely
+        "missing_cells":  [...],   # {row, column, reason} for cells left untranslated
+      }
+    Both lists empty means coverage is clean.
+    """
+    qg = stats.get("quality_gate", {})
+    missed_columns = list(qg.get("possible_missed", []))
+    missing_cells = [
+        {"row": w.get("row"), "column": w.get("column"), "reason": w.get("reason", "")}
+        for w in stats.get("all_warnings", [])
+        if w.get("severity") == SEVERITY_CRITICAL and w.get("category") in _COVERAGE_MISSING_CATEGORIES
+    ]
+    return {"missed_columns": missed_columns, "missing_cells": missing_cells}
 
 
 def quality_verdict(score: int) -> tuple[str, str]:
@@ -3871,10 +3924,13 @@ def generate_csv_export(
                     exclude_name = str(h).strip()
                     break
 
-    # Always exclude Jira Key if present
+    # Always exclude Jira Key if present — matched on the normalized header so
+    # "jira key", "JIRA KEY", "JiraKey", "jira_key" etc. are all recognized,
+    # the same way _is_protected() recognizes them for translation purposes.
     jira_key_idx = None
     for i, h in enumerate(headers):
-        if str(h).strip() == "Jira Key":
+        norm_h = _normalize_col_header(h)
+        if norm_h == "jira key" or norm_h.replace(" ", "") == "jirakey":
             jira_key_idx = i
             break
 
@@ -3885,7 +3941,7 @@ def generate_csv_export(
         excluded_names.append(exclude_name)
     if jira_key_idx is not None and jira_key_idx not in exclude_idxs:
         exclude_idxs.add(jira_key_idx)
-        excluded_names.append("Jira Key")
+        excluded_names.append(str(headers[jira_key_idx]).strip() or "Jira Key")
 
     if not exclude_idxs:
         return None, None, None
@@ -3898,21 +3954,17 @@ def generate_csv_export(
         base_name = base_name[3:]
     csv_filename = f"FR-{base_name}.csv"
 
-    lines: list[str] = []
+    buf = io.StringIO()
+    writer = csv.writer(
+        buf, delimiter=";", quotechar='"', quoting=csv.QUOTE_MINIMAL,
+        lineterminator="\r\n",
+    )
     for row in ws.iter_rows(min_row=header_row, values_only=True):
         row_list = list(row)
         values = [str(row_list[i]) if row_list[i] is not None else "" for i in keep_cols]
-        # Escape semicolons and quotes in cell values
-        escaped = []
-        for v in values:
-            if ";" in v or '"' in v or "\n" in v:
-                escaped.append('"' + v.replace('"', '""') + '"')
-            else:
-                escaped.append(v)
-        lines.append(";".join(escaped))
+        writer.writerow(values)
 
-    content = "\n".join(lines)
-    csv_bytes = "﻿".encode("utf-8") + content.encode("utf-8")
+    csv_bytes = "﻿".encode("utf-8") + buf.getvalue().encode("utf-8")
     return csv_bytes, csv_filename, ", ".join(excluded_names)
 
 
@@ -6187,70 +6239,104 @@ def translator_page():
                 </div>
                 """, unsafe_allow_html=True)
 
-            # ── Download buttons (always available after translation) ──
+            # ── Translation coverage validation (spec section 7) ────────────────
+            # Verify every non-empty translatable cell was actually processed
+            # before letting the file leave the app. Nothing is skipped silently:
+            # any gap is shown here, with an explicit override required to proceed.
+            _coverage         = compute_coverage_problems(_s)
+            _coverage_clean   = not _coverage["missed_columns"] and not _coverage["missing_cells"]
+            _coverage_ovr_key = f"_coverage_override_{_r.get('job_id', '')}"
+            _override_checked = False
+
+            if not _coverage_clean:
+                _cov_lines = []
+                if _coverage["missed_columns"]:
+                    _cov_lines.append(
+                        "**Unrecognized content column(s)** — not sent for translation: "
+                        + ", ".join(f"`{c}`" for c in _coverage["missed_columns"])
+                    )
+                if _coverage["missing_cells"]:
+                    _mc      = _coverage["missing_cells"]
+                    _preview = "; ".join(f"{m['column']} (row {m['row']})" for m in _mc[:10])
+                    _more    = f" — and {len(_mc) - 10} more" if len(_mc) > 10 else ""
+                    _cov_lines.append(
+                        f"**{len(_mc)} cell(s) left untranslated** (source text unchanged, "
+                        f"no glossary reason): {_preview}{_more}"
+                    )
+                st.error(
+                    "⛔ Export blocked — translation coverage validation failed.\n\n"
+                    + "\n\n".join(_cov_lines)
+                )
+                _override_checked = st.checkbox(
+                    "I reviewed these issues and want to export anyway",
+                    key=_coverage_ovr_key,
+                )
+
+            # ── Download buttons ──
             st.markdown("<br>", unsafe_allow_html=True)
 
-            if _cb is not None:
-                dl_left, dl_right = st.columns(2)
-                with dl_left:
-                    st.download_button(
-                        label="↓ Download Excel",
-                        data=_ed,
-                        file_name=_ofn,
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        use_container_width=True,
-                        key="dl_excel_btn",
-                    )
-                with dl_right:
-                    st.download_button(
-                        label=f"↓ Download CSV (sans «{_crc}»)",
-                        data=_cb,
-                        file_name=_cf,
-                        mime="text/csv",
-                        use_container_width=True,
-                        key="dl_csv_btn",
-                    )
-            else:
-                # Name column not found — Excel only + manual CSV column picker
-                _, dl_col, _ = st.columns([1, 2, 1])
-                with dl_col:
-                    st.download_button(
-                        label="↓ Download Excel",
-                        data=_ed,
-                        file_name=_ofn,
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        use_container_width=True,
-                        key="dl_excel_only_btn",
-                    )
-                import io as _io
-                import openpyxl as _openpyxl
-                _wb_pk = _openpyxl.load_workbook(_io.BytesIO(_ed), data_only=True)
-                _ws_pk = _wb_pk[_ssh] if _ssh in _wb_pk.sheetnames else _wb_pk.active
-                _all_h = [
-                    str(_ws_pk.cell(row=_hdr, column=c).value or "")
-                    for c in range(1, _ws_pk.max_column + 1)
-                    if _ws_pk.cell(row=_hdr, column=c).value is not None
-                ]
-                st.warning(
-                    "CSV export: could not auto-detect the product name column. "
-                    "Select it manually to generate the CSV."
-                )
-                if _all_h:
-                    _chosen = st.selectbox(
-                        "Column to exclude from CSV",
-                        options=_all_h,
-                        key="csv_col_manual_select",
-                    )
-                    if st.button("Generate CSV without selected column", key="csv_manual_gen_btn"):
-                        _csv_b2, _csv_f2, _csv_rc2 = generate_csv_export(
-                            _ed, _ssh, _ofnm, header_row=_hdr, force_exclude_header=_chosen,
+            if _coverage_clean or _override_checked:
+                if _cb is not None:
+                    dl_left, dl_right = st.columns(2)
+                    with dl_left:
+                        st.download_button(
+                            label="↓ Download Excel",
+                            data=_ed,
+                            file_name=_ofn,
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            use_container_width=True,
+                            key="dl_excel_btn",
                         )
-                        if _csv_b2:
-                            # Persist the generated CSV so it survives the next rerun
-                            st.session_state["_tr_result"]["csv_bytes"]       = _csv_b2
-                            st.session_state["_tr_result"]["csv_filename"]    = _csv_f2
-                            st.session_state["_tr_result"]["csv_removed_col"] = _csv_rc2
-                            st.rerun()
+                    with dl_right:
+                        st.download_button(
+                            label=f"↓ Download CSV (sans «{_crc}»)",
+                            data=_cb,
+                            file_name=_cf,
+                            mime="text/csv",
+                            use_container_width=True,
+                            key="dl_csv_btn",
+                        )
+                else:
+                    # Name column not found — Excel only + manual CSV column picker
+                    _, dl_col, _ = st.columns([1, 2, 1])
+                    with dl_col:
+                        st.download_button(
+                            label="↓ Download Excel",
+                            data=_ed,
+                            file_name=_ofn,
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            use_container_width=True,
+                            key="dl_excel_only_btn",
+                        )
+                    import io as _io
+                    import openpyxl as _openpyxl
+                    _wb_pk = _openpyxl.load_workbook(_io.BytesIO(_ed), data_only=True)
+                    _ws_pk = _wb_pk[_ssh] if _ssh in _wb_pk.sheetnames else _wb_pk.active
+                    _all_h = [
+                        str(_ws_pk.cell(row=_hdr, column=c).value or "")
+                        for c in range(1, _ws_pk.max_column + 1)
+                        if _ws_pk.cell(row=_hdr, column=c).value is not None
+                    ]
+                    st.warning(
+                        "CSV export: could not auto-detect the product name column. "
+                        "Select it manually to generate the CSV."
+                    )
+                    if _all_h:
+                        _chosen = st.selectbox(
+                            "Column to exclude from CSV",
+                            options=_all_h,
+                            key="csv_col_manual_select",
+                        )
+                        if st.button("Generate CSV without selected column", key="csv_manual_gen_btn"):
+                            _csv_b2, _csv_f2, _csv_rc2 = generate_csv_export(
+                                _ed, _ssh, _ofnm, header_row=_hdr, force_exclude_header=_chosen,
+                            )
+                            if _csv_b2:
+                                # Persist the generated CSV so it survives the next rerun
+                                st.session_state["_tr_result"]["csv_bytes"]       = _csv_b2
+                                st.session_state["_tr_result"]["csv_filename"]    = _csv_f2
+                                st.session_state["_tr_result"]["csv_removed_col"] = _csv_rc2
+                                st.rerun()
 
             # ── Jira upload section (only when file came from Jira) ───────────
             _jira_tk   = st.session_state.get("_jira_ticket_key", "")
@@ -6344,9 +6430,11 @@ def translator_page():
                                 jira_comment_added=1 if _comment_ok else 0,
                             )
 
+                _coverage_gate_open = _coverage_clean or _override_checked
                 with _jcol1:
                     if st.button(
-                        "⬆ Upload XLSX", key="jira_ul_xlsx", use_container_width=True
+                        "⬆ Upload XLSX", key="jira_ul_xlsx", use_container_width=True,
+                        disabled=not _coverage_gate_open,
                     ):
                         _do_jira_upload(
                             True, False, _ed, _cb, _ofn, _cf,
@@ -6355,7 +6443,7 @@ def translator_page():
                 with _jcol2:
                     if st.button(
                         "⬆ Upload CSV", key="jira_ul_csv",
-                        disabled=_cb is None, use_container_width=True,
+                        disabled=(_cb is None) or not _coverage_gate_open, use_container_width=True,
                     ):
                         _do_jira_upload(
                             False, True, _ed, _cb, _ofn, _cf,
@@ -6364,7 +6452,7 @@ def translator_page():
                 with _jcol3:
                     if st.button(
                         "⬆ Upload both", key="jira_ul_both",
-                        disabled=_cb is None, use_container_width=True,
+                        disabled=(_cb is None) or not _coverage_gate_open, use_container_width=True,
                     ):
                         _do_jira_upload(
                             True, True, _ed, _cb, _ofn, _cf,
