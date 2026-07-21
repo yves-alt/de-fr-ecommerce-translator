@@ -93,6 +93,8 @@ from intelligence import (
     get_context_prompt_hint,
     get_corpus_style_hint,
     apply_forbidden_patterns,
+    glossary_index,
+    glossary_ngram_hits,
 )
 from pipeline import (
     LargeFileModeConfig,
@@ -267,6 +269,7 @@ DEFAULT_GLOSSARY_TERMS = {
     "Sofa":               "Canapé",
     "Sessel":             "Fauteuil",
     "Ecksofa":            "Canapé d'angle",
+    "Wohnlandschaft":     "Canapé panoramique",
     "Schlafsofa":         "Canapé-lit",
     "Tisch":              "Table",
     "Stuhl":              "Chaise",
@@ -377,6 +380,10 @@ GERMAN_RESIDUE_WORDS = [
     "Polypropylen", "Polyamid", "Modacryl",
     "Kokosfaser", "Kokos", "Gummi", "Mikrofaser",
 ]
+
+# "opt." (optional-accessory marker) is part of the Home24 naming convention
+# and must never be dropped or reworded during translation/compression.
+_OPT_MARKER_RE = re.compile(r'\bopt\.', re.IGNORECASE)
 
 FRENCH_ACCEPTABLE_WORDS = [
     # Colors identical in German and French
@@ -892,24 +899,40 @@ def save_glossary(glossary: dict, target_language: str = "French") -> None:
     db_save_glossary(glossary, target_language)
 
 
-def _glossary_prompt_block(glossary: dict, target_language: str = "French") -> str:
-    """Build glossary prompt block for French translations."""
+def _glossary_prompt_block(
+    glossary: dict, target_language: str = "French",
+    relevant_terms: dict | None = None, limit: int = 30,
+) -> str:
+    """Build glossary prompt block for French translations.
+
+    When `relevant_terms` (a {de_term: hit_count} map, typically from
+    count_glossary_hits over the current batch) is given, the block is built
+    from the terms that actually occur in this batch — sorted by frequency —
+    instead of an arbitrary fixed slice. This keeps the prompt scoped and
+    useful even with a glossary of thousands of entries. Falls back to the
+    first `limit` terms when no batch context is available.
+    """
     terms = glossary.get("terms", {})
     if not terms:
         return ""
-    lines = [f"- {de} → {fr}" for de, fr in list(terms.items())[:25]]
-    return "\nAlways use these standard terms consistently:\n" + "\n".join(lines)
+    if relevant_terms:
+        ordered = sorted(relevant_terms.items(), key=lambda kv: kv[1], reverse=True)
+        pairs = [(de, terms[de]) for de, _ in ordered if de in terms][:limit]
+    else:
+        pairs = list(terms.items())[:limit]
+    if not pairs:
+        return ""
+    lines = [f"- {de} → {fr}" for de, fr in pairs]
+    return (
+        "\nAlways use these official Home24 glossary terms exactly as given "
+        "— they take priority over your own phrasing:\n" + "\n".join(lines)
+    )
 
 
 def count_glossary_hits(text: str, glossary: dict) -> dict:
-    hits      = {}
-    terms     = glossary.get("terms", {})
-    text_lower = text.lower()
-    for de_term in terms:
-        pattern = r'\b' + re.escape(de_term.lower()) + r'\b'
-        if re.search(pattern, text_lower):
-            hits[de_term] = hits.get(de_term, 0) + 1
-    return hits
+    """Find every glossary term occurring in `text`, including multi-word
+    terms. O(text length), safe to call per-cell regardless of glossary size."""
+    return glossary_ngram_hits(text, glossary)
 
 
 def update_glossary_stats(glossary: dict, term_counts: dict) -> None:
@@ -971,6 +994,12 @@ def _issue_meta(issue_type: str, source: str, translation: str) -> dict:
             "category":      "Glossary inconsistency",
             "suggested_fix": "Apply the standard glossary term listed in the reason field",
         }
+    if issue_type == "opt_marker_lost":
+        return {
+            "severity":      SEVERITY_HIGH,
+            "category":      "Naming convention violation",
+            "suggested_fix": "Re-add \"opt.\" to the translation — it is part of the product naming convention",
+        }
     if issue_type == "too_short":
         return {
             "severity":      SEVERITY_MEDIUM,
@@ -997,19 +1026,25 @@ def _issue_meta(issue_type: str, source: str, translation: str) -> dict:
 
 
 def _check_glossary_inconsistency(source: str, translation: str, glossary: dict) -> list[str]:
-    """Check first 25 glossary terms (those in the model prompt) for missed applications."""
+    """
+    Terminology validation (spec item 7): check every glossary term found in
+    `source` — not just the handful shown in the prompt — for a missed
+    application in `translation`. Uses the O(1) n-gram index so this scales
+    to a glossary of thousands of terms without a per-cell performance hit.
+    """
     terms = glossary.get("terms", {})
-    prompt_terms = dict(list(terms.items())[:25])
-    src_lower = source.lower()
-    tr_lower  = translation.lower()
+    if not terms:
+        return []
+    source_hits = glossary_ngram_hits(source, glossary)
+    tr_lower = translation.lower()
     violations = []
-    for de, fr in prompt_terms.items():
+    for de in source_hits:
         if len(de) <= 5:
             continue
-        if re.search(r'\b' + re.escape(de.lower()) + r'\b', src_lower):
-            if fr.lower() not in tr_lower:
-                violations.append(f"{de} → {fr}")
-    return violations[:2]
+        fr = terms.get(de)
+        if fr and fr.lower() not in tr_lower:
+            violations.append(f"{de} → {fr}")
+    return violations[:5]
 
 
 def compute_quality_score(warnings: list) -> int:
@@ -2970,16 +3005,34 @@ def _gpt_name_compression_fallback(client, token_counter: dict | None = None):
     return _fallback
 
 
+def _ensure_opt_preserved(source: str, translation: str) -> str:
+    """Re-attach the "opt." naming-convention marker if the source had it but
+    the translation dropped it — GPT sometimes "cleans up" abbreviations it
+    doesn't recognize as meaningful. Applied to every column, not just name."""
+    if not translation or not source:
+        return translation
+    if _OPT_MARKER_RE.search(source) and not _OPT_MARKER_RE.search(translation):
+        return translation.rstrip() + " opt."
+    return translation
+
+
 def validate_product_name(
     name: str,
     client=None,
     token_counter: dict | None = None,
     compression_stats: dict | None = None,
+    row_num: int | None = None,
+    col_header: str = "name",
 ) -> str:
     """Enforce the 40-char product name limit via intelligent compression
     (product type + model name preserved, connectors/accessories trimmed
     first) instead of blind truncation. `client` enables a GPT rewrite as
-    last resort when local compression alone can't fit the limit."""
+    last resort when local compression alone can't fit the limit.
+
+    When `compression_stats` is given, every compression is recorded; when a
+    pass actually discarded information (as opposed to just rewording it),
+    a structured review entry is also recorded — same schema as all_warnings
+    — so it surfaces in the Analysis panel (spec items 4-6)."""
     if not name:
         return name
 
@@ -2991,13 +3044,36 @@ def validate_product_name(
         strategy_counts = compression_stats.setdefault("strategy_counts", {})
         strategy_counts[result.strategy] = strategy_counts.get(result.strategy, 0) + 1
         examples = compression_stats.setdefault("examples", [])
-        if len(examples) < 8:
+        if len(examples) < 20:
             examples.append({
-                "original":        result.original,
-                "final":           result.text,
-                "original_length": result.original_length,
-                "final_length":    result.final_length,
-                "strategy":        result.strategy,
+                "row":               row_num,
+                "original":          result.original,
+                "final":             result.text,
+                "original_length":   result.original_length,
+                "final_length":      result.final_length,
+                "strategy":          result.strategy,
+                "removed_segment":   result.removed_segment,
+                "review_recommended": result.review_recommended,
+            })
+
+        if result.review_recommended:
+            removed_note = (
+                f'The following segment was removed during optimization: "{result.removed_segment}". '
+                "Verify whether this information should be kept."
+                if result.removed_segment else
+                "Content was rewritten to fit the limit — verify against the original."
+            )
+            review_entries = compression_stats.setdefault("review_entries", [])
+            review_entries.append({
+                "severity":        SEVERITY_MEDIUM,
+                "category":        "Product name compressed — human review recommended",
+                "row":             row_num,
+                "column":          col_header,
+                "original_text":   result.original,
+                "translated_text": result.text,
+                "reason":          f"Product name exceeded the Home24 40-character limit. {removed_note}",
+                "suggested_fix":   "Verify whether the removed information is commercially important before publishing.",
+                "timestamp":       datetime.now().isoformat(timespec="seconds"),
             })
 
     return result.text
@@ -3106,13 +3182,22 @@ def analyze_translation_quality(
                 **meta,
             })
 
-    # Glossary inconsistency (High) — only prompt-block terms, long ones only
+    # Glossary inconsistency (High) — every glossary term found in source
     violations = _check_glossary_inconsistency(source, translation, _glossary)
     if violations:
         meta = _issue_meta("glossary_inconsistency", source, translation)
         issues.append({
             "type":   "glossary_inconsistency",
             "reason": f"Glossary term(s) not applied: {' | '.join(violations)}",
+            **meta,
+        })
+
+    # "opt." marker (Home24 naming convention) must survive translation intact
+    if _OPT_MARKER_RE.search(source) and not _OPT_MARKER_RE.search(translation):
+        meta = _issue_meta("opt_marker_lost", source, translation)
+        issues.append({
+            "type":   "opt_marker_lost",
+            "reason": "Source contains \"opt.\" but the translation dropped it",
             **meta,
         })
 
@@ -3199,6 +3284,7 @@ def _build_system_prompt(
             "- \"Sofa\" → \"Canapé\"\n"
             "- \"Sessel\" → \"Fauteuil\"\n"
             "- \"Ecksofa\" → \"Canapé d'angle\"\n"
+            "- \"Wohnlandschaft\" → \"Canapé panoramique\" (NEVER \"Canapé d'angle\" — that is Ecksofa)\n"
             "- \"Schlafsofa\" → \"Canapé convertible\"\n"
             "- \"Sitzer\" → \"places\" (\"3-Sitzer\" = \"3 places\")\n"
             "- \"Loungeset\" → \"Salon de jardin\"\n"
@@ -3228,6 +3314,11 @@ def _build_system_prompt(
             "  Do NOT translate 'Entry' as 'd'accueil' — it is a product series name\n"
             "- Preserve model/collection names exactly (e.g. Vedene, Arin, Bocca, Level36)\n"
             "- Preserve dimensions and numbers exactly\n"
+            "- If the source contains \"opt.\", the translation MUST also contain \"opt.\" exactly "
+            "— it is a naming-convention marker, NEVER remove it, translate it, or write it out "
+            "as \"avec\"/\"option\"/\"optional\"\n"
+            "- Glossary terms below are the official Home24 terminology — prefer them over your "
+            "own phrasing whenever the source matches\n"
             "- Write elegant, commercial French — not literal word-for-word translation"
             f"{glossary_block}\n"
             "Return ONLY the translated text, nothing else."
@@ -3353,7 +3444,6 @@ def translate_batch(
     if not texts:
         return []
 
-    glossary_block = _glossary_prompt_block(glossary)
     n = len(texts)
 
     # Track glossary hits across all source texts in this batch
@@ -3367,6 +3457,11 @@ def translate_batch(
         for term, count in all_hits.items():
             tc[term] = tc.get(term, 0) + count
 
+    # Scope the prompt's glossary block to terms actually present in this
+    # batch — keeps it useful (and token-bounded) no matter how large the
+    # underlying glossary is.
+    glossary_block = _glossary_prompt_block(glossary, relevant_terms=all_hits)
+
     if canonical == "name":
         batch_rules = (
             "Rules for each product name:\n"
@@ -3375,12 +3470,15 @@ def translate_batch(
             "- Natural commercial French furniture e-commerce\n"
             "- \"Sofa\"→\"Canapé\", \"Sessel\"→\"Fauteuil\", "
             "\"Ecksofa\"→\"Canapé d'angle\", \"Sitzer\"→\"places\"\n"
+            "- \"Wohnlandschaft\"→\"Canapé panoramique\" (NEVER \"Canapé d'angle\")\n"
             "- \"Loungeset\"→\"Salon de jardin\", \"Gartenessgruppe\"→\"Ensemble de jardin\"\n"
             "- \"Gartengruppe\"→\"Salon de jardin\", \"Sofaelement\"→\"Module de canapé\"\n"
             "- \"Taschenfederkernmatratze\"→\"Matelas ressorts ensachés\"\n"
             "- \"7-Zonen-Taschenfederkernmatratze\"→\"Matelas ressorts ensachés 7 zones\"\n"
             "- \"Matratze\"→\"Matelas\"\n"
-            "- Preserve model/collection names exactly (Asely, Arin, Bocca, Vedene, Level36, etc.)"
+            "- If the source contains \"opt.\", the translation MUST also contain \"opt.\" exactly\n"
+            "- Preserve model/collection names exactly (Asely, Arin, Bocca, Vedene, Level36, etc.)\n"
+            "- Official glossary terms above take priority over your own phrasing"
         )
     elif canonical == "materialDetail":
         batch_rules = (
@@ -3476,7 +3574,11 @@ def _fallback_single_translations(
     notify_fn=None,
     target_language: str = "French",
 ) -> list[str]:
-    glossary_block = _glossary_prompt_block(glossary)
+    fallback_hits: dict[str, int] = {}
+    for text in texts:
+        for term, count in count_glossary_hits(text, glossary).items():
+            fallback_hits[term] = fallback_hits.get(term, 0) + count
+    glossary_block = _glossary_prompt_block(glossary, relevant_terms=fallback_hits)
     system_prompt  = _build_system_prompt(canonical, glossary_block, target_language)
     results        = []
     for text in texts:
@@ -3556,6 +3658,8 @@ def fix_german_residue(
     column_name: str,
     token_counter: dict | None = None,
     target_language: str = "French",
+    compression_stats: dict | None = None,
+    row_num: int | None = None,
 ) -> str:
     if not text:
         return text
@@ -3633,7 +3737,11 @@ def fix_german_residue(
             token_counter["completion_tokens"] += response.usage.completion_tokens
         corrected = response.choices[0].message.content.strip()
         if column_name == "name":
-            corrected = validate_product_name(corrected, client=client, token_counter=token_counter)
+            corrected = _ensure_opt_preserved(text, corrected)
+            corrected = validate_product_name(
+                corrected, client=client, token_counter=token_counter,
+                compression_stats=compression_stats, row_num=row_num, col_header=column_name,
+            )
         return corrected
     except Exception:
         return text
@@ -4719,10 +4827,18 @@ def process_excel_with_progress(
             col_type = _tm_col_type(canonical)
             resolved = False
 
-            # Glossary-only resolution
+            # Glossary-only resolution — the official glossary is the primary
+            # terminology source, so this always wins over GPT when it applies.
             if not resolved:
                 gl_tr = try_glossary_only(text, glossary, target_language)
                 if gl_tr is not None:
+                    gl_tr = _ensure_opt_preserved(text, gl_tr)
+                    if canonical == "name":
+                        gl_tr = validate_product_name(
+                            gl_tr, client=client, token_counter=token_counter,
+                            compression_stats=name_compression_stats,
+                            row_num=row_num, col_header=col_header,
+                        )
                     results[(row_num, col_idx)] = gl_tr
                     tm_put(tm, text, gl_tr, col_type, target_language)
                     tie_stats["glossary_only_count"] += 1
@@ -4733,6 +4849,7 @@ def process_excel_with_progress(
             if not resolved:
                 pat_tr = try_pattern_translation(text, glossary, target_language)
                 if pat_tr is not None:
+                    pat_tr = _ensure_opt_preserved(text, pat_tr)
                     results[(row_num, col_idx)] = pat_tr
                     tm_put(tm, text, pat_tr, col_type, target_language)
                     tie_stats["pattern_count"]      += 1
@@ -4744,6 +4861,7 @@ def process_excel_with_progress(
                 sem = semantic_tm_match(tm, text, col_type, target_language)
                 if sem is not None:
                     sem_tr, _score = sem
+                    sem_tr = _ensure_opt_preserved(text, sem_tr)
                     results[(row_num, col_idx)] = sem_tr
                     tm_put(tm, text, sem_tr, col_type, target_language)
                     tie_stats["semantic_tm_hits"]   += 1
@@ -4831,10 +4949,12 @@ def process_excel_with_progress(
         for result in sorted(batch_results, key=lambda r: r["batch_id"]):
             for i, (row_num, col_header, col_idx, canonical, text) in enumerate(result["batch_items"]):
                 tr = str(result["translations"][i]).strip() if i < len(result["translations"]) else text
+                tr = _ensure_opt_preserved(text, tr)
                 if canonical == "name":
                     tr = validate_product_name(
                         tr, client=client, token_counter=token_counter,
                         compression_stats=name_compression_stats,
+                        row_num=row_num, col_header=col_header,
                     )
                 # Enterprise pipeline: enforce workbook-level consistency
                 tr_enforced = _consistency_mem.enforce(text, canonical, tr)
@@ -4974,9 +5094,12 @@ def process_excel_with_progress(
 
                         # Safety: name column — never allow refinement to lengthen it
                         if canonical == "name":
+                            src_text, _ = source_lookup.get(key, ("", "other"))
+                            new_text = _ensure_opt_preserved(src_text, new_text)
                             new_text = validate_product_name(
                                 new_text, client=client, token_counter=refine_token_c,
                                 compression_stats=name_compression_stats,
+                                row_num=key[0], col_header="name",
                             )
                             if len(new_text) > max(len(orig_text), 40):
                                 continue
@@ -5216,7 +5339,10 @@ def process_excel_with_progress(
 
             # Step 3: AI fix for persistent residue (max 2 attempts, stronger prompt)
             for attempt in range(2):
-                text = fix_german_residue(client, text, canonical, token_counter, target_language)
+                text = fix_german_residue(
+                    client, text, canonical, token_counter, target_language,
+                    compression_stats=name_compression_stats, row_num=row_num,
+                )
                 stats["residue_corrections"] += 1
                 detected = detect_german_residue(text, target_language)
                 if not detected:
@@ -5255,7 +5381,10 @@ def process_excel_with_progress(
             text     = str(cell.value)
             detected = detect_german_residue(text, target_language)
             if detected:
-                corrected = fix_german_residue(client, text, canonical, token_counter, target_language)
+                corrected = fix_german_residue(
+                    client, text, canonical, token_counter, target_language,
+                    compression_stats=name_compression_stats, row_num=row_num,
+                )
                 stats["residue_corrections"] += 1
                 if detect_german_residue(corrected, target_language):
                     already = any(
@@ -5286,6 +5415,9 @@ def process_excel_with_progress(
                 "suggested_fix":   "Retranslate manually — automated residue fixing failed",
                 "timestamp":       ts_fin,
             })
+
+        # ── Merge product-name compression review entries into all_warnings ──────
+        all_warnings.extend(name_compression_stats.get("review_entries", []))
 
         _crit = sum(1 for w in all_warnings if w["severity"] == SEVERITY_CRITICAL)
         _high = sum(1 for w in all_warnings if w["severity"] == SEVERITY_HIGH)
@@ -6195,15 +6327,38 @@ def translator_page():
                     f'</div>',
                     unsafe_allow_html=True,
                 )
+                _review_count = sum(1 for e in _nc.get("examples", []) if e.get("review_recommended"))
+                if _review_count:
+                    st.markdown(
+                        f'<div class="alert alert-info" style="background:#FEF3C7;border-color:#FDE68A;">'
+                        f'<span class="alert-icon">⚠</span>'
+                        f'<span><strong>Human review recommended</strong> for {_review_count} name(s) — '
+                        f'information was removed (not just reworded) to fit the limit.</span>'
+                        f'</div>',
+                        unsafe_allow_html=True,
+                    )
                 with st.expander(f"Compression examples ({len(_nc.get('examples', []))} shown)", expanded=False):
                     for _ex in _nc.get("examples", []):
+                        _row_label = f'Row {_ex["row"]} · ' if _ex.get("row") is not None else ""
+                        _review_badge = (
+                            '<span style="background:#FEF3C7;color:#92400E;border-radius:4px;'
+                            'padding:1px 6px;font-size:11px;font-weight:600;margin-left:6px;">'
+                            'REVIEW RECOMMENDED</span>'
+                            if _ex.get("review_recommended") else ""
+                        )
+                        _removed_line = (
+                            f'<div style="color:#991B1B;font-size:12px;margin-top:2px;">'
+                            f'Removed: "{_ex["removed_segment"]}"</div>'
+                            if _ex.get("removed_segment") else ""
+                        )
                         st.markdown(
                             f'<div style="padding:6px 0;border-bottom:1px solid #E5E7EB;">'
                             f'<div style="color:#6B7280;font-size:12px;">'
-                            f'{_ex["original_length"]} → {_ex["final_length"]} chars · '
-                            f'strategy: {_ex["strategy"].replace("_", " ")}</div>'
+                            f'{_row_label}{_ex["original_length"]} → {_ex["final_length"]} chars · '
+                            f'strategy: {_ex["strategy"].replace("_", " ")}{_review_badge}</div>'
                             f'<div style="text-decoration:line-through;color:#9CA3AF;font-size:13px;">{_ex["original"]}</div>'
                             f'<div style="color:#166534;font-size:13px;">{_ex["final"]}</div>'
+                            f'{_removed_line}'
                             f'</div>',
                             unsafe_allow_html=True,
                         )
