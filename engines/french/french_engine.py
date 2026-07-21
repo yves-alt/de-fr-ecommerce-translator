@@ -14,12 +14,25 @@ from intelligence import (
     semantic_tm_match,
     run_local_consistency_pass,
 )
+from engines.french.french_name_compression import (
+    ProductNameCompressionEngine,
+    CompressionResult,
+)
 
 
 class FrenchEngine:
     """FR-only translation engine wrapping intelligence.py functions."""
 
     TARGET_LANGUAGE = "French"
+
+    _name_compression_engine = ProductNameCompressionEngine()
+
+    # ── Product name compression ────────────────────────────────────────────
+
+    def compress_name(self, name: str, limit: int = 40, gpt_fallback=None) -> CompressionResult:
+        """Compress a translated product name to fit `limit` chars while
+        preserving product type, model name and commercial meaning."""
+        return self._name_compression_engine.compress(name, limit=limit, gpt_fallback=gpt_fallback)
 
     # ── Glossary-based translation ────────────────────────────────────────
 
