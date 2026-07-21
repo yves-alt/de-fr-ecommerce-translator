@@ -5,10 +5,11 @@ Replaces blind character-truncation with priority-based compression:
 product type and model name are never touched; connector words, then
 accessory clauses, then secondary feature words are compressed or
 dropped — in that order — until the name fits the character limit.
+The "opt." marker (product naming convention) is always preserved.
 """
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 DEFAULT_LIMIT = 40
@@ -18,7 +19,7 @@ DEFAULT_LIMIT = 40
 PRODUCT_TYPES = [
     "Lit mezzanine", "Lit superposé", "Lit maison", "Lit gigogne", "Lit banquette", "Lit coffre", "Lit",
     "Armoire penderie", "Armoire",
-    "Canapé d'angle", "Canapé convertible", "Canapé de jardin", "Canapé",
+    "Canapé panoramique", "Canapé d'angle", "Canapé convertible", "Canapé de jardin", "Canapé",
     "Bloc cuisine", "Kitchenette", "Cuisine",
     "Table basse", "Table à manger", "Table extensible", "Table de jardin", "Table",
     "Chaise longue", "Chaise de jardin", "Chaise",
@@ -27,6 +28,7 @@ PRODUCT_TYPES = [
     "Commode", "Étagère", "Bureau", "Matelas", "Tapis", "Banc de jardin", "Banc", "Buffet", "Vitrine",
     "Suspension", "Plafonnier", "Lampe",
     "Meuble vasque", "Meuble TV", "Meuble",
+    "Badset", "Meuble de salle de bain",
 ]
 _PRODUCT_TYPES_SORTED = sorted(PRODUCT_TYPES, key=len, reverse=True)
 
@@ -49,6 +51,7 @@ COMMON_DESCRIPTORS = {
     "etagere", "etageres", "miroir", "panier", "paniers", "penderie", "noir", "noire",
     "blanc", "blanche", "gris", "grise", "beige", "taupe", "argile", "terracotta",
     "reversible", "pliant", "pliante", "empilable", "modulable", "angle", "places",
+    "panoramique",
 }
 
 STORAGE_WORDS = {
@@ -98,6 +101,16 @@ _BOUNDED_NOUN_COMPRESSION = re.compile(
     r"\bavec (" + _BOUNDED_NOUNS + r")\b(?=\s*(?:et\b|&|$))", re.IGNORECASE,
 )
 
+# "opt." is a Home24 naming-convention marker (optional-accessory flag), not
+# descriptive text — it must survive compression intact. Extracted before
+# compression and always reattached to the final result.
+_OPT_TOKEN_RE = re.compile(r"\bopt\.\s*", re.IGNORECASE)
+_OPT_SUFFIX = " opt."
+
+# Strategies that discard real information (as opposed to rewording it) —
+# these are the ones a human should double-check before publishing.
+_REVIEW_STRATEGIES = {"accessory_removal", "feature_trim", "hard_truncate", "gpt_semantic_rewrite"}
+
 
 @dataclass
 class CompressionResult:
@@ -109,6 +122,8 @@ class CompressionResult:
     strategy: str
     product_type: str | None = None
     model_name: str | None = None
+    removed_segment: str | None = None
+    review_recommended: bool = False
 
 
 def _strip_accents(word: str) -> str:
@@ -207,7 +222,8 @@ def _assemble(product_type: str | None, zone_tokens: list[str], chunks: list[tup
 
 class ProductNameCompressionEngine:
     """Compress a translated product name to fit `limit` chars without
-    reducing it to an unfinished-looking fragment."""
+    reducing it to an unfinished-looking fragment, and without ever
+    silently losing the "opt." naming-convention marker."""
 
     def compress(
         self,
@@ -223,6 +239,36 @@ class ProductNameCompressionEngine:
 
         if len(text) <= limit:
             return CompressionResult(text, original, len(original), len(text), False, "none")
+
+        has_opt = bool(_OPT_TOKEN_RE.search(text))
+        if not has_opt:
+            return self._compress_body(text, original, limit, gpt_fallback)
+
+        # Reserve room for " opt." up front, compress the rest, then always
+        # reattach it — "opt." is never subject to any compression pass.
+        body_source = _collapse_ws(_OPT_TOKEN_RE.sub(" ", text))
+        effective_limit = max(limit - len(_OPT_SUFFIX), 1)
+        result = self._compress_body(body_source, original, effective_limit, gpt_fallback)
+
+        final_text = _strip_trailing_junk(result.text) + _OPT_SUFFIX
+        if len(final_text) > limit:
+            budget = max(limit - len(_OPT_SUFFIX), 0)
+            trimmed = result.text[:budget].rstrip()
+            last_space = trimmed.rfind(" ")
+            if last_space > 0:
+                trimmed = trimmed[:last_space]
+            final_text = (_strip_trailing_junk(trimmed) + _OPT_SUFFIX) if trimmed else _OPT_SUFFIX.strip()
+
+        result.text          = final_text
+        result.final_length  = len(final_text)
+        result.compressed    = True
+        return result
+
+    def _compress_body(
+        self, text: str, original: str, limit: int, gpt_fallback,
+    ) -> CompressionResult:
+        if len(text) <= limit:
+            return CompressionResult(text, original, len(_basic_clean(original)), len(text), False, "none")
 
         product_type, rest = _match_product_type(text)
 
@@ -276,25 +322,37 @@ class ProductNameCompressionEngine:
                 return self._result(candidate, original, "accessory_compression", product_type, model_name)
 
         # Pass 4 — drop accessory chunks entirely, lowest priority (last) first.
+        # This discards real information, so the dropped text is reported.
         for i in range(len(working_chunks) - 1, -1, -1):
             trimmed_chunks = working_chunks[:i]
             candidate = _try_candidate(_assemble(product_type, zone_tokens, trimmed_chunks), limit)
             if candidate:
-                return self._result(candidate, original, "accessory_removal", product_type, model_name)
+                dropped = working_chunks[i:]
+                removed = " ".join(f"{c} {t}".strip() for c, t in dropped if t).strip()
+                return self._result(
+                    candidate, original, "accessory_removal", product_type, model_name,
+                    removed_segment=removed or None,
+                )
         working_chunks = []
 
         # Pass 5 — trim secondary feature words from the zone, right to left,
-        # never touching the protected model token.
+        # never touching the protected model token. Also discards real
+        # information, so the dropped words are reported in order.
         trimmed_tokens = list(zone_tokens)
+        removed_words: list[str] = []
         i = len(trimmed_tokens) - 1
         while i >= 0:
             if model_idx is None or i != model_idx:
+                removed_words.insert(0, trimmed_tokens[i])
                 trimmed_tokens.pop(i)
                 if model_idx is not None and i < model_idx:
                     model_idx -= 1
                 candidate = _try_candidate(_assemble(product_type, trimmed_tokens, []), limit)
                 if candidate:
-                    return self._result(candidate, original, "feature_trim", product_type, model_name)
+                    return self._result(
+                        candidate, original, "feature_trim", product_type, model_name,
+                        removed_segment=" ".join(removed_words) or None,
+                    )
             i -= 1
 
         # Pass 6 — GPT semantic rewrite, only reached when product type +
@@ -305,7 +363,10 @@ class ProductNameCompressionEngine:
             if rewritten:
                 candidate = _try_candidate(rewritten, limit)
                 if candidate:
-                    return self._result(candidate, original, "gpt_semantic_rewrite", product_type, model_name)
+                    return self._result(
+                        candidate, original, "gpt_semantic_rewrite", product_type, model_name,
+                        removed_segment="(rewritten by AI — compare against the original source)",
+                    )
 
         # Pass 7 — absolute last resort: truncate at a word boundary.
         truncated = head_only[:limit]
@@ -313,12 +374,17 @@ class ProductNameCompressionEngine:
         if last_space > limit * 0.5:
             truncated = truncated[:last_space]
         truncated = _strip_trailing_junk(truncated) or head_only[:limit]
-        return self._result(truncated, original, "hard_truncate", product_type, model_name)
+        removed = head_only[len(truncated):].strip(" -:&+,")
+        return self._result(
+            truncated, original, "hard_truncate", product_type, model_name,
+            removed_segment=removed or None,
+        )
 
     @staticmethod
     def _result(
         text: str, original: str, strategy: str,
         product_type: str | None = None, model_name: str | None = None,
+        removed_segment: str | None = None,
     ) -> CompressionResult:
         return CompressionResult(
             text=text,
@@ -329,6 +395,8 @@ class ProductNameCompressionEngine:
             strategy=strategy,
             product_type=product_type,
             model_name=model_name,
+            removed_segment=removed_segment,
+            review_recommended=strategy in _REVIEW_STRATEGIES,
         )
 
 
