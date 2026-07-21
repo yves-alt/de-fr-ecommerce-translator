@@ -104,6 +104,7 @@ from pipeline import (
     SheetDebugMetrics,
     LARGE_FILE_ROW_THRESHOLD,
 )
+from engines.french.french_name_compression import ProductNameCompressionEngine
 
 load_dotenv()
 
@@ -1105,12 +1106,12 @@ def inject_custom_css():
     bg_sb     = "#FFFFFF"
     bg_card   = "#FFFFFF"
     bg_input  = "#F8FAFC"
-    bg_hover  = "rgba(15,61,158,0.025)"
-    bg_subtle = "rgba(15,61,158,0.04)"
+    bg_hover  = "rgba(200,16,46,0.025)"
+    bg_subtle = "rgba(200,16,46,0.04)"
     # ── Primary accent ───────────────────────────────────────────────────────────
-    primary   = "#0F3D9E"
-    primary_d = "#0B2D7E"
-    primary_lt= "#EAF2FF"
+    primary   = "#C8102E"
+    primary_d = "#9E0C24"
+    primary_lt= "#FDEEF0"
     # ── Status ────────────────────────────────────────────────────────────────────
     green     = "#12A150"
     green_d   = "#0E8A42"
@@ -1126,7 +1127,7 @@ def inject_custom_css():
     border_md = "#D1D9E6"
     border_dsh= "#C8D3E6"
     border_hv = "#B0BDD6"
-    hover_rb  = "rgba(15,61,158,0.05)"
+    hover_rb  = "rgba(200,16,46,0.05)"
     # ── Text ──────────────────────────────────────────────────────────────────────
     text      = "#1A2035"
     text2     = "#2D3A52"
@@ -1137,10 +1138,10 @@ def inject_custom_css():
     text6     = "#9BA8BE"
     # ── Component tokens ──────────────────────────────────────────────────────────
     sb_btn    = "#6B7A99"
-    code_bg   = "rgba(15,61,158,0.06)"
-    code_clr  = "#0F3D9E"
+    code_bg   = "rgba(200,16,46,0.06)"
+    code_clr  = primary
     prog_trk  = "#E8ECF2"
-    chip_bg   = "rgba(15,61,158,0.05)"
+    chip_bg   = "rgba(200,16,46,0.05)"
     chip_bdr  = "#E8ECF2"
 
     st.markdown(f"""
@@ -1178,8 +1179,8 @@ def inject_custom_css():
         to   {{ opacity: 1; transform: translateY(0); }}
     }}
     @keyframes glow-pulse {{
-        0%, 100% {{ box-shadow: 0 0 0 0 rgba(15,61,158,0.40); }}
-        50%       {{ box-shadow: 0 0 0 8px rgba(15,61,158,0); }}
+        0%, 100% {{ box-shadow: 0 0 0 0 rgba(200,16,46,0.40); }}
+        50%       {{ box-shadow: 0 0 0 8px rgba(200,16,46,0); }}
     }}
     @keyframes dot-pulse {{
         0%, 100% {{ opacity: 1; transform: scale(1); }}
@@ -1199,7 +1200,7 @@ def inject_custom_css():
         transform: translateX(0) !important;
         visibility: visible !important;
         display: flex !important;
-        box-shadow: 2px 0 14px rgba(15,61,158,0.04) !important;
+        box-shadow: 2px 0 14px rgba(200,16,46,0.04) !important;
     }}
 
     [data-testid="stSidebarCollapseButton"],
@@ -1349,7 +1350,7 @@ def inject_custom_css():
         border: 1px solid {border_sm} !important;
         border-radius: 20px !important;
         padding: 40px 44px !important;
-        box-shadow: 0 4px 28px rgba(15,61,158,0.07) !important;
+        box-shadow: 0 4px 28px rgba(200,16,46,0.07) !important;
         animation: fadeUp 0.45s ease 0.08s both;
     }}
 
@@ -1378,11 +1379,11 @@ def inject_custom_css():
         background: {bg_card};
         border: 1px solid {border};
         border-radius: 20px; padding: 32px; margin: 14px 0;
-        box-shadow: 0 2px 14px rgba(15,61,158,0.05);
+        box-shadow: 0 2px 14px rgba(200,16,46,0.05);
         animation: fadeUp 0.3s ease;
         transition: border-color 0.2s, box-shadow 0.2s;
     }}
-    .card:hover {{ border-color: {border_hv}; box-shadow: 0 6px 24px rgba(15,61,158,0.09); }}
+    .card:hover {{ border-color: {border_hv}; box-shadow: 0 6px 24px rgba(200,16,46,0.09); }}
     .card-title {{
         font-size: 10.5px; font-weight: 700; color: {text4};
         text-transform: uppercase; letter-spacing: 0.12em;
@@ -1398,7 +1399,7 @@ def inject_custom_css():
         animation: fadeUp 0.3s ease;
     }}
     .alert-icon {{ font-size: 14px; flex-shrink: 0; margin-top: 1px; }}
-    .alert-info  {{ background: {primary_lt}; border: 1px solid #C0D8FB; color: {primary}; }}
+    .alert-info  {{ background: {primary_lt}; border: 1px solid #F3C6CE; color: {primary}; }}
     .alert-success {{ background: {green_bg}; border: 1px solid rgba(18,161,80,0.22); color: {green_d}; }}
     .alert-warn  {{ background: {amber_lt}; border: 1px solid rgba(230,162,60,0.28); color: #7A4A0F; }}
     .alert strong {{ color: {text}; font-weight: 600; }}
@@ -1413,11 +1414,11 @@ def inject_custom_css():
     .result-card {{
         background: {bg_card}; border: 1px solid {border};
         border-radius: 16px; padding: 24px 22px;
-        box-shadow: 0 2px 12px rgba(15,61,158,0.05);
+        box-shadow: 0 2px 12px rgba(200,16,46,0.05);
         transition: border-color 0.2s, transform 0.2s, box-shadow 0.2s;
         animation: fadeUp 0.35s ease;
     }}
-    .result-card:hover {{ border-color: {border_hv}; transform: translateY(-2px); box-shadow: 0 8px 24px rgba(15,61,158,0.09); }}
+    .result-card:hover {{ border-color: {border_hv}; transform: translateY(-2px); box-shadow: 0 8px 24px rgba(200,16,46,0.09); }}
     .result-card-label {{
         font-size: 10.5px; font-weight: 600; color: {text4};
         text-transform: uppercase; letter-spacing: 0.09em; margin-bottom: 13px;
@@ -1454,7 +1455,7 @@ def inject_custom_css():
     .file-chip {{
         display: inline-flex; align-items: center; gap: 8px;
         background: {primary_lt};
-        border: 1px solid #C0D8FB;
+        border: 1px solid #F3C6CE;
         color: {primary}; padding: 6px 16px; border-radius: 20px;
         font-size: 12px; font-weight: 600; margin: 8px 0;
         font-family: Menlo, Monaco, 'Cascadia Code', monospace;
@@ -1467,7 +1468,7 @@ def inject_custom_css():
         border: 1px solid {border};
         border-radius: 20px; padding: 34px 36px; margin: 16px 0;
         animation: fadeUp 0.3s ease;
-        box-shadow: 0 2px 16px rgba(15,61,158,0.05);
+        box-shadow: 0 2px 16px rgba(200,16,46,0.05);
     }}
     .prog-head {{
         display: flex; align-items: center;
@@ -1498,7 +1499,7 @@ def inject_custom_css():
     }}
     .prog-bar {{
         height: 4px; border-radius: 3px;
-        background: linear-gradient(90deg, {primary} 0%, #3B6EDE 100%);
+        background: linear-gradient(90deg, {primary} 0%, #E23A55 100%);
         transition: width 0.45s cubic-bezier(0.4,0,0.2,1); position: relative;
     }}
     .prog-bar::after {{
@@ -1538,7 +1539,7 @@ def inject_custom_css():
         background: {bg_card}; border: 1px solid {border};
         border-radius: 14px; overflow: hidden; margin: 14px 0;
         animation: fadeUp 0.35s ease;
-        box-shadow: 0 1px 8px rgba(15,61,158,0.04);
+        box-shadow: 0 1px 8px rgba(200,16,46,0.04);
     }}
     .qg-row {{
         display: flex; align-items: center; gap: 16px;
@@ -1604,11 +1605,11 @@ def inject_custom_css():
         background: {bg_card};
         border: 1px solid {border};
         border-radius: 16px; padding: 26px 24px;
-        box-shadow: 0 2px 12px rgba(15,61,158,0.05);
+        box-shadow: 0 2px 12px rgba(200,16,46,0.05);
         transition: border-color 0.2s, transform 0.2s, box-shadow 0.2s;
         animation: fadeUp 0.35s ease;
     }}
-    .kpi:hover {{ border-color: {border_hv}; transform: translateY(-2px); box-shadow: 0 8px 24px rgba(15,61,158,0.09); }}
+    .kpi:hover {{ border-color: {border_hv}; transform: translateY(-2px); box-shadow: 0 8px 24px rgba(200,16,46,0.09); }}
     .kpi-label {{
         font-size: 10.5px; font-weight: 600; color: {text4};
         text-transform: uppercase; letter-spacing: 0.09em; margin-bottom: 13px;
@@ -1627,12 +1628,12 @@ def inject_custom_css():
     .hero-kpi {{
         text-align: center; padding: 60px 32px; border-radius: 20px;
         background: linear-gradient(135deg, {primary_lt} 0%, {green_bg} 100%);
-        border: 1px solid #C0D8FB; margin: 22px 0;
+        border: 1px solid #F3C6CE; margin: 22px 0;
         animation: fadeUp 0.4s ease;
     }}
     .hero-kpi-value {{
         font-size: 80px; font-weight: 800; letter-spacing: -0.05em; line-height: 1;
-        background: linear-gradient(135deg, {primary} 0%, #2563EB 100%);
+        background: linear-gradient(135deg, {primary} 0%, #E23A55 100%);
         -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;
         margin: 0;
     }}
@@ -1650,7 +1651,7 @@ def inject_custom_css():
         padding: 12px 16px; border-radius: 11px; margin: 14px 0;
         font-size: 11.5px; line-height: 1.55;
         background: {primary_lt};
-        border: 1px solid #C0D8FB;
+        border: 1px solid #F3C6CE;
         color: {primary};
     }}
 
@@ -1669,8 +1670,8 @@ def inject_custom_css():
         caret-color: {primary} !important;
     }}
     [data-testid="stTextInput"] input:focus {{
-        border-color: rgba(15,61,158,0.45) !important;
-        box-shadow: 0 0 0 3px rgba(15,61,158,0.10) !important;
+        border-color: rgba(200,16,46,0.45) !important;
+        box-shadow: 0 0 0 3px rgba(200,16,46,0.10) !important;
         outline: none !important;
     }}
     [data-testid="stTextInput"] label p {{ color: {text2b} !important; font-size: 12.5px !important; font-weight: 500 !important; }}
@@ -1703,15 +1704,15 @@ def inject_custom_css():
         caret-color: {primary} !important;
     }}
     [data-testid="stTextarea"] textarea:focus {{
-        border-color: rgba(15,61,158,0.40) !important;
-        box-shadow: 0 0 0 3px rgba(15,61,158,0.08) !important;
+        border-color: rgba(200,16,46,0.40) !important;
+        box-shadow: 0 0 0 3px rgba(200,16,46,0.08) !important;
         outline: none !important;
     }}
     [data-testid="stTextarea"] label p {{ color: {text2b} !important; font-size: 12.5px !important; font-weight: 500 !important; }}
 
     .stProgress {{ padding: 6px 0 !important; }}
     .stProgress > div > div > div {{
-        background: linear-gradient(90deg, {primary} 0%, #3B6EDE 100%) !important;
+        background: linear-gradient(90deg, {primary} 0%, #E23A55 100%) !important;
         border-radius: 3px !important;
     }}
     .stProgress > div > div {{
@@ -1729,12 +1730,12 @@ def inject_custom_css():
         font-size: 13.5px !important;
         letter-spacing: 0.01em !important;
         transition: background 0.15s, transform 0.15s, box-shadow 0.15s !important;
-        box-shadow: 0 2px 14px rgba(15,61,158,0.22) !important;
+        box-shadow: 0 2px 14px rgba(200,16,46,0.22) !important;
     }}
     .stButton > button:hover {{
         background: {primary_d} !important;
         transform: translateY(-1px) !important;
-        box-shadow: 0 6px 20px rgba(15,61,158,0.32) !important;
+        box-shadow: 0 6px 20px rgba(200,16,46,0.32) !important;
     }}
     .stButton > button:active {{ transform: translateY(0) !important; }}
 
@@ -1765,8 +1766,8 @@ def inject_custom_css():
     }}
     [data-testid="stFileUploader"] section:hover,
     [data-testid="stFileUploader"] > div:hover {{
-        border-color: rgba(15,61,158,0.35) !important;
-        background: rgba(15,61,158,0.03) !important;
+        border-color: rgba(200,16,46,0.35) !important;
+        background: rgba(200,16,46,0.03) !important;
     }}
     [data-testid="stFileUploader"] span,
     [data-testid="stFileUploader"] p {{ color: {text3} !important; font-size: 13px !important; }}
@@ -1774,7 +1775,7 @@ def inject_custom_css():
     [data-testid="stFileUploader"] button {{
         background: {primary_lt} !important;
         color: {primary} !important;
-        border: 1px solid #C0D8FB !important;
+        border: 1px solid #F3C6CE !important;
         border-radius: 9px !important;
         font-size: 12.5px !important;
         font-weight: 600 !important;
@@ -1844,7 +1845,7 @@ def inject_custom_css():
         background: {bg_card};
         border: 1px solid {border};
         border-radius: 24px; padding: 44px 48px; margin-bottom: 36px;
-        box-shadow: 0 4px 28px rgba(15,61,158,0.06);
+        box-shadow: 0 4px 28px rgba(200,16,46,0.06);
         animation: fadeUp 0.35s ease;
         position: relative; overflow: hidden;
     }}
@@ -2924,21 +2925,82 @@ def admin_issue_reports_page():
 # VALIDATION
 # =============================================================================
 
-def validate_product_name(name: str) -> str:
+_NAME_COMPRESSION_ENGINE = ProductNameCompressionEngine()
+
+
+def _gpt_name_compression_fallback(client, token_counter: dict | None = None):
+    """Build a gpt_fallback callable for ProductNameCompressionEngine — used
+    only when local rule-based compression still exceeds the limit (rare:
+    an unusually long model/product-type combination)."""
+
+    def _fallback(name: str, limit: int) -> str | None:
+        prompt = (
+            "Rewrite this Home24 product name into the shortest natural commercial "
+            "French version while preserving:\n"
+            "- product type\n- model name\n- essential selling feature\n\n"
+            f"Maximum: {limit} characters.\n"
+            "Never produce incomplete endings.\n"
+            "Never truncate.\n"
+            "Never invent information.\n\n"
+            f"Product name: {name}"
+        )
+        try:
+            response = _api_call_with_retry(
+                lambda: client.chat.completions.create(
+                    model=OPENAI_MODEL,
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": "You are a premium French copywriter for Home24 France furniture e-commerce.",
+                        },
+                        {"role": "user", "content": prompt},
+                    ],
+                    temperature=0.2,
+                    max_tokens=60,
+                    timeout=API_TIMEOUT_SECONDS,
+                ),
+            )
+            if token_counter is not None and response.usage:
+                token_counter["prompt_tokens"]     += response.usage.prompt_tokens
+                token_counter["completion_tokens"] += response.usage.completion_tokens
+            return response.choices[0].message.content.strip()
+        except Exception:
+            return None
+
+    return _fallback
+
+
+def validate_product_name(
+    name: str,
+    client=None,
+    token_counter: dict | None = None,
+    compression_stats: dict | None = None,
+) -> str:
+    """Enforce the 40-char product name limit via intelligent compression
+    (product type + model name preserved, connectors/accessories trimmed
+    first) instead of blind truncation. `client` enables a GPT rewrite as
+    last resort when local compression alone can't fit the limit."""
     if not name:
         return name
-    name = " ".join(name.split())
-    name = name.replace(",", "")
-    name = re.sub(r'\([^)]*\)', '', name)
-    name = name.replace("(", "").replace(")", "")
-    name = re.sub(r'\[[^\]]*\]', '', name)
-    name = name.replace("[", "").replace("]", "")
-    name = " ".join(name.split())
-    if len(name) > 40:
-        truncated = name[:40]
-        last_space = truncated.rfind(" ")
-        name = truncated[:last_space] if last_space > 20 else truncated
-    return name.strip()
+
+    gpt_fallback = _gpt_name_compression_fallback(client, token_counter) if client else None
+    result = _NAME_COMPRESSION_ENGINE.compress(name, limit=40, gpt_fallback=gpt_fallback)
+
+    if compression_stats is not None and result.compressed:
+        compression_stats["count"] = compression_stats.get("count", 0) + 1
+        strategy_counts = compression_stats.setdefault("strategy_counts", {})
+        strategy_counts[result.strategy] = strategy_counts.get(result.strategy, 0) + 1
+        examples = compression_stats.setdefault("examples", [])
+        if len(examples) < 8:
+            examples.append({
+                "original":        result.original,
+                "final":           result.text,
+                "original_length": result.original_length,
+                "final_length":    result.final_length,
+                "strategy":        result.strategy,
+            })
+
+    return result.text
 
 
 def detect_german_residue(text: str, target_language: str = "French") -> list[str]:
@@ -3571,7 +3633,7 @@ def fix_german_residue(
             token_counter["completion_tokens"] += response.usage.completion_tokens
         corrected = response.choices[0].message.content.strip()
         if column_name == "name":
-            corrected = validate_product_name(corrected)
+            corrected = validate_product_name(corrected, client=client, token_counter=token_counter)
         return corrected
     except Exception:
         return text
@@ -4467,6 +4529,7 @@ def process_excel_with_progress(
 
     token_counter      = {"prompt_tokens": 0, "completion_tokens": 0}
     glossary_run_stats: dict = {"total_hits": 0, "term_counts": {}}
+    name_compression_stats: dict = {}
 
     stats = {
         "cells_translated":    0,
@@ -4769,7 +4832,10 @@ def process_excel_with_progress(
             for i, (row_num, col_header, col_idx, canonical, text) in enumerate(result["batch_items"]):
                 tr = str(result["translations"][i]).strip() if i < len(result["translations"]) else text
                 if canonical == "name":
-                    tr = validate_product_name(tr)
+                    tr = validate_product_name(
+                        tr, client=client, token_counter=token_counter,
+                        compression_stats=name_compression_stats,
+                    )
                 # Enterprise pipeline: enforce workbook-level consistency
                 tr_enforced = _consistency_mem.enforce(text, canonical, tr)
                 if tr_enforced != tr:
@@ -4780,6 +4846,7 @@ def process_excel_with_progress(
                 stats["cells_translated"] += 1
 
         stats["consistency_memory_fixes"] = _consistency_fixes_batch
+        stats["name_compression"] = name_compression_stats
 
         # Restore duplicate cells — representative cells are now in results
         for (dup_row, dup_col), (rep_row, rep_col) in dup_restore_map.items():
@@ -4907,7 +4974,10 @@ def process_excel_with_progress(
 
                         # Safety: name column — never allow refinement to lengthen it
                         if canonical == "name":
-                            new_text = validate_product_name(new_text)
+                            new_text = validate_product_name(
+                                new_text, client=client, token_counter=refine_token_c,
+                                compression_stats=name_compression_stats,
+                            )
                             if len(new_text) > max(len(orig_text), 40):
                                 continue
 
@@ -5469,7 +5539,7 @@ def login_page():
     with col_left:
         st.markdown("""
         <div style="
-            background: linear-gradient(160deg, #0F3D9E 0%, #1A56D6 100%);
+            background: linear-gradient(160deg, #C8102E 0%, #E23A55 100%);
             min-height: 92vh;
             padding: 60px 52px;
             display: flex;
@@ -6107,6 +6177,36 @@ def translator_page():
                     f'</div>',
                     unsafe_allow_html=True,
                 )
+
+            # ── Product name compression ──────────────────────────────────
+            _nc = _s.get("name_compression") or {}
+            if _nc.get("count"):
+                _nc_strategies = " · ".join(
+                    f"{strat.replace('_', ' ')}: {cnt}"
+                    for strat, cnt in _nc.get("strategy_counts", {}).items()
+                )
+                st.markdown(
+                    f'<div class="alert alert-info">'
+                    f'<span class="alert-icon">✂️</span>'
+                    f'<span><strong>Product name compressed:</strong> '
+                    f'{_nc["count"]} name(s) exceeded the 40-character limit — '
+                    f'rewritten to keep product type, model and key feature intact. '
+                    f'{_nc_strategies}</span>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+                with st.expander(f"Compression examples ({len(_nc.get('examples', []))} shown)", expanded=False):
+                    for _ex in _nc.get("examples", []):
+                        st.markdown(
+                            f'<div style="padding:6px 0;border-bottom:1px solid #E5E7EB;">'
+                            f'<div style="color:#6B7280;font-size:12px;">'
+                            f'{_ex["original_length"]} → {_ex["final_length"]} chars · '
+                            f'strategy: {_ex["strategy"].replace("_", " ")}</div>'
+                            f'<div style="text-decoration:line-through;color:#9CA3AF;font-size:13px;">{_ex["original"]}</div>'
+                            f'<div style="color:#166534;font-size:13px;">{_ex["final"]}</div>'
+                            f'</div>',
+                            unsafe_allow_html=True,
+                        )
 
             # ── Admin: per-sheet debug metrics ──────────────────────────────
             if _role == "admin" and _s.get("_sheet_debug_metrics"):
@@ -7045,11 +7145,11 @@ def _glossary_edit_dialog() -> None:
     lang_short = "FR"
 
     st.markdown(
-        f'<div style="background:#EAF2FF;border:1px solid #C7DEFF;border-radius:8px;'
+        f'<div style="background:#FDEEF0;border:1px solid #F3C6CE;border-radius:8px;'
         f'padding:10px 14px;margin-bottom:16px;">'
         f'<span style="font-size:11px;color:#6B7A99;font-weight:600;text-transform:uppercase;'
         f'letter-spacing:.05em;">Editing</span><br>'
-        f'<span style="font-size:15px;font-weight:700;color:#0F3D9E;">{src}</span>'
+        f'<span style="font-size:15px;font-weight:700;color:#C8102E;">{src}</span>'
         f'<span style="margin-left:8px;font-size:12px;color:#6B7A99;">DE → {lang_short}</span>'
         f'</div>',
         unsafe_allow_html=True,
@@ -7100,7 +7200,7 @@ def _glossary_edit_dialog() -> None:
                 f'<span style="font-size:11px;color:#15803D;font-weight:600;">PREVIEW</span><br>'
                 f'<span style="color:#1A2035;font-size:13px;">{src} Hayman</span>'
                 f'<span style="color:#6B7A99;margin:0 6px;">→</span>'
-                f'<span style="color:#0F3D9E;font-size:13px;font-weight:600;">'
+                f'<span style="color:#C8102E;font-size:13px;font-weight:600;">'
                 f'{new_target.strip()} Hayman</span>'
                 f'</div>',
                 unsafe_allow_html=True,
