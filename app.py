@@ -105,6 +105,11 @@ from pipeline import (
     qa_cell_needs_ai_fix,
     SheetDebugMetrics,
     LARGE_FILE_ROW_THRESHOLD,
+    ColumnHeaderNormalizer,
+    ColumnType,
+    TranslationProfile,
+    TranslationPlanBuilder,
+    TranslationCoverageValidator,
 )
 from engines.french.french_name_compression import ProductNameCompressionEngine
 
@@ -1057,17 +1062,24 @@ def compute_quality_score(warnings: list) -> int:
 
 # Categories that mean "this cell was never actually translated" — as opposed
 # to German-residue warnings, which mean it WAS translated but imperfectly.
-_COVERAGE_MISSING_CATEGORIES = frozenset({"Missing translation", "API failure"})
+_COVERAGE_MISSING_CATEGORIES = frozenset({"Missing translation", "API failure", "Empty translation"})
 
 
 def compute_coverage_problems(stats: dict) -> dict:
     """
-    Translation coverage validation (spec section 7): before export, verify
-    every non-empty translatable cell was actually processed.
+    Translation coverage validation (spec items 7 and 11): before export,
+    verify every non-empty translatable cell was actually processed.
+
+    Combines two signals:
+      - the warnings-based check (cells that were processed but flagged
+        missing/failed/empty)
+      - TranslationCoverageValidator's plan-vs-results check (cells that
+        were queued for translation under the dynamic column plan but never
+        produced any result at all — see stats["coverage_failures"])
 
     Returns:
       {
-        "missed_columns": [...],   # Home24-like columns the classifier skipped entirely
+        "missed_columns": [...],   # columns not sent for translation (ambiguous, unconfirmed)
         "missing_cells":  [...],   # {row, column, reason} for cells left untranslated
       }
     Both lists empty means coverage is clean.
@@ -1075,10 +1087,20 @@ def compute_coverage_problems(stats: dict) -> dict:
     qg = stats.get("quality_gate", {})
     missed_columns = list(qg.get("possible_missed", []))
     missing_cells = [
-        {"row": w.get("row"), "column": w.get("column"), "reason": w.get("reason", "")}
+        {
+            "row": w.get("row"), "column": w.get("column"), "reason": w.get("reason", ""),
+            "source_value": w.get("original_text", ""),
+        }
         for w in stats.get("all_warnings", [])
         if w.get("severity") == SEVERITY_CRITICAL and w.get("category") in _COVERAGE_MISSING_CATEGORIES
     ]
+    missing_cells.extend(
+        {
+            "row": f.get("row"), "column": f.get("column"), "reason": f.get("reason", ""),
+            "source_value": f.get("source_value", ""),
+        }
+        for f in stats.get("coverage_failures", [])
+    )
     return {"missed_columns": missed_columns, "missing_cells": missing_cells}
 
 
@@ -1101,34 +1123,20 @@ def _normalize_header(header: str) -> set[str]:
     return {w.lower() for w in spaced.split() if w} | {header.strip().lower()}
 
 
+_HEADER_NORMALIZER = ColumnHeaderNormalizer()
+
+
 def _normalize_col_header(raw) -> str:
     """
     Full normalization of a raw Excel header for alias matching.
     Handles: camelCase, snake_case, line-breaks, invisible chars, accents.
     Returns a lowercase space-separated string.
+
+    Delegates to pipeline.ColumnHeaderNormalizer — the single source of
+    truth shared with the dynamic column classifier, so both agree on what
+    a given header normalizes to.
     """
-    text = str(raw)
-    # Replace line breaks, tabs, non-breaking spaces, zero-width chars
-    text = re.sub(r'[\n\r\t\xa0​‌‍﻿]', ' ', text)
-    # Remove remaining control/format characters (keep spaces)
-    text = ''.join(
-        c for c in text
-        if unicodedata.category(c) not in ('Cc', 'Cf') or c == ' '
-    )
-    # Expand camelCase / PascalCase: insert space before uppercase run
-    text = re.sub(r'([a-z])([A-Z])', r'\1 \2', text)
-    text = re.sub(r'([A-Z]+)([A-Z][a-z])', r'\1 \2', text)
-    # Insert space between letter and digit (e.g. Cover1 → Cover 1)
-    text = re.sub(r'([a-zA-Z])(\d)', r'\1 \2', text)
-    text = re.sub(r'(\d)([a-zA-Z])', r'\1 \2', text)
-    # Replace underscores, hyphens, dots with spaces
-    text = re.sub(r'[_\-\.]', ' ', text)
-    # Normalize unicode — NFKD decomposes characters; then drop combining marks
-    # so ä→a, ö→o, ü→u, é→e, etc. (good for cross-language matching)
-    text = unicodedata.normalize('NFKD', text)
-    text = ''.join(c for c in text if unicodedata.category(c) != 'Mn')
-    # Collapse whitespace, lowercase
-    return ' '.join(text.split()).lower()
+    return _HEADER_NORMALIZER.normalize(raw)
 
 
 # =============================================================================
@@ -2119,6 +2127,26 @@ def render_column_report(classification: dict):
     if ignored:
         with st.expander(f"Ignored columns ({len(ignored)})"):
             st.markdown(", ".join(f"`{h}`" for h in ignored))
+
+    # Full Translation Plan (spec item 8/10) — one row per non-empty column,
+    # with an explicit action and reason. Nothing is silently skipped.
+    plan = classification.get("plan")
+    if plan:
+        with st.expander(f"Translation Plan — {len(plan)} column(s)", expanded=False):
+            plan_rows = [
+                {
+                    "Column":        e.header,
+                    "Type":          e.column_type.value,
+                    "Action":        e.action,
+                    "Profile":       e.profile.value,
+                    "Confidence":    e.confidence,
+                    "Non-empty cells":        e.non_empty_cells,
+                    "Expected translations":  e.expected_translations,
+                    "Reason":        e.reason,
+                }
+                for e in plan
+            ]
+            st.dataframe(plan_rows, use_container_width=True, hide_index=True)
 
     # Debug panel — shown only when automatic detection found nothing
     if not to_translate:
@@ -4389,6 +4417,55 @@ def detect_header_row(worksheet, max_rows: int = 20) -> tuple[int, dict]:
     return header_row, headers
 
 
+def sample_column_values(
+    file_bytes: bytes,
+    sheet_name: str,
+    header_row: int,
+    col_indices: set,
+    max_samples: int = 25,
+    row_scan_cap: int = 5000,
+) -> tuple[dict, dict]:
+    """
+    Single-pass scan collecting up to `max_samples` non-empty values per
+    requested column index (input to the dynamic ColumnClassifier), plus a
+    total non-empty cell count per column (for the Translation Plan).
+    Bounded by row_scan_cap so this stays cheap on very large sheets —
+    counts beyond the cap are not exact, only a lower bound.
+
+    Returns ({col_idx: [values]}, {col_idx: non_empty_count}).
+    """
+    samples: dict[int, list] = {ci: [] for ci in col_indices}
+    counts:  dict[int, int]  = {ci: 0 for ci in col_indices}
+    if not col_indices:
+        return samples, counts
+
+    wb = load_workbook(BytesIO(file_bytes), read_only=True, data_only=True)
+    try:
+        ws = wb[sheet_name] if sheet_name in wb.sheetnames else wb.active
+        max_col = max(col_indices)
+        for row_tuple in ws.iter_rows(
+            min_row=header_row + 1, max_row=header_row + row_scan_cap, max_col=max_col,
+        ):
+            for cell in row_tuple:
+                c = getattr(cell, "column", None)
+                if c not in col_indices:
+                    continue
+                val = getattr(cell, "value", None)
+                if val is None:
+                    continue
+                text = str(val).strip()
+                if not text:
+                    continue
+                counts[c] += 1
+                if len(samples[c]) < max_samples:
+                    samples[c].append(text)
+    except Exception:
+        pass
+    finally:
+        wb.close()
+    return samples, counts
+
+
 def detect_columns(worksheet) -> dict:
     """Backward-compatible wrapper — returns {raw_header: col_idx} from detected header row."""
     _, headers = detect_header_row(worksheet)
@@ -5558,6 +5635,16 @@ def process_excel_with_progress(
         stats["review_items"] = review_items  # per-cell legacy list
         stats["retry_count"]  = retry_counter[0]
 
+        # ── Translation coverage validation (spec item 11) ────────────────────
+        # For every column the plan marked "Translate", verify every non-empty
+        # source cell actually produced a result. Never a silent data loss —
+        # the UI refuses to offer a download when this list is non-empty.
+        _coverage_failures = TranslationCoverageValidator().validate(
+            column_classification.get("plan", []), cells_queue, results,
+        )
+        stats["coverage_failures"] = _coverage_failures
+        stats["coverage_blocked"]  = bool(_coverage_failures)
+
         # Audit counters for the export highlighting report
         stats["original_highlights_preserved"] = cells_original_highlight
         stats["review_highlights_applied"]      = cells_review_highlighted
@@ -5941,6 +6028,43 @@ def translator_page():
         classification["header_row"] = header_row
         classification["ws_info"]    = _ws_info
 
+        # ── Dynamic column detection — never silently drop a non-empty column ──
+        # Headers classify_columns() couldn't match ("ignored") get a second
+        # look: sample their actual cell values and let ColumnClassifier
+        # decide translatable content vs. protected/technical/empty/ambiguous,
+        # instead of dropping them. Cached per file+sheet — it's a bounded
+        # but non-trivial scan, no need to redo it on every rerun.
+        _plan_cache_key = f"_plan_{_file_key}_{selected_sheet}"
+        if _plan_cache_key not in st.session_state:
+            _ignored_idx = set(classification.get("ignored", {}).values())
+            _all_idx     = _ignored_idx | set(
+                ci for ci, _ in classification.get("to_translate", {}).values()
+            ) | set(classification.get("protected", {}).values())
+            _samples, _counts = sample_column_values(
+                uploaded_file.getvalue(), selected_sheet, header_row, _all_idx,
+            )
+            # sample_column_values keys by col_idx; the plan builder wants headers.
+            _idx_to_header = {
+                **{ci: h for h, ci in classification.get("ignored", {}).items()},
+                **{ci: h for h, (ci, _) in classification.get("to_translate", {}).items()},
+                **{ci: h for h, ci in classification.get("protected", {}).items()},
+            }
+            _samples_by_header = {_idx_to_header[ci]: v for ci, v in _samples.items() if ci in _idx_to_header}
+            _counts_by_header  = {_idx_to_header[ci]: v for ci, v in _counts.items() if ci in _idx_to_header}
+            st.session_state[_plan_cache_key] = TranslationPlanBuilder().build(
+                classification, _samples_by_header, _counts_by_header,
+            )
+        _plan_result = st.session_state[_plan_cache_key]
+        classification["to_translate"]       = _plan_result["to_translate"]
+        classification["protected"]          = _plan_result["protected"]
+        classification["plan"]               = _plan_result["plan"]
+        classification["needs_confirmation"] = _plan_result["needs_confirmation"]
+        classification["plan_summary"]       = _plan_result["summary"]
+        # The dynamic classifier's ambiguous set supersedes the old
+        # keyword-heuristic "possible_missed" — it's based on actually
+        # sampling cell content, not just guessing from the header.
+        classification["possible_missed"]    = list(_plan_result["needs_confirmation"].keys())
+
         # ── Column detection summary ──────────────────────────────────────────
         _to_tr  = classification.get("to_translate", {})
         _missed = classification.get("possible_missed", [])
@@ -6119,6 +6243,55 @@ def translator_page():
                 unsafe_allow_html=True,
             )
 
+        # ── Dynamic column detection summary ─────────────────────────────────
+        _plan_sum = classification.get("plan_summary", {})
+        if _plan_sum:
+            _sum_parts = [
+                f"Known translatable columns: {_plan_sum.get('known_translatable_columns', 0)}",
+                f"Additional content columns detected: {_plan_sum.get('additional_content_columns', 0)}",
+                f"Protected metadata columns: {_plan_sum.get('protected_metadata_columns', 0)}",
+                f"Technical columns preserved: {_plan_sum.get('technical_columns_preserved', 0)}",
+                f"Columns requiring review: {_plan_sum.get('columns_requiring_review', 0)}",
+            ]
+            st.markdown(
+                f'<div class="alert alert-info">'
+                f'<span class="alert-icon">🧭</span>'
+                f'<span><strong>Column plan:</strong> {" · ".join(_sum_parts)}</span>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+            _new_content = _plan_sum.get("newly_detected_content_columns", [])
+            if _new_content:
+                st.markdown(
+                    f'<div class="alert alert-success" style="margin-top:8px;">'
+                    f'<span class="alert-icon">✓</span>'
+                    f'<span><strong>New content column(s) detected and will be translated:</strong> '
+                    f'{", ".join(_new_content)}</span>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+
+        # ── Ambiguous columns — require explicit user confirmation ───────────
+        _needs_confirm = classification.get("needs_confirmation", {})
+        _confirmed_headers: set = set()
+        if _needs_confirm:
+            with st.expander(
+                f"⚠ Human confirmation required — {len(_needs_confirm)} column(s)", expanded=True,
+            ):
+                st.caption(
+                    "These columns have mixed or inconclusive content — the classifier can't "
+                    "confidently tell whether they should be translated. Review and opt in if needed."
+                )
+                for _hdr, _cls in _needs_confirm.items():
+                    _ck_key = f"_confirm_translate_{_plan_cache_key}_{_hdr}"
+                    _checked = st.checkbox(
+                        f"Translate \"{_hdr}\"", value=False, key=_ck_key,
+                        help=_cls.reason,
+                    )
+                    st.caption(f"Column: {_hdr} — {_cls.reason}")
+                    if _checked:
+                        _confirmed_headers.add(_hdr)
+
         st.markdown('<div class="section-label">Translate</div>', unsafe_allow_html=True)
         st.markdown("""
         <div class="alert alert-warn" style="margin-bottom:16px;">
@@ -6126,6 +6299,20 @@ def translator_page():
             <span>Keep this tab open while the translation is running.</span>
         </div>
         """, unsafe_allow_html=True)
+
+        # Merge any user-confirmed ambiguous columns into the plan right
+        # before translation runs — never auto-merged, always opt-in.
+        # (classification["ignored"] still holds every header the known-
+        # column registry didn't match, including ambiguous ones, so the
+        # original column index is always available here.)
+        for _hdr in _confirmed_headers:
+            _col_idx = classification.get("ignored", {}).get(_hdr)
+            if _col_idx is not None:
+                classification["to_translate"][_hdr] = (_col_idx, "other")
+                for _entry in classification["plan"]:
+                    if _entry.header == _hdr:
+                        _entry.action = "Translate"
+                        _entry.profile = TranslationProfile.GENERIC_HOME24_DESCRIPTION
 
         _, btn_col, _ = st.columns([1, 2, 1])
         with btn_col:
@@ -6512,7 +6699,11 @@ def translator_page():
                     )
                 if _coverage["missing_cells"]:
                     _mc      = _coverage["missing_cells"]
-                    _preview = "; ".join(f"{m['column']} (row {m['row']})" for m in _mc[:10])
+                    _preview = "; ".join(
+                        f"{m['column']} (row {m['row']})"
+                        + (f' — source: "{m["source_value"][:60]}"' if m.get("source_value") else "")
+                        for m in _mc[:10]
+                    )
                     _more    = f" — and {len(_mc) - 10} more" if len(_mc) > 10 else ""
                     _cov_lines.append(
                         f"**{len(_mc)} cell(s) left untranslated** (source text unchanged, "
