@@ -63,6 +63,70 @@ def dedup_api_queue(api_queue: list) -> tuple[list, dict, int, int]:
 
 
 # =============================================================================
+# GLOSSARY INDEX — O(1) lookups regardless of glossary size
+# =============================================================================
+# The official Home24 glossary can hold thousands of entries. Scanning
+# terms.items() per cell (the original approach) is O(cells × terms) and
+# becomes a real bottleneck past a few hundred terms. glossary_index()
+# builds a lowercase lookup map once per glossary and caches it on the
+# glossary dict itself; glossary_ngram_hits() then finds every matching
+# term inside a text in O(text length) instead of O(#terms).
+
+def glossary_index(glossary: dict) -> dict:
+    """Return (and cache) {'map': {lower_de: (de, fr)}, 'max_words': int}."""
+    terms = glossary.get("terms", {}) or {}
+    cache = glossary.get("_index_cache")
+    if cache is not None and cache.get("size") == len(terms):
+        return cache
+    lower_map: dict[str, tuple[str, str]] = {}
+    max_words = 1
+    for de, fr in terms.items():
+        key = normalize_text(de).lower()
+        if not key:
+            continue
+        lower_map[key] = (de, fr)
+        wc = key.count(" ") + 1
+        if wc > max_words:
+            max_words = wc
+    cache = {"size": len(terms), "map": lower_map, "max_words": max_words}
+    glossary["_index_cache"] = cache
+    return cache
+
+
+_GLOSSARY_TOKEN_RE = re.compile(r"[\wÀ-ÿ'-]+", re.UNICODE)
+
+
+def glossary_ngram_hits(text: str, glossary: dict) -> dict[str, int]:
+    """
+    Find every glossary term occurring in `text`, matching multi-word terms
+    too (up to the glossary's longest term, in words). O(text length),
+    independent of glossary size — safe to call per-cell even with a
+    glossary of many thousands of terms.
+
+    Returns {original_de_term: occurrence_count}.
+    """
+    cache = glossary_index(glossary)
+    lower_map = cache["map"]
+    if not lower_map:
+        return {}
+    max_words = cache["max_words"]
+    words = _GLOSSARY_TOKEN_RE.findall(text)
+    lower_words = [w.lower() for w in words]
+    n = len(lower_words)
+    hits: dict[str, int] = {}
+    for i in range(n):
+        for span in range(1, max_words + 1):
+            if i + span > n:
+                break
+            candidate = " ".join(lower_words[i:i + span])
+            match = lower_map.get(candidate)
+            if match:
+                de_original = match[0]
+                hits[de_original] = hits.get(de_original, 0) + 1
+    return hits
+
+
+# =============================================================================
 # GLOSSARY-ONLY TRANSLATION  (Part 1 — Step 3)
 # =============================================================================
 
@@ -92,16 +156,16 @@ def try_glossary_only(
     if not stripped or len(stripped) > 120:
         return None
 
-    terms = glossary.get("terms", {})
-    if not terms:
+    lower_map = glossary_index(glossary)["map"]
+    if not lower_map:
         return None
 
-    low = stripped.lower()
+    low = normalize_text(stripped).lower()
 
     # Exact single-term match
-    for de, tr in terms.items():
-        if de.lower() == low:
-            return tr
+    exact = lower_map.get(low)
+    if exact:
+        return exact[1]
 
     # Separator-split compound — every part must resolve
     parts, sep = _split_on_separators(stripped)
@@ -112,15 +176,10 @@ def try_glossary_only(
     for part in parts:
         if not part:
             continue
-        pl = part.lower()
-        matched = None
-        for de, tr in terms.items():
-            if de.lower() == pl:
-                matched = tr
-                break
-        if matched is None:
+        match = lower_map.get(normalize_text(part).lower())
+        if match is None:
             return None
-        translated.append(matched)
+        translated.append(match[1])
 
     return sep.join(translated)
 
@@ -514,6 +573,9 @@ FURNITURE_TERM_MAP_FR: dict[str, str] = {
     "Unterflur-Auszug":               "tiroir sous-plancher",
     # Colors
     "Schlamm":                        "argile",
+    # Sofa / seating category — the Home24-preferred translation, not the
+    # more literal "canapé d'angle" GPT would otherwise default to
+    "Wohnlandschaft":                 "canapé panoramique",
     # Outdoor / garden sets
     "Gartenessgruppe":                "ensemble de jardin",
     "Gartengruppe":                   "salon de jardin",
