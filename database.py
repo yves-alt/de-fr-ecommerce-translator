@@ -205,6 +205,7 @@ def init_db(
     _ensure_v10_migration()
     _ensure_v11_migration()
     _ensure_v12_migration()
+    _ensure_v13_migration()
     _migrate_json_if_needed()
     if default_glossary:
         _seed_glossary_if_empty(default_glossary, "French")
@@ -587,10 +588,12 @@ def db_save_warnings(job_id: str, warnings: list) -> None:
 def db_load_translation_memory() -> dict:
     try:
         with _db() as conn:
-            rows = conn.execute(
-                "SELECT tm_key, translation, col_type, created_at, hit_count "
-                "FROM translation_memory"
-            ).fetchall()
+            cols = _table_columns(conn, "translation_memory")
+            has_source_type = "source_type" in cols
+            select_cols = "tm_key, translation, col_type, created_at, hit_count" + (
+                ", source_type" if has_source_type else ""
+            )
+            rows = conn.execute(f"SELECT {select_cols} FROM translation_memory").fetchall()
             metrics = conn.execute(
                 "SELECT key, value FROM app_metrics WHERE key IN "
                 "('tm_total_hits','tm_total_misses','tm_api_calls_saved')"
@@ -603,6 +606,7 @@ def db_load_translation_memory() -> dict:
                 "col_type":    row["col_type"],
                 "created_at":  row["created_at"],
                 "hit_count":   row["hit_count"],
+                "source_type": row["source_type"] if has_source_type else "AUTO",
             }
 
         m = {r["key"]: int(r["value"]) for r in metrics}
@@ -638,17 +642,19 @@ def db_save_translation_memory(tm: dict) -> None:
             val.get("col_type", "other"),
             val.get("created_at", now),
             val.get("hit_count", 0),
+            val.get("source_type", "AUTO"),
         ))
 
     try:
         with _db() as conn:
             conn.executemany(
                 """
-                INSERT INTO translation_memory (tm_key, translation, col_type, created_at, hit_count)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO translation_memory (tm_key, translation, col_type, created_at, hit_count, source_type)
+                VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT(tm_key) DO UPDATE SET
                     translation = excluded.translation,
-                    hit_count   = excluded.hit_count
+                    hit_count   = excluded.hit_count,
+                    source_type = excluded.source_type
                 """,
                 rows,
             )
@@ -2063,3 +2069,66 @@ def _ensure_v12_migration() -> None:
     if _get_schema_version() >= 12:
         return
     _set_schema_version(12)
+
+
+# =============================================================================
+# V13 MIGRATION — human-review corrections (spec Part 17)
+# =============================================================================
+
+def _ensure_v13_migration() -> None:
+    """Tag TM entries written from a human-reviewed correction so they can
+    override the normal insert-if-absent TM behaviour, and keep an audit
+    trail of what was changed."""
+    if _get_schema_version() >= 13:
+        return
+    try:
+        with _db() as conn:
+            existing = _table_columns(conn, "translation_memory")
+            if "source_type" not in existing:
+                conn.execute(
+                    "ALTER TABLE translation_memory ADD COLUMN source_type TEXT DEFAULT 'AUTO'"
+                )
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS manual_correction_log (
+                    id              TEXT PRIMARY KEY,
+                    tm_key          TEXT NOT NULL,
+                    sheet           TEXT DEFAULT '',
+                    row_num         INTEGER,
+                    col_header      TEXT DEFAULT '',
+                    old_translation TEXT DEFAULT '',
+                    new_translation TEXT NOT NULL,
+                    corrected_by    TEXT DEFAULT '',
+                    corrected_at    TEXT NOT NULL
+                )
+            """)
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_manual_correction_tm_key "
+                "ON manual_correction_log(tm_key)"
+            )
+        _set_schema_version(13)
+    except Exception:
+        pass
+
+
+def db_log_manual_correction(
+    tm_key: str, sheet: str, row_num: int | None, col_header: str,
+    old_translation: str, new_translation: str, corrected_by: str = "",
+) -> None:
+    """Audit-log a human-review correction (spec Part 17)."""
+    now = datetime.now().isoformat(timespec="seconds")
+    try:
+        with _db() as conn:
+            conn.execute(
+                """
+                INSERT INTO manual_correction_log
+                    (id, tm_key, sheet, row_num, col_header, old_translation,
+                     new_translation, corrected_by, corrected_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(uuid.uuid4()), tm_key, sheet, row_num, col_header,
+                    old_translation, new_translation, corrected_by, now,
+                ),
+            )
+    except Exception:
+        pass

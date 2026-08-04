@@ -72,6 +72,7 @@ from database import (
     db_get_glossary_audit_log,
     db_glossary_bulk_import,
     db_glossary_get_stats,
+    db_log_manual_correction,
 )
 from intelligence import (
     normalize_text,
@@ -111,7 +112,12 @@ from pipeline import (
     TranslationPlanBuilder,
     TranslationCoverageValidator,
 )
-from engines.french.french_name_compression import ProductNameCompressionEngine
+from engines.french.french_name_engine import (
+    FrenchProductNameEngine,
+    validate_french_name_ending,
+    detect_type_designation,
+    variant_letter_present,
+)
 
 load_dotenv()
 
@@ -882,7 +888,28 @@ def tm_put(tm: dict, source: str, translation: str, col_type: str, target_langua
             "col_type":    col_type,
             "created_at":  datetime.now().isoformat(timespec="seconds"),
             "hit_count":   0,
+            "source_type": "AUTO",
         }
+
+
+def tm_put_human_review(
+    tm: dict, source: str, translation: str, col_type: str, target_language: str = "French",
+) -> str:
+    """Part 17 — the only TM writer allowed to overwrite an existing key.
+    Used exclusively for validated human corrections made in the review-and-
+    edit interface; the normal automatic-translation path always goes
+    through insert-if-absent `tm_put()` and is unaffected by this function.
+    Returns the tm_key written, so callers can also write an audit-log row."""
+    key = _tm_key(source, col_type, target_language)
+    existing_hits = tm["entries"].get(key, {}).get("hit_count", 0)
+    tm["entries"][key] = {
+        "translation": translation,
+        "col_type":    col_type,
+        "created_at":  datetime.now().isoformat(timespec="seconds"),
+        "hit_count":   existing_hits,
+        "source_type": "HUMAN_REVIEW",
+    }
+    return key
 
 
 # =============================================================================
@@ -2988,11 +3015,11 @@ def admin_issue_reports_page():
 # VALIDATION
 # =============================================================================
 
-_NAME_COMPRESSION_ENGINE = ProductNameCompressionEngine()
+_NAME_COMPRESSION_ENGINE = FrenchProductNameEngine()
 
 
 def _gpt_name_compression_fallback(client, token_counter: dict | None = None):
-    """Build a gpt_fallback callable for ProductNameCompressionEngine — used
+    """Build a gpt_fallback callable for FrenchProductNameEngine — used
     only when local rule-based compression still exceeds the limit (rare:
     an unusually long model/product-type combination)."""
 
@@ -3046,26 +3073,39 @@ def _ensure_opt_preserved(source: str, translation: str) -> str:
 
 def validate_product_name(
     name: str,
+    source: str = "",
     client=None,
     token_counter: dict | None = None,
     compression_stats: dict | None = None,
     row_num: int | None = None,
     col_header: str = "name",
+    glossary: dict | None = None,
+    sheet: str = "",
+    article_number: str = "",
+    jira_key: str = "",
 ) -> str:
-    """Enforce the 40-char product name limit via intelligent compression
-    (product type + model name preserved, connectors/accessories trimmed
-    first) instead of blind truncation. `client` enables a GPT rewrite as
-    last resort when local compression alone can't fit the limit.
+    """Single entry point for FR product-name terminology + the 40-char limit
+    (spec Parts 1–11) — delegates to FrenchProductNameEngine, the one
+    authoritative name-processing component. `source` (the German source
+    text) is required to restore terminology GPT sometimes drops entirely
+    (e.g. "Typ A", "opt.") and to verify a source variant/type designation
+    survived compression; when unavailable, the engine degrades gracefully
+    (still enforces the 40-char limit, opt.-duplication and ending rules,
+    just without the source-comparison invariants). `client` enables a GPT
+    rewrite as a last resort when local compression alone can't fit the
+    limit.
 
     When `compression_stats` is given, every compression is recorded; when a
     pass actually discarded information (as opposed to just rewording it),
-    a structured review entry is also recorded — same schema as all_warnings
-    — so it surfaces in the Analysis panel (spec items 4-6)."""
+    a structured review entry is also recorded — same schema as all_warnings,
+    extended with the row/sheet/article/Jira context spec Part 11 asks for."""
     if not name:
         return name
 
     gpt_fallback = _gpt_name_compression_fallback(client, token_counter) if client else None
-    result = _NAME_COMPRESSION_ENGINE.compress(name, limit=40, gpt_fallback=gpt_fallback)
+    result = _NAME_COMPRESSION_ENGINE.process(
+        source, name, limit=40, glossary=glossary, gpt_fallback=gpt_fallback,
+    )
 
     if compression_stats is not None and result.compressed:
         compression_stats["count"] = compression_stats.get("count", 0) + 1
@@ -3091,17 +3131,26 @@ def validate_product_name(
                 if result.removed_segment else
                 "Content was rewritten to fit the limit — verify against the original."
             )
+            severity = SEVERITY_CRITICAL if result.severity == "Critical" else SEVERITY_MEDIUM
             review_entries = compression_stats.setdefault("review_entries", [])
             review_entries.append({
-                "severity":        SEVERITY_MEDIUM,
-                "category":        "Product name compressed — human review recommended",
-                "row":             row_num,
-                "column":          col_header,
-                "original_text":   result.original,
-                "translated_text": result.text,
-                "reason":          f"Product name exceeded the Home24 40-character limit. {removed_note}",
-                "suggested_fix":   "Verify whether the removed information is commercially important before publishing.",
-                "timestamp":       datetime.now().isoformat(timespec="seconds"),
+                "severity":         severity,
+                "category":         "Product name compressed — human review recommended",
+                "row":              row_num,
+                "column":           col_header,
+                "original_text":    source or result.original,
+                "translated_text":  result.text,
+                "reason":           f"{result.reason or ''} {removed_note}".strip(),
+                "suggested_fix":    "Verify whether the removed information is commercially important before publishing.",
+                "timestamp":        datetime.now().isoformat(timespec="seconds"),
+                # Part 11 — extended review-event fields
+                "sheet":            sheet,
+                "article_number":   article_number,
+                "jira_key":         jira_key,
+                "full_translation": result.original,
+                "final_name":       result.text,
+                "removed_concept":  result.removed_concept,
+                "strategy":         result.strategy,
             })
 
     return result.text
@@ -3193,15 +3242,11 @@ def analyze_translation_quality(
             **meta,
         })
 
-    # Product name rules (High)
+    # Product name rules (High) — length is enforced upstream by
+    # FrenchProductNameEngine (validate_product_name) at every resolution
+    # path, so translation here is already guaranteed <=40 chars; only the
+    # comma check remains as a cheap independent sanity net.
     if canonical == "name":
-        if len(translation) > 40:
-            meta = _issue_meta("name_too_long", source, translation)
-            issues.append({
-                "type":   "name_too_long",
-                "reason": f"Exceeds 40 chars ({len(translation)})",
-                **meta,
-            })
         if "," in translation:
             meta = _issue_meta("name_has_comma", source, translation)
             issues.append({
@@ -3688,6 +3733,11 @@ def fix_german_residue(
     target_language: str = "French",
     compression_stats: dict | None = None,
     row_num: int | None = None,
+    source: str = "",
+    glossary: dict | None = None,
+    sheet: str = "",
+    article_number: str = "",
+    jira_key: str = "",
 ) -> str:
     if not text:
         return text
@@ -3765,10 +3815,11 @@ def fix_german_residue(
             token_counter["completion_tokens"] += response.usage.completion_tokens
         corrected = response.choices[0].message.content.strip()
         if column_name == "name":
-            corrected = _ensure_opt_preserved(text, corrected)
+            corrected = _ensure_opt_preserved(source or text, corrected)
             corrected = validate_product_name(
-                corrected, client=client, token_counter=token_counter,
+                corrected, source=source, client=client, token_counter=token_counter,
                 compression_stats=compression_stats, row_num=row_num, col_header=column_name,
+                glossary=glossary, sheet=sheet, article_number=article_number, jira_key=jira_key,
             )
         return corrected
     except Exception:
@@ -4693,6 +4744,31 @@ def _parallel_progress_html(
     """
 
 
+_ARTICLE_NUMBER_HEADER_ALIASES = {
+    "articlenumber", "articlenr", "artnummer", "artnr", "artikelnummer", "artikelnr",
+}
+
+
+def _locate_metadata_columns(worksheet, header_row: int) -> dict:
+    """1-indexed column numbers for articleNumber / Jira Key, if present in
+    this sheet — used to enrich human-review events with row-level context
+    (spec Part 11). Returns {'article_number_idx': int|None, 'jira_key_idx': int|None}."""
+    article_idx = None
+    jira_idx = None
+    max_col = worksheet.max_column or 1
+    for c in range(1, max_col + 1):
+        raw = worksheet.cell(row=header_row, column=c).value
+        if raw is None:
+            continue
+        norm = _normalize_col_header(str(raw))
+        norm_c = norm.replace(" ", "")
+        if article_idx is None and (norm_c in _ARTICLE_NUMBER_HEADER_ALIASES or norm == "article number"):
+            article_idx = c
+        if jira_idx is None and (norm == "jira key" or norm_c == "jirakey"):
+            jira_idx = c
+    return {"article_number_idx": article_idx, "jira_key_idx": jira_idx}
+
+
 def process_excel_with_progress(
     uploaded_file,
     progress_bar,
@@ -4794,6 +4870,23 @@ def process_excel_with_progress(
 
         if not to_translate:
             raise ValueError("No translatable columns found in the file.")
+
+        _meta_cols = _locate_metadata_columns(worksheet, header_row)
+
+        def _validate_name(tr: str, source_text: str, row_num_: int, col_header_: str,
+                            tok_counter: dict | None = None) -> str:
+            art_no = jira = None
+            if _meta_cols["article_number_idx"]:
+                art_no = worksheet.cell(row=row_num_, column=_meta_cols["article_number_idx"]).value
+            if _meta_cols["jira_key_idx"]:
+                jira = worksheet.cell(row=row_num_, column=_meta_cols["jira_key_idx"]).value
+            return validate_product_name(
+                tr, source=source_text, client=client, token_counter=tok_counter or token_counter,
+                compression_stats=name_compression_stats, row_num=row_num_, col_header=col_header_,
+                glossary=glossary, sheet=sheet_name,
+                article_number=str(art_no) if art_no is not None else "",
+                jira_key=str(jira) if jira is not None else "",
+            )
 
         # ws.max_row can still be wrong in some openpyxl versions even without read_only.
         # Compute a reliable upper bound by taking max(ws.max_row, last row with data).
@@ -4911,11 +5004,7 @@ def process_excel_with_progress(
                 if gl_tr is not None:
                     gl_tr = _ensure_opt_preserved(text, gl_tr)
                     if canonical == "name":
-                        gl_tr = validate_product_name(
-                            gl_tr, client=client, token_counter=token_counter,
-                            compression_stats=name_compression_stats,
-                            row_num=row_num, col_header=col_header,
-                        )
+                        gl_tr = _validate_name(gl_tr, text, row_num, col_header)
                     results[(row_num, col_idx)] = gl_tr
                     tm_put(tm, text, gl_tr, col_type, target_language)
                     tie_stats["glossary_only_count"] += 1
@@ -4927,6 +5016,8 @@ def process_excel_with_progress(
                 pat_tr = try_pattern_translation(text, glossary, target_language)
                 if pat_tr is not None:
                     pat_tr = _ensure_opt_preserved(text, pat_tr)
+                    if canonical == "name":
+                        pat_tr = _validate_name(pat_tr, text, row_num, col_header)
                     results[(row_num, col_idx)] = pat_tr
                     tm_put(tm, text, pat_tr, col_type, target_language)
                     tie_stats["pattern_count"]      += 1
@@ -4939,6 +5030,8 @@ def process_excel_with_progress(
                 if sem is not None:
                     sem_tr, _score = sem
                     sem_tr = _ensure_opt_preserved(text, sem_tr)
+                    if canonical == "name":
+                        sem_tr = _validate_name(sem_tr, text, row_num, col_header)
                     results[(row_num, col_idx)] = sem_tr
                     tm_put(tm, text, sem_tr, col_type, target_language)
                     tie_stats["semantic_tm_hits"]   += 1
@@ -5028,11 +5121,7 @@ def process_excel_with_progress(
                 tr = str(result["translations"][i]).strip() if i < len(result["translations"]) else text
                 tr = _ensure_opt_preserved(text, tr)
                 if canonical == "name":
-                    tr = validate_product_name(
-                        tr, client=client, token_counter=token_counter,
-                        compression_stats=name_compression_stats,
-                        row_num=row_num, col_header=col_header,
-                    )
+                    tr = _validate_name(tr, text, row_num, col_header)
                 # Enterprise pipeline: enforce workbook-level consistency
                 tr_enforced = _consistency_mem.enforce(text, canonical, tr)
                 if tr_enforced != tr:
@@ -5173,10 +5262,8 @@ def process_excel_with_progress(
                         if canonical == "name":
                             src_text, _ = source_lookup.get(key, ("", "other"))
                             new_text = _ensure_opt_preserved(src_text, new_text)
-                            new_text = validate_product_name(
-                                new_text, client=client, token_counter=refine_token_c,
-                                compression_stats=name_compression_stats,
-                                row_num=key[0], col_header="name",
+                            new_text = _validate_name(
+                                new_text, src_text, key[0], "name", tok_counter=refine_token_c,
                             )
                             if len(new_text) > max(len(orig_text), 40):
                                 continue
@@ -5415,10 +5502,19 @@ def process_excel_with_progress(
                 continue
 
             # Step 3: AI fix for persistent residue (max 2 attempts, stronger prompt)
+            _src_text, _ = source_lookup.get((row_num, col_idx), ("", "other"))
+            _art_no = _jira = None
+            if _meta_cols["article_number_idx"]:
+                _art_no = worksheet.cell(row=row_num, column=_meta_cols["article_number_idx"]).value
+            if _meta_cols["jira_key_idx"]:
+                _jira = worksheet.cell(row=row_num, column=_meta_cols["jira_key_idx"]).value
             for attempt in range(2):
                 text = fix_german_residue(
                     client, text, canonical, token_counter, target_language,
                     compression_stats=name_compression_stats, row_num=row_num,
+                    source=_src_text, glossary=glossary, sheet=sheet_name,
+                    article_number=str(_art_no) if _art_no is not None else "",
+                    jira_key=str(_jira) if _jira is not None else "",
                 )
                 stats["residue_corrections"] += 1
                 detected = detect_german_residue(text, target_language)
@@ -5660,92 +5756,261 @@ def process_excel_with_progress(
 # REVIEW DASHBOARD
 # =============================================================================
 
-def render_review_dashboard(all_warnings: list, stats: dict, highlight_in_excel: bool):
-    if not all_warnings:
+def _build_review_items(stats: dict) -> list[dict]:
+    """Turn stats['all_warnings'] into deduplicated, stably-IDed review items
+    (spec Part 16 — id = sheet+row+column, never a list index). Multiple
+    warnings on the same cell are merged into one card so the editable
+    review interface never renders two conflicting edit boxes for the same
+    cell."""
+    sheet = stats.get("sheet_name", "")
+    sev_rank = {SEVERITY_CRITICAL: 0, SEVERITY_HIGH: 1, SEVERITY_MEDIUM: 2, SEVERITY_LOW: 3}
+    merged: dict[str, dict] = {}
+    order: list[str] = []
+    for w in stats.get("all_warnings", []):
+        iid = f'{sheet}|{w.get("row", "")}|{w.get("column", "")}'
+        if iid not in merged:
+            merged[iid] = dict(w)
+            merged[iid]["id"] = iid
+            merged[iid]["_reasons"] = [w.get("reason", "")]
+            order.append(iid)
+        else:
+            existing = merged[iid]
+            existing["_reasons"].append(w.get("reason", ""))
+            if sev_rank.get(w.get("severity"), 9) < sev_rank.get(existing.get("severity"), 9):
+                existing["severity"] = w.get("severity")
+            existing["translated_text"] = w.get("translated_text", existing.get("translated_text", ""))
+    items = []
+    for iid in order:
+        it = merged[iid]
+        it["reason"] = " · ".join(dict.fromkeys(r for r in it.pop("_reasons") if r))
+        items.append(it)
+    return items
+
+
+def _live_validate_name_edit(edited: str, source: str, glossary: dict | None) -> tuple[bool, str]:
+    """Part 14 — live validation profile for the 'name' column."""
+    if not edited.strip():
+        return False, "Translation cannot be empty."
+    if len(edited) > 40:
+        return False, f'Exceeds the 40-character limit ({len(edited)} chars).'
+    if "," in edited:
+        return False, "Contains a forbidden comma."
+    if any(ch in edited for ch in "()[]"):
+        return False, "Contains forbidden brackets."
+    ok, reason = validate_french_name_ending(edited)
+    if not ok:
+        return False, f"Invalid ending — {reason}."
+    if source and _OPT_MARKER_RE.search(source) and edited.lower().count("opt.") != 1:
+        return False, 'Source contains "opt." — the translation must contain it exactly once.'
+    letter = detect_type_designation(source) if source else None
+    if letter and not variant_letter_present(edited, letter):
+        return False, f'Source variant "{letter}" is missing from the translation.'
+    residue = detect_german_residue(edited)
+    if residue:
+        return False, f"Possible German word(s) remaining: {', '.join(residue[:3])}."
+    return True, "Valid."
+
+
+def _live_validate_other_edit(edited: str, source: str) -> tuple[bool, str]:
+    """Part 14 — live validation profile for every non-'name' column."""
+    if not edited.strip() and source.strip():
+        return False, "Translation cannot be empty."
+    if source and source.count("<br>") != edited.count("<br>"):
+        return False, f'<br> count changed ({source.count("<br>")} → {edited.count("<br>")}).'
+    residue = detect_german_residue(edited)
+    if residue:
+        return False, f"Possible German word(s) remaining: {', '.join(residue[:3])}."
+    return True, "Valid."
+
+
+def validate_review_edit(edited: str, source: str, column: str, glossary: dict | None = None) -> tuple[bool, str]:
+    if column == "name":
+        return _live_validate_name_edit(edited, source, glossary)
+    return _live_validate_other_edit(edited, source)
+
+
+def render_review_and_edit(review_items: list, manual_edits: dict, glossary: dict | None) -> dict:
+    """Part 12-14 — 'Review and edit translations': replaces the old
+    read-only Warning Details panel. German source is read-only; the French
+    translation is directly editable with immediate validation feedback.
+    Mutates and returns `manual_edits` ({stable_id: edited_text})."""
+    if not review_items:
         st.markdown("""
         <div class="alert alert-success">
             <span class="alert-icon">✓</span>
             <span><strong>No warnings detected.</strong> Translation passed all quality checks.</span>
         </div>
         """, unsafe_allow_html=True)
-        return
+        return manual_edits
 
-    excel_note = (
-        "Critical and High warnings are highlighted yellow in the downloaded Excel."
-        if highlight_in_excel
-        else "Warnings shown here only — Excel highlighting is off (checkbox unchecked)."
+    st.caption(
+        f"{len(review_items)} item(s) need review. German source is read-only — "
+        "edit the French translation directly, validation runs as you type."
     )
-    st.markdown(f"""
-    <div class="alert alert-info">
-        <span class="alert-icon">ℹ</span>
-        <span>{excel_note} Glossary hits never create highlights.</span>
-    </div>
-    """, unsafe_allow_html=True)
+    validation_status = st.session_state.setdefault("review_validation_status", {})
 
-    with st.expander(f"Warning details — {len(all_warnings)} warning(s)", expanded=True):
-        c1, c2, c3, c4 = st.columns([1.4, 1.4, 2, 2])
-        with c1:
-            sev_filter = st.selectbox(
-                "Severity", ["All"] + SEVERITY_ORDER, key="wd_sev"
+    for item in review_items:
+        iid    = item["id"]
+        sev    = item.get("severity", SEVERITY_MEDIUM)
+        header = f'{sev} · Row {item.get("row", "?")} · {item.get("column", "")} — {item.get("reason", "")[:70]}'
+        with st.expander(header, expanded=(sev in (SEVERITY_CRITICAL, SEVERITY_HIGH))):
+            meta_bits = []
+            if item.get("article_number"):
+                meta_bits.append(f'Article: `{item["article_number"]}`')
+            if item.get("jira_key"):
+                meta_bits.append(f'Jira: `{item["jira_key"]}`')
+            if meta_bits:
+                st.caption(" · ".join(meta_bits))
+
+            st.markdown("**German source** (read-only)")
+            st.text_area(
+                "German source", value=item.get("original_text", ""), disabled=True,
+                key=f"src_{iid}", label_visibility="collapsed",
             )
-        with c2:
-            col_opts   = ["All"] + sorted(set(w["column"] for w in all_warnings))
-            col_filter = st.selectbox("Column", col_opts, key="wd_col")
-        with c3:
-            cat_opts   = ["All"] + sorted(set(w["category"] for w in all_warnings))
-            cat_filter = st.selectbox("Category", cat_opts, key="wd_cat")
-        with c4:
-            search = st.text_input("Search in reason / text", placeholder="e.g. Bezug", key="wd_search")
 
-        filtered = all_warnings
-        if sev_filter != "All":
-            filtered = [w for w in filtered if w["severity"] == sev_filter]
-        if col_filter != "All":
-            filtered = [w for w in filtered if w["column"] == col_filter]
-        if cat_filter != "All":
-            filtered = [w for w in filtered if w["category"] == cat_filter]
-        if search:
-            sl = search.lower()
-            filtered = [
-                w for w in filtered
-                if sl in w.get("reason", "").lower()
-                or sl in w.get("original_text", "").lower()
-                or sl in w.get("translated_text", "").lower()
-            ]
-
-        st.caption(f"{len(filtered)} of {len(all_warnings)} warning(s) shown")
-
-        if filtered:
-            rows = [
-                {
-                    "Severity":    w["severity"],
-                    "Category":    w["category"],
-                    "Row":         w["row"],
-                    "Column":      w["column"],
-                    "Reason":      w["reason"],
-                    "Original":    w.get("original_text", "")[:70],
-                    "Translation": w.get("translated_text", "")[:70],
-                    "Suggested Fix": w.get("suggested_fix", ""),
-                }
-                for w in filtered
-            ]
-            st.dataframe(rows, use_container_width=True, hide_index=True)
-
-            csv_buf = StringIO()
-            writer  = csv.DictWriter(csv_buf, fieldnames=[
-                "severity", "category", "row", "column",
-                "original_text", "translated_text", "reason", "suggested_fix",
-            ])
-            writer.writeheader()
-            for w in filtered:
-                writer.writerow({k: w.get(k, "") for k in writer.fieldnames})
-            st.download_button(
-                label="↓ Download warnings as CSV",
-                data=csv_buf.getvalue().encode("utf-8"),
-                file_name="translation_warnings.csv",
-                mime="text/csv",
-                use_container_width=True,
+            st.markdown("**French translation**")
+            current = manual_edits.get(iid, item.get("translated_text", ""))
+            edited = st.text_area(
+                "French translation", value=current, key=f"edit_{iid}", label_visibility="collapsed",
             )
+            manual_edits[iid] = edited
+
+            ok, msg = validate_review_edit(edited, item.get("original_text", ""), item.get("column", ""), glossary)
+            validation_status[iid] = ok
+            if ok:
+                st.success(msg)
+            else:
+                st.error(msg)
+
+    return manual_edits
+
+
+def _looks_like_single_term(text: str) -> bool:
+    """Conservative gate for Part 17's glossary suggestion: only short,
+    punctuation-free, few-word spans look like a clean term-to-term swap
+    rather than a contextual sentence — the glossary must never be polluted
+    with full-sentence corrections."""
+    t = (text or "").strip()
+    if not t or len(t) > 40:
+        return False
+    if any(p in t for p in (".", "!", "?", ";", "<br>")):
+        return False
+    return len(t.split()) <= 3
+
+
+def apply_manual_edits(
+    automatic_workbook_bytes: bytes,
+    sheet_name: str,
+    header_row: int,
+    review_items: list,
+    manual_edits: dict,
+    glossary: dict | None,
+    target_language: str,
+    orig_filename: str,
+    corrected_by: str = "",
+) -> dict:
+    """Parts 15-17 — validate every manual edit, write the valid ones into a
+    *fresh* copy of the automatic workbook (the automatic artifacts are
+    never mutated), regenerate XLSX+CSV, and log accepted full-cell
+    corrections into Translation Memory (source_type=HUMAN_REVIEW, highest
+    trust) plus the audit trail. Invalid edits are reported, never silently
+    applied or dropped."""
+    import io as _io_am
+    from openpyxl import load_workbook as _load_wb_am
+
+    wb = _load_wb_am(_io_am.BytesIO(automatic_workbook_bytes), data_only=False)
+    ws = wb[sheet_name] if sheet_name in wb.sheetnames else wb.active
+    headers = [ws.cell(row=header_row, column=c).value for c in range(1, ws.max_column + 1)]
+    col_idx_by_header = {str(h).strip(): i + 1 for i, h in enumerate(headers) if h is not None}
+
+    tm = load_translation_memory()
+    applied, rejected = [], []
+
+    for item in review_items:
+        iid                  = item["id"]
+        edited               = manual_edits.get(iid)
+        original_translated  = item.get("translated_text", "")
+        if edited is None or edited == original_translated:
+            continue  # untouched — nothing to apply
+
+        column  = item.get("column", "")
+        source  = item.get("original_text", "")
+        row_num = item.get("row")
+        ok, msg = validate_review_edit(edited, source, column, glossary)
+        if not ok:
+            rejected.append({"id": iid, "row": row_num, "column": column, "reason": msg})
+            continue
+
+        col_idx = col_idx_by_header.get(column)
+        if not col_idx or not row_num:
+            rejected.append({
+                "id": iid, "row": row_num, "column": column,
+                "reason": "Could not locate this cell in the workbook.",
+            })
+            continue
+
+        ws.cell(row=row_num, column=col_idx).value = edited
+        applied.append({
+            "id": iid, "row": row_num, "column": column,
+            "source": source, "old": original_translated, "new": edited,
+        })
+
+        # Part 17 — Translation Memory (highest trust) + audit log
+        col_type = _tm_col_type(column)
+        tm_key = tm_put_human_review(tm, source, edited, col_type, target_language)
+        db_log_manual_correction(
+            tm_key, sheet_name, row_num, column, original_translated, edited, corrected_by,
+        )
+
+        # Conservative glossary suggestion — only a clean, short, single-term
+        # swap; never auto-committed, always routed through admin approval.
+        if _looks_like_single_term(source) and _looks_like_single_term(edited):
+            db_save_glossary_suggestions(
+                [{
+                    "term": source,
+                    "occurrences": 1,
+                    "example_context": (
+                        f'Suggested from human-reviewed correction: "{source}" -> "{edited}" '
+                        f"(row {row_num}, {column})."
+                    ),
+                }],
+                job_id=f"manual-review-{sheet_name}",
+                target_language=target_language,
+            )
+
+    save_translation_memory(tm)
+
+    out = BytesIO()
+    wb.save(out)
+    corrected_workbook_bytes = out.getvalue()
+    corrected_csv_bytes, csv_filename, csv_removed_col = generate_csv_export(
+        corrected_workbook_bytes, sheet_name, orig_filename,
+        header_row=header_row, target_language=target_language,
+    )
+
+    return {
+        "corrected_workbook_bytes": corrected_workbook_bytes,
+        "corrected_csv_bytes":      corrected_csv_bytes,
+        "csv_filename":             csv_filename,
+        "csv_removed_col":          csv_removed_col,
+        "applied":                  applied,
+        "rejected":                 rejected,
+    }
+
+
+def compute_quality_gate_status(stats: dict) -> str:
+    """Part 19 — tri-state quality gate derived from stats['all_warnings']:
+    a compressed name needing review is normally 'Passed with review
+    warnings'; a model/type-designation loss, unresolved German, >40 chars
+    or an invalid ending (all tagged Critical by FrenchProductNameEngine's
+    emergency fallback) makes the whole sheet 'Failed due to critical
+    issues'."""
+    warnings = stats.get("all_warnings", [])
+    if any(w.get("severity") == SEVERITY_CRITICAL for w in warnings):
+        return "Failed due to critical issues"
+    if warnings:
+        return "Passed with review warnings"
+    return "Passed"
 
 
 # =============================================================================
@@ -6424,7 +6689,20 @@ def translator_page():
                     "selected_sheet":     selected_sheet,
                     "header_row":         header_row,
                     "orig_filename":      uploaded_file.name,
+                    "target_language":    target_language,
+                    # Parts 15-16 — automatic vs. corrected artifacts, kept
+                    # strictly separate; the automatic pair is never
+                    # overwritten once a manual edit is applied.
+                    "automatic_workbook_bytes": _excel_data,
+                    "automatic_csv_bytes":      _csv_bytes,
+                    "review_items":             _build_review_items(stats),
+                    "manual_edits":             {},
+                    "corrected_workbook_bytes": None,
+                    "corrected_csv_bytes":      None,
+                    "corrected_csv_filename":   None,
+                    "corrected_csv_removed_col": None,
                 }
+                st.session_state["review_validation_status"] = {}
 
             except ValueError as e:
                 st.error(f"Error: {e}")
@@ -6579,8 +6857,12 @@ def translator_page():
 
             # ── Quality Gate ──
             st.markdown('<div class="section-label">Quality Gate</div>', unsafe_allow_html=True)
+            _qg_status = compute_quality_gate_status(_s)
+            _qg_status_icon = {"Passed": "✅", "Passed with review warnings": "⚠️",
+                                "Failed due to critical issues": "⛔"}.get(_qg_status, "ℹ️")
             qg = _s.get("quality_gate", {})
             gate_rows = [
+                (_qg_status_icon, "Overall status", _qg_status),
                 ("✅" if qg.get("no_residue") else "⚠️",
                  "German residue",
                  "Clean" if qg.get("no_residue") else "Residue found — see warnings"),
@@ -6616,9 +6898,62 @@ def translator_page():
             )
             st.markdown(f'<div class="qg">{qg_rows_html}</div>', unsafe_allow_html=True)
 
-            # ── Review Dashboard ──
-            st.markdown('<div class="section-label">Review Dashboard</div>', unsafe_allow_html=True)
-            render_review_dashboard(_s.get("all_warnings", []), _s, _hix)
+            # ── Review and edit translations (Parts 12-14) ──
+            st.markdown('<div class="section-label">Review and edit translations</div>', unsafe_allow_html=True)
+            excel_note = (
+                "Critical and High warnings are highlighted yellow in the downloaded Excel."
+                if _hix
+                else "Warnings shown here only — Excel highlighting is off (checkbox unchecked)."
+            )
+            st.markdown(f"""
+            <div class="alert alert-info">
+                <span class="alert-icon">ℹ</span>
+                <span>{excel_note} Glossary hits never create highlights.</span>
+            </div>
+            """, unsafe_allow_html=True)
+
+            _review_glossary = load_glossary(_r.get("target_language", "French"))
+            _r["manual_edits"] = render_review_and_edit(
+                _r.get("review_items", []), _r.get("manual_edits", {}), _review_glossary,
+            )
+
+            if _r.get("review_items"):
+                _edited_count = sum(
+                    1 for it in _r["review_items"]
+                    if _r["manual_edits"].get(it["id"]) not in (None, it.get("translated_text", ""))
+                )
+                _apply_col, _status_col = st.columns([1, 2])
+                with _apply_col:
+                    _apply_clicked = st.button(
+                        "Apply edits and generate corrected files",
+                        disabled=_edited_count == 0,
+                        use_container_width=True,
+                        key="apply_edits_btn",
+                    )
+                with _status_col:
+                    st.caption(
+                        f"{_edited_count} edited cell(s) ready to apply."
+                        if _edited_count else "No edits yet — edit a French translation above to enable this."
+                    )
+                if _apply_clicked:
+                    _result = apply_manual_edits(
+                        _r["automatic_workbook_bytes"], _ssh, _hdr,
+                        _r["review_items"], _r["manual_edits"], _review_glossary,
+                        _r.get("target_language", "French"), _ofnm,
+                    )
+                    _r["corrected_workbook_bytes"]  = _result["corrected_workbook_bytes"]
+                    _r["corrected_csv_bytes"]       = _result["corrected_csv_bytes"]
+                    _r["corrected_csv_filename"]    = _result["csv_filename"]
+                    _r["corrected_csv_removed_col"] = _result["csv_removed_col"]
+                    if _result["applied"]:
+                        st.success(f'{len(_result["applied"])} correction(s) applied and saved to Translation Memory.')
+                    if _result["rejected"]:
+                        st.error(
+                            f'{len(_result["rejected"])} edit(s) could not be applied — fix and retry:\n\n'
+                            + "\n".join(f'- Row {r["row"]} ({r["column"]}): {r["reason"]}' for r in _result["rejected"])
+                        )
+                    st.session_state["_tr_result"] = _r
+                    st.rerun()
 
             # ── Export Audit ──
             n_orig       = _s.get("original_highlights_preserved", 0)
@@ -6723,10 +7058,11 @@ def translator_page():
 
             if _coverage_clean or _override_checked:
                 if _cb is not None:
+                    st.caption("Option A — automatic translation, exactly as produced (no manual edits applied).")
                     dl_left, dl_right = st.columns(2)
                     with dl_left:
                         st.download_button(
-                            label="↓ Download Excel",
+                            label="↓ Download automatic translation (Excel)",
                             data=_ed,
                             file_name=_ofn,
                             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -6735,13 +7071,38 @@ def translator_page():
                         )
                     with dl_right:
                         st.download_button(
-                            label=f"↓ Download CSV (sans «{_crc}»)",
+                            label=f"↓ Download automatic translation (CSV, sans «{_crc}»)",
                             data=_cb,
                             file_name=_cf,
                             mime="text/csv",
                             use_container_width=True,
                             key="dl_csv_btn",
                         )
+
+                    if _r.get("corrected_workbook_bytes") is not None:
+                        st.markdown("<br>", unsafe_allow_html=True)
+                        st.caption("Option B — corrected translation with your reviewed edits applied.")
+                        dl_left2, dl_right2 = st.columns(2)
+                        _corrected_xlsx_name = "CORRECTED-" + _ofn
+                        with dl_left2:
+                            st.download_button(
+                                label="↓ Download corrected Excel",
+                                data=_r["corrected_workbook_bytes"],
+                                file_name=_corrected_xlsx_name,
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                use_container_width=True,
+                                key="dl_corrected_excel_btn",
+                            )
+                        with dl_right2:
+                            if _r.get("corrected_csv_bytes") is not None:
+                                st.download_button(
+                                    label=f"↓ Download corrected CSV (sans «{_r.get('corrected_csv_removed_col')}»)",
+                                    data=_r["corrected_csv_bytes"],
+                                    file_name=_r.get("corrected_csv_filename") or ("CORRECTED-" + _cf),
+                                    mime="text/csv",
+                                    use_container_width=True,
+                                    key="dl_corrected_csv_btn",
+                                )
                 else:
                     # Name column not found — Excel only + manual CSV column picker
                     _, dl_col, _ = st.columns([1, 2, 1])
