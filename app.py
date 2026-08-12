@@ -6,10 +6,12 @@ Author: Yves Koulle Banga
 """
 
 import streamlit as st
+import streamlit.components.v1 as components
 import os
 import re
 import csv
 import json
+import html
 import uuid
 import copy
 import hmac
@@ -413,7 +415,7 @@ FRENCH_ACCEPTABLE_WORDS = [
     # Textile materials — same word or close cognate acceptable in French output
     "polyester", "polyamide", "viscose", "modacrylique", "polypropylène",
     "coco", "caoutchouc", "latex", "nylon", "sisal", "jute", "chenille",
-    "microfibre", "coton", "laine", "lin", "soie",
+    "microfibre", "coton", "laine", "lin", "soie", "velours",
     # Style/product terms used unchanged
     "set", "bouclé", "boucle",
 ]
@@ -903,20 +905,28 @@ def tm_put(tm: dict, source: str, translation: str, col_type: str, target_langua
 
 def tm_put_human_review(
     tm: dict, source: str, translation: str, col_type: str, target_language: str = "French",
+    corrected_by: str = "", previous_translation: str = "",
 ) -> str:
     """Part 17 — the only TM writer allowed to overwrite an existing key.
     Used exclusively for validated human corrections made in the review-and-
     edit interface; the normal automatic-translation path always goes
     through insert-if-absent `tm_put()` and is unaffected by this function.
-    Returns the tm_key written, so callers can also write an audit-log row."""
+    A human-reviewed entry is self-contained (Part J): confidence=100 and
+    confirmed=True mark it as the highest-trust source, distinguishable from
+    AUTO entries without a join to the audit log. Returns the tm_key
+    written, so callers can also write an audit-log row."""
     key = _tm_key(source, col_type, target_language)
     existing_hits = tm["entries"].get(key, {}).get("hit_count", 0)
     tm["entries"][key] = {
-        "translation": translation,
-        "col_type":    col_type,
-        "created_at":  datetime.now().isoformat(timespec="seconds"),
-        "hit_count":   existing_hits,
-        "source_type": "HUMAN_REVIEW",
+        "translation":           translation,
+        "col_type":              col_type,
+        "created_at":            datetime.now().isoformat(timespec="seconds"),
+        "hit_count":             existing_hits,
+        "source_type":           "HUMAN_REVIEW",
+        "confidence":            100,
+        "confirmed":             True,
+        "corrected_by":          corrected_by,
+        "previous_translation":  previous_translation,
     }
     return key
 
@@ -5805,11 +5815,363 @@ def validate_review_edit(edited: str, source: str, column: str, glossary: dict |
     return True, msg
 
 
-def render_review_and_edit(review_items: list, manual_edits: dict, glossary: dict | None) -> dict:
-    """Part 12-14 — 'Review and edit translations': replaces the old
-    read-only Warning Details panel. German source is read-only; the French
-    translation is directly editable with immediate validation feedback.
-    Mutates and returns `manual_edits` ({stable_id: edited_text})."""
+def _finalize_edit_text(
+    edited: str, source: str, column: str, glossary: dict | None,
+    sheet_name: str, row_num: int | None, target_language: str,
+) -> tuple[str, list[str]]:
+    """Shared authoritative safety+quality pass (Part 19) — re-runs the same
+    product-name/residue/capitalization/typography checks the automatic
+    pipeline used, so neither a live Ctrl+Enter confirmation nor a later
+    file export can regress quality relative to the automatic file. Returns
+    (final_text, residue) — a non-empty residue list means the caller must
+    reject the edit rather than write it anywhere."""
+    final_text = edited
+    if column == "name":
+        final_text = validate_product_name(
+            final_text, source=source, glossary=glossary,
+            col_header=column, sheet=sheet_name, row_num=row_num,
+        )
+    residue = detect_german_residue(final_text, target_language)
+    if residue:
+        return final_text, residue
+    cap_result = _CAPITALIZATION_ENGINE.capitalize(final_text, column, source=source, glossary=glossary)
+    final_text = apply_french_typography_rules(cap_result.text)
+    return final_text, []
+
+
+# =============================================================================
+# CAT-STYLE REVIEW GRID — status classification (Part M)
+# =============================================================================
+
+_CATEGORY_SHORT_CODES: dict[str, str] = {
+    "German residue":                "DE residue",
+    "Missing translation":           "Missing",
+    "API failure":                   "API fail",
+    "Batch output mismatch":         "Batch",
+    "Formatting issue":              "<br> mismatch",
+    "Product name rule violation":   "40 chars",
+    "Glossary inconsistency":        "Glossary",
+    "Naming convention violation":   "opt. lost",
+    "Suspicious translation length": "Length",
+    "Possible hallucination":        "Hallucination",
+    "Capitalization":                "Caps",
+    "Manual review recommended":     "Review",
+}
+
+
+def _short_category_code(category: str) -> str:
+    """Part L — compact status-column label; the full reason stays available
+    on hover/click, this is just the scannable version."""
+    if category in _CATEGORY_SHORT_CODES:
+        return _CATEGORY_SHORT_CODES[category]
+    category = (category or "Review").strip()
+    return category if len(category) <= 14 else category[:13] + "…"
+
+
+# Reuses the admin dashboard's severity palette (_SEVERITY_BADGE, defined
+# above) so the review grid and the admin views read as one visual system.
+_STATUS_STYLES: dict[str, str] = {
+    "confirmed": "background:#DCFCE7;color:#166534;border:1px solid #BBF7D0;",
+    "edited":    "background:#DBEAFE;color:#1E40AF;border:1px solid #BFDBFE;",
+    "critical":  _SEVERITY_BADGE["Critical"],
+    "high":      _SEVERITY_BADGE["High"],
+    "medium":    _SEVERITY_BADGE["Medium"],
+    "low":       _SEVERITY_BADGE["Low"],
+}
+
+
+def _segment_status(item: dict, manual_edits: dict, confirmed_ids: set) -> dict:
+    """Part M/P — one review row's compact status. Confirmed beats Edited
+    beats the original severity, since a reviewer's own decision always
+    wins over the AI's original flag. `unresolved` drives the 'Unresolved'
+    filter and Ctrl+↑/↓ navigation."""
+    iid = item["id"]
+    if iid in confirmed_ids:
+        return {"code": "confirmed", "icon": "✓", "label": "Confirmed",
+                "style": _STATUS_STYLES["confirmed"], "unresolved": False}
+    if manual_edits.get(iid) not in (None, item.get("translated_text", "")):
+        return {"code": "edited", "icon": "✎", "label": "Edited",
+                "style": _STATUS_STYLES["edited"], "unresolved": True}
+    sev  = item.get("severity", SEVERITY_MEDIUM)
+    code = sev.lower()
+    icon = "✕" if sev == SEVERITY_CRITICAL else "⚠"
+    return {"code": code, "icon": icon, "label": sev,
+            "style": _STATUS_STYLES.get(code, _STATUS_STYLES["medium"]), "unresolved": True}
+
+
+# =============================================================================
+# CAT-STYLE REVIEW GRID — confirm + propagate (Parts C/D/H/J/K)
+# =============================================================================
+
+def confirm_segment(
+    item: dict,
+    edited_text: str,
+    review_items: list,
+    manual_edits: dict,
+    confirmed_ids: set,
+    glossary: dict | None,
+    target_language: str,
+    sheet_name: str,
+    corrected_by: str,
+    tm: dict,
+) -> dict:
+    """The single save checkpoint (Part C/J), triggered by Ctrl+Enter or the
+    grid's fallback confirm icon — never by a bare edit. On success: the
+    text is validated + finalized, written into `manual_edits`, saved to
+    Translation Memory (source_type=HUMAN_REVIEW, confidence=100) + the
+    audit log, optionally proposed as a glossary update, and taught to the
+    rest of the file via HumanCorrectionPropagationEngine. SAFE/HIGH matches
+    are written automatically (same finalize pass, same TM/audit trail);
+    MEDIUM/LOW are only returned for the interactive apply/review/ignore
+    panel. Mutates `manual_edits`/`confirmed_ids`/`tm` in place — the caller
+    persists `tm` to disk and reruns Streamlit."""
+    iid     = item["id"]
+    source  = item.get("original_text", "")
+    column  = item.get("column", "")
+    row_num = item.get("row")
+
+    ok, msg = validate_review_edit(edited_text, source, column, glossary)
+    if not ok:
+        return {"ok": False, "reason": msg}
+
+    final_text, residue = _finalize_edit_text(
+        edited_text, source, column, glossary, sheet_name, row_num, target_language,
+    )
+    if residue:
+        return {"ok": False, "reason": f"German residue remains after edit: {', '.join(residue[:3])}."}
+
+    original_translated = item.get("translated_text", "")
+    col_type = _tm_col_type(column)
+    tm_key = tm_put_human_review(
+        tm, source, final_text, col_type, target_language,
+        corrected_by=corrected_by, previous_translation=original_translated,
+    )
+    db_log_manual_correction(tm_key, sheet_name, row_num, column, original_translated, final_text, corrected_by)
+
+    glossary_suggestion = suggest_glossary_update(source, original_translated, final_text)
+    if glossary_suggestion:
+        db_save_glossary_suggestions(
+            [{
+                "term": glossary_suggestion["source_term"],
+                "occurrences": 1,
+                "example_context": f'{glossary_suggestion["reason"]} (row {row_num}, {column}).',
+            }],
+            job_id=f"manual-review-{sheet_name}",
+            target_language=target_language,
+        )
+
+    prev_self_edit      = manual_edits.get(iid)
+    prev_self_confirmed = iid in confirmed_ids
+    manual_edits[iid] = final_text
+    confirmed_ids.add(iid)
+    undo_batch = [{"id": iid, "prev_manual_edit": prev_self_edit, "prev_confirmed": prev_self_confirmed}]
+
+    corrected_row = {
+        "id": iid, "column": column, "source": source,
+        "target_old": original_translated, "target_new": final_text,
+    }
+    other_rows = [
+        {
+            "id": it["id"], "column": it.get("column", ""),
+            "source": it.get("original_text", ""),
+            "target_old": manual_edits.get(it["id"], it.get("translated_text", "")),
+            "confirmed": it["id"] in confirmed_ids,
+        }
+        for it in review_items if it["id"] != iid
+    ]
+    analysis = _PROPAGATION_ENGINE.analyze(corrected_row, other_rows)
+    item_by_id = {it["id"]: it for it in review_items}
+
+    propagated = []
+    for match in analysis.auto_apply:
+        target_item = item_by_id.get(match.row_id)
+        if not target_item:
+            continue
+        p_final, p_residue = _finalize_edit_text(
+            match.proposed_target, target_item.get("original_text", ""), target_item.get("column", ""),
+            glossary, sheet_name, target_item.get("row"), target_language,
+        )
+        if p_residue:
+            continue  # never write a propagated cell that fails the same safety gate a direct edit would
+
+        undo_batch.append({
+            "id": match.row_id,
+            "prev_manual_edit": manual_edits.get(match.row_id),
+            "prev_confirmed": match.row_id in confirmed_ids,
+        })
+        manual_edits[match.row_id] = p_final
+        confirmed_ids.add(match.row_id)
+
+        propagated_by = f"{corrected_by} (auto-propagated from row {row_num})".strip()
+        p_col_type = _tm_col_type(target_item.get("column", ""))
+        p_tm_key = tm_put_human_review(
+            tm, target_item.get("original_text", ""), p_final, p_col_type, target_language,
+            corrected_by=propagated_by, previous_translation=target_item.get("translated_text", ""),
+        )
+        db_log_manual_correction(
+            p_tm_key, sheet_name, target_item.get("row"), target_item.get("column", ""),
+            target_item.get("translated_text", ""), p_final, propagated_by,
+        )
+        propagated.append({
+            "id": match.row_id, "row": target_item.get("row"), "column": target_item.get("column", ""),
+            "confidence": match.confidence, "reason": match.reason, "proposed_target": p_final,
+        })
+
+    def _match_dicts(matches):
+        return [
+            {
+                "id": m.row_id, "row": item_by_id.get(m.row_id, {}).get("row"),
+                "column": item_by_id.get(m.row_id, {}).get("column", ""),
+                "confidence": m.confidence, "reason": m.reason, "proposed_target": m.proposed_target,
+            }
+            for m in matches
+        ]
+
+    return {
+        "ok": True, "id": iid, "row": row_num, "final_text": final_text,
+        "propagated": propagated, "medium": _match_dicts(analysis.medium),
+        "low": _match_dicts(analysis.low), "undo_batch": undo_batch,
+    }
+
+
+def apply_propagation_matches(
+    matches: list[dict],
+    review_items: list,
+    manual_edits: dict,
+    confirmed_ids: set,
+    glossary: dict | None,
+    target_language: str,
+    sheet_name: str,
+    corrected_by: str,
+    tm: dict,
+) -> list[dict]:
+    """Part H/I/Q — the explicit 'Apply all' / per-row 'Apply' action for
+    MEDIUM/LOW propagation matches surfaced by `confirm_segment`. Same
+    finalize+TM+audit steps, just triggered by the reviewer instead of
+    running automatically. Returns entries shaped like `confirm_segment`'s
+    `undo_batch` (id/prev_manual_edit/prev_confirmed) so the same 'Undo last
+    propagation' control works for both paths."""
+    item_by_id = {it["id"]: it for it in review_items}
+    undo_batch = []
+    for match in matches:
+        target_item = item_by_id.get(match["id"])
+        if not target_item:
+            continue
+        p_final, p_residue = _finalize_edit_text(
+            match["proposed_target"], target_item.get("original_text", ""), target_item.get("column", ""),
+            glossary, sheet_name, target_item.get("row"), target_language,
+        )
+        if p_residue:
+            continue
+
+        undo_batch.append({
+            "id": match["id"],
+            "prev_manual_edit": manual_edits.get(match["id"]),
+            "prev_confirmed": match["id"] in confirmed_ids,
+        })
+        manual_edits[match["id"]] = p_final
+        confirmed_ids.add(match["id"])
+
+        reviewed_by = f"{corrected_by} (propagation review)".strip()
+        p_col_type = _tm_col_type(target_item.get("column", ""))
+        p_tm_key = tm_put_human_review(
+            tm, target_item.get("original_text", ""), p_final, p_col_type, target_language,
+            corrected_by=reviewed_by, previous_translation=target_item.get("translated_text", ""),
+        )
+        db_log_manual_correction(
+            p_tm_key, sheet_name, target_item.get("row"), target_item.get("column", ""),
+            target_item.get("translated_text", ""), p_final, reviewed_by,
+        )
+    return undo_batch
+
+
+def undo_propagation_batch(batch: list[dict], manual_edits: dict, confirmed_ids: set) -> None:
+    """Part X.7 — restore `manual_edits`/`confirmed_ids` to their state
+    before a propagation batch (from `confirm_segment` or
+    `apply_propagation_matches`) was applied. `prev_manual_edit is None`
+    unambiguously means "the row had no edit yet" — every value this
+    module ever writes into `manual_edits` is a non-empty string."""
+    for entry in batch:
+        if entry["prev_manual_edit"] is None:
+            manual_edits.pop(entry["id"], None)
+        else:
+            manual_edits[entry["id"]] = entry["prev_manual_edit"]
+        if entry["prev_confirmed"]:
+            confirmed_ids.add(entry["id"])
+        else:
+            confirmed_ids.discard(entry["id"])
+
+
+# =============================================================================
+# CAT-STYLE REVIEW GRID — dense HTML/JS grid (Parts A/B/L/N/O/W)
+# =============================================================================
+
+_CAT_GRID_COMPONENT = components.declare_component(
+    "home24_cat_grid", path=os.path.join(os.path.dirname(__file__), "components", "cat_grid"),
+)
+
+
+def _build_cat_grid_rows(page_items: list, manual_edits: dict, confirmed_ids: set) -> list[dict]:
+    """Pure data builder for the CAT grid component — no Streamlit calls, so
+    it's directly unit-testable. The actual markup lives in
+    components/cat_grid/index.html (a hand-rolled Streamlit component, not
+    st.components.v1.html — see render_cat_review_grid's docstring for why
+    a plain display-only iframe can't reliably signal Ctrl+Enter back to
+    Python). Kept deliberately framework-free per Part V: no external grid
+    library, cheap enough that a few hundred rows render fine client-side
+    without true virtualization (Part W)."""
+    rows = []
+    for item in page_items:
+        iid    = item["id"]
+        status = _segment_status(item, manual_edits, confirmed_ids)
+        target = manual_edits.get(iid, item.get("translated_text", ""))
+        code   = _short_category_code(item.get("category", item.get("reason", "")))
+
+        title_lines = [item.get("category") or "Review", ""]
+        if item.get("reason"):
+            title_lines.append(f'Reason: {item["reason"]}')
+        if item.get("suggested_fix"):
+            title_lines.append(f'Suggested fix: {item["suggested_fix"]}')
+        title_lines.append(f'Excel row: {item.get("row", "?")} · Column: {item.get("column", "")}')
+        if item.get("article_number"):
+            title_lines.append(f'Article: {item["article_number"]}')
+        if item.get("jira_key"):
+            title_lines.append(f'Jira: {item["jira_key"]}')
+
+        rows.append({
+            "id": iid, "row": item.get("row", "?"), "source": item.get("original_text", ""),
+            "target": target, "icon": status["icon"], "code": code, "style": status["style"],
+            "unresolved": status["unresolved"], "title": "\n".join(title_lines),
+        })
+    return rows
+
+
+def render_cat_review_grid(
+    review_items: list,
+    manual_edits: dict,
+    confirmed_ids: set,
+    glossary: dict | None,
+    target_language: str,
+    sheet_name: str,
+    corrected_by: str,
+    tm_cache: dict,
+) -> None:
+    """Part A-Q, Y — the dense, keyboard-driven CAT review workspace that
+    replaces the old one-expander-per-warning layout. German source and
+    French target sit side-by-side; the French cell is inline-editable;
+    Ctrl+Enter (or the in-grid ✓ icon) confirms a segment, which saves it to
+    TM and teaches the rest of the file via `confirm_segment`. Mutates
+    `manual_edits`/`confirmed_ids`/`tm_cache` in place.
+
+    Uses a real Streamlit component (components/cat_grid/index.html,
+    declared via `components.declare_component`) rather than a plain
+    `st.components.v1.html` display iframe. An earlier version tried to
+    signal Ctrl+Enter back to Python by writing into a hidden st.text_input
+    and synthesizing a DOM 'Enter' keydown to commit it — that updates the
+    input's own value locally but Streamlit's frontend never treats a
+    JS-dispatched (untrusted) event as a commit, so nothing was ever sent to
+    the backend. `Streamlit.setComponentValue` (the postMessage protocol a
+    declared component's frontend calls) is the actual supported channel."""
     if not review_items:
         st.markdown("""
         <div class="alert alert-success">
@@ -5817,48 +6179,192 @@ def render_review_and_edit(review_items: list, manual_edits: dict, glossary: dic
             <span><strong>No warnings detected.</strong> Translation passed all quality checks.</span>
         </div>
         """, unsafe_allow_html=True)
-        return manual_edits
+        return
 
+    n_confirmed = sum(1 for it in review_items if it["id"] in confirmed_ids)
     st.caption(
-        f"{len(review_items)} item(s) need review. German source is read-only — "
-        "edit the French translation directly, validation runs as you type."
+        f"{len(review_items)} segment(s) · {n_confirmed} confirmed. Click a French cell, edit it, "
+        "press Ctrl+Enter (Cmd+Enter on macOS) to confirm — or click the ✓ next to the status."
     )
-    validation_status = st.session_state.setdefault("review_validation_status", {})
 
-    for item in review_items:
-        iid    = item["id"]
-        sev    = item.get("severity", SEVERITY_MEDIUM)
-        header = f'{sev} · Row {item.get("row", "?")} · {item.get("column", "")} — {item.get("reason", "")[:70]}'
-        with st.expander(header, expanded=(sev in (SEVERITY_CRITICAL, SEVERITY_HIGH))):
-            meta_bits = []
-            if item.get("article_number"):
-                meta_bits.append(f'Article: `{item["article_number"]}`')
-            if item.get("jira_key"):
-                meta_bits.append(f'Jira: `{item["jira_key"]}`')
-            if meta_bits:
-                st.caption(" · ".join(meta_bits))
+    filter_mode = st.radio(
+        "Filter", ["All", "Unresolved", "Edited", "Confirmed", "Critical", "Warnings"],
+        horizontal=True, key="cat_filter", label_visibility="collapsed",
+    )
 
-            st.markdown("**German source** (read-only)")
-            st.text_area(
-                "German source", value=item.get("original_text", ""), disabled=True,
-                key=f"src_{iid}", label_visibility="collapsed",
+    def _matches_filter(it):
+        status = _segment_status(it, manual_edits, confirmed_ids)
+        if filter_mode == "All":
+            return True
+        if filter_mode == "Unresolved":
+            return status["unresolved"]
+        if filter_mode == "Edited":
+            return status["code"] == "edited"
+        if filter_mode == "Confirmed":
+            return status["code"] == "confirmed"
+        if filter_mode == "Critical":
+            return it.get("severity") == SEVERITY_CRITICAL
+        if filter_mode == "Warnings":
+            return it.get("severity") in (SEVERITY_HIGH, SEVERITY_MEDIUM, SEVERITY_LOW)
+        return True
+
+    filtered = [it for it in review_items if _matches_filter(it)]
+
+    # Part W — bound worst-case DOM size with pagination instead of true
+    # virtualization: reliable and maintainable, no extra dependency.
+    page_size = 150
+    page_items = filtered
+    if len(filtered) > page_size:
+        n_pages = (len(filtered) - 1) // page_size + 1
+        page = st.session_state.setdefault("cat_page", 1)
+        page = max(1, min(page, n_pages))
+        pcol1, pcol2, pcol3 = st.columns([1, 2, 1])
+        with pcol1:
+            if st.button("← Previous page", disabled=page <= 1, key="cat_page_prev"):
+                st.session_state["cat_page"] = page - 1
+                st.rerun()
+        with pcol2:
+            st.caption(f"Page {page} of {n_pages} ({len(filtered)} segment(s) in this filter)")
+        with pcol3:
+            if st.button("Next page →", disabled=page >= n_pages, key="cat_page_next"):
+                st.session_state["cat_page"] = page + 1
+                st.rerun()
+        start = (page - 1) * page_size
+        page_items = filtered[start:start + page_size]
+
+    if not page_items:
+        st.info("No segments match this filter.")
+        payload = None
+    else:
+        active_id = st.session_state.pop("cat_active_id", None)
+        rows = _build_cat_grid_rows(page_items, manual_edits, confirmed_ids)
+        payload = _CAT_GRID_COMPONENT(rows=rows, active_id=active_id, key="cat_grid_component", default=None)
+
+    # `payload` is whatever the component's JS last called
+    # Streamlit.setComponentValue({id, text, nonce}) with — a nonce so the
+    # exact same correction confirmed twice in a row is still detected as
+    # a new event, since Streamlit only re-delivers a component's value
+    # when it changes.
+    if payload and payload.get("id") and payload.get("nonce") != st.session_state.get("cat_bridge_seen"):
+        st.session_state["cat_bridge_seen"] = payload.get("nonce")
+        item_by_id = {it["id"]: it for it in review_items}
+        item = item_by_id.get(payload["id"])
+        if item is not None:
+            result = confirm_segment(
+                item, payload.get("text", ""), review_items, manual_edits, confirmed_ids,
+                glossary, target_language, sheet_name, corrected_by, tm_cache,
             )
-
-            st.markdown("**French translation**")
-            current = manual_edits.get(iid, item.get("translated_text", ""))
-            edited = st.text_area(
-                "French translation", value=current, key=f"edit_{iid}", label_visibility="collapsed",
-            )
-            manual_edits[iid] = edited
-
-            ok, msg = validate_review_edit(edited, item.get("original_text", ""), item.get("column", ""), glossary)
-            validation_status[iid] = ok
-            if ok:
-                st.success(msg)
+            save_translation_memory(tm_cache)
+            if result["ok"]:
+                st.session_state["cat_last_message"] = {
+                    "ok": True, "row": result["row"], "propagated": result["propagated"],
+                }
+                st.session_state["_last_propagation_batch"] = result["undo_batch"]
+                st.session_state["pending_medium"] = result["medium"] + result["low"]
+                # Advance to the next unresolved segment (Part O).
+                remaining_unresolved = [
+                    it["id"] for it in review_items
+                    if it["id"] != payload["id"] and _segment_status(it, manual_edits, confirmed_ids)["unresolved"]
+                ]
+                if remaining_unresolved:
+                    st.session_state["cat_active_id"] = remaining_unresolved[0]
             else:
-                st.error(msg)
+                st.session_state["cat_last_message"] = {"ok": False, "reason": result["reason"]}
+        st.rerun()
 
-    return manual_edits
+    last_msg = st.session_state.pop("cat_last_message", None)
+    if last_msg:
+        if last_msg["ok"]:
+            if last_msg["propagated"]:
+                st.success(
+                    f'Row {last_msg["row"]} confirmed. {len(last_msg["propagated"])} similar row(s) '
+                    "updated automatically."
+                )
+            else:
+                st.success(f'Row {last_msg["row"]} confirmed.')
+        else:
+            st.error(f'Could not confirm — {last_msg["reason"]}')
+
+    # Part H/I/Q — MEDIUM/LOW propagation matches from the most recent
+    # confirmation: never auto-applied, always an explicit reviewer decision.
+    pending = st.session_state.get("pending_medium") or []
+    if pending:
+        st.markdown(
+            f'<div class="alert alert-info"><span class="alert-icon">ℹ</span>'
+            f'<span>{len(pending)} similar segment(s) were <b>not</b> changed automatically — '
+            "apply the same correction to them?</span></div>",
+            unsafe_allow_html=True,
+        )
+        ap_col, ig_col = st.columns(2)
+        with ap_col:
+            if st.button("Apply all", key="prop_apply_all", use_container_width=True):
+                undo = apply_propagation_matches(
+                    pending, review_items, manual_edits, confirmed_ids,
+                    glossary, target_language, sheet_name, corrected_by, tm_cache,
+                )
+                save_translation_memory(tm_cache)
+                st.session_state["_last_propagation_batch"] = undo
+                st.session_state["pending_medium"] = []
+                st.success(f"{len(undo)} segment(s) updated.")
+                st.rerun()
+        with ig_col:
+            if st.button("Ignore", key="prop_ignore_all", use_container_width=True):
+                st.session_state["pending_medium"] = []
+                st.rerun()
+        with st.expander(f"Review {len(pending)} match(es) individually"):
+            for m in pending:
+                rc1, rc2, rc3 = st.columns([3, 1, 1])
+                with rc1:
+                    st.caption(
+                        f'Row {m["row"]} ({m["column"]}), {m["confidence"].lower()} confidence — '
+                        f'{m["reason"]}. Proposed: "{m["proposed_target"]}"'
+                    )
+                with rc2:
+                    if st.button("Apply", key=f'prop_apply_{m["id"]}'):
+                        undo = apply_propagation_matches(
+                            [m], review_items, manual_edits, confirmed_ids,
+                            glossary, target_language, sheet_name, corrected_by, tm_cache,
+                        )
+                        save_translation_memory(tm_cache)
+                        st.session_state["_last_propagation_batch"] = undo
+                        st.session_state["pending_medium"] = [x for x in pending if x["id"] != m["id"]]
+                        st.rerun()
+                with rc3:
+                    if st.button("Ignore", key=f'prop_ignore_{m["id"]}'):
+                        st.session_state["pending_medium"] = [x for x in pending if x["id"] != m["id"]]
+                        st.rerun()
+
+    # Part X.7 — undo the last propagation batch (automatic or explicit)
+    # before generating the corrected file.
+    last_batch = st.session_state.get("_last_propagation_batch") or []
+    if last_batch:
+        if st.button(f"↺ Undo last propagation ({len(last_batch)} row(s))", key="undo_last_prop"):
+            undo_propagation_batch(last_batch, manual_edits, confirmed_ids)
+            st.session_state["_last_propagation_batch"] = []
+            st.rerun()
+
+    # Part K — conservative glossary-learning suggestions, admin-approved.
+    pending_glossary = db_load_glossary_suggestions(target_language, status="pending")
+    pending_glossary = [g for g in pending_glossary if g.get("job_id") == f"manual-review-{sheet_name}"]
+    if pending_glossary:
+        with st.expander(f"Suggested glossary updates ({len(pending_glossary)})"):
+            for sug in pending_glossary:
+                gc1, gc2, gc3 = st.columns([3, 1, 1])
+                with gc1:
+                    st.caption(f'**{sug["term"]}** — {sug.get("example_context", "")}')
+                with gc2:
+                    if st.button("Approve", key=f'gloss_approve_{sug["id"]}'):
+                        new_term_match = re.search(r'->\s*"([^"]+)"', sug.get("example_context", ""))
+                        if new_term_match:
+                            approved_glossary = load_glossary(target_language)
+                            approved_glossary.setdefault("terms", {})[sug["term"]] = new_term_match.group(1)
+                            save_glossary(approved_glossary, target_language)
+                        db_update_suggestion_status(sug["id"], "accepted")
+                        st.rerun()
+                with gc3:
+                    if st.button("Dismiss", key=f'gloss_dismiss_{sug["id"]}'):
+                        db_update_suggestion_status(sug["id"], "rejected")
+                        st.rerun()
 
 
 def apply_manual_edits(
@@ -5872,12 +6378,13 @@ def apply_manual_edits(
     orig_filename: str,
     corrected_by: str = "",
 ) -> dict:
-    """Parts 15-17 — validate every manual edit, write the valid ones into a
-    *fresh* copy of the automatic workbook (the automatic artifacts are
-    never mutated), regenerate XLSX+CSV, and log accepted full-cell
-    corrections into Translation Memory (source_type=HUMAN_REVIEW, highest
-    trust) plus the audit trail. Invalid edits are reported, never silently
-    applied or dropped."""
+    """Parts 15-17/T — materializes whatever is currently in `manual_edits`
+    into a *fresh* copy of the automatic workbook (the automatic artifacts
+    are never mutated) and regenerates XLSX+CSV. TM/audit/propagation
+    already happened per-segment at confirm time (`confirm_segment`) —
+    this function only writes cells and, as a safety net, finalizes any
+    edited-but-never-confirmed text for the first time (idempotent for
+    already-confirmed rows, since `_finalize_edit_text` is deterministic)."""
     import io as _io_am
     from openpyxl import load_workbook as _load_wb_am
 
@@ -5886,7 +6393,6 @@ def apply_manual_edits(
     headers = [ws.cell(row=header_row, column=c).value for c in range(1, ws.max_column + 1)]
     col_idx_by_header = {str(h).strip(): i + 1 for i, h in enumerate(headers) if h is not None}
 
-    tm = load_translation_memory()
     applied, rejected = [], []
 
     for item in review_items:
@@ -5899,10 +6405,6 @@ def apply_manual_edits(
         column  = item.get("column", "")
         source  = item.get("original_text", "")
         row_num = item.get("row")
-        ok, msg = validate_review_edit(edited, source, column, glossary)
-        if not ok:
-            rejected.append({"id": iid, "row": row_num, "column": column, "reason": msg})
-            continue
 
         col_idx = col_idx_by_header.get(column)
         if not col_idx or not row_num:
@@ -5912,133 +6414,21 @@ def apply_manual_edits(
             })
             continue
 
-        # Re-run the same authoritative passes the automatic pipeline used
-        # (Part 19) so corrected files never regress residue/capitalization/
-        # product-name quality relative to the automatic file. This only
-        # touches `wb` — a fresh in-memory copy loaded above — so
-        # automatic_workbook_bytes stays byte-for-byte untouched. The TM/
-        # audit record further below keeps the reviewer's literal `edited`
-        # text; only the exported cell value goes through this pass.
-        final_text = edited
-        if column == "name":
-            final_text = validate_product_name(
-                final_text, source=source, glossary=glossary,
-                col_header=column, sheet=sheet_name, row_num=row_num,
-            )
-        residue = detect_german_residue(final_text, target_language)
+        final_text, residue = _finalize_edit_text(
+            edited, source, column, glossary, sheet_name, row_num, target_language,
+        )
         if residue:
             rejected.append({
                 "id": iid, "row": row_num, "column": column,
                 "reason": f"German residue remains after edit: {', '.join(residue[:3])}.",
             })
             continue
-        cap_result = _CAPITALIZATION_ENGINE.capitalize(final_text, column, source=source, glossary=glossary)
-        final_text = apply_french_typography_rules(cap_result.text)
 
         ws.cell(row=row_num, column=col_idx).value = final_text
         applied.append({
             "id": iid, "row": row_num, "column": column,
             "source": source, "old": original_translated, "new": final_text,
         })
-
-        # Part 17 — Translation Memory (highest trust) + audit log
-        col_type = _tm_col_type(column)
-        tm_key = tm_put_human_review(tm, source, edited, col_type, target_language)
-        db_log_manual_correction(
-            tm_key, sheet_name, row_num, column, original_translated, edited, corrected_by,
-        )
-
-        # Conservative glossary suggestion — only a clean, short, single-term
-        # swap; never auto-committed, always routed through admin approval.
-        glossary_suggestion = suggest_glossary_update(source, original_translated, edited)
-        if glossary_suggestion:
-            db_save_glossary_suggestions(
-                [{
-                    "term": glossary_suggestion["source_term"],
-                    "occurrences": 1,
-                    "example_context": f'{glossary_suggestion["reason"]} (row {row_num}, {column}).',
-                }],
-                job_id=f"manual-review-{sheet_name}",
-                target_language=target_language,
-            )
-
-    # Human-correction propagation (Part D/H) — one accepted edit teaches
-    # every *other* row still in this batch, not just its own cell. SAFE
-    # (identical source) and HIGH (same pattern, only a recognized
-    # protected variable differs) are safe enough to write automatically;
-    # MEDIUM/LOW are only ever reported back for the reviewer to act on by
-    # hand — never written to the workbook. Rows the reviewer directly
-    # edited in this same batch are "confirmed" and are never overwritten
-    # by a propagated suggestion (their own deliberate choice always wins).
-    directly_edited_ids = {a["id"] for a in applied}
-    current_text = {it["id"]: it.get("translated_text", "") for it in review_items}
-    current_text.update({a["id"]: a["new"] for a in applied})
-    item_by_id = {it["id"]: it for it in review_items}
-
-    propagated, propagation_suggestions = [], []
-    for a in applied:  # snapshot — a propagated write never itself re-propagates
-        corrected_row = {
-            "id": a["id"], "column": a["column"], "source": a["source"],
-            "target_old": a["old"], "target_new": a["new"],
-        }
-        other_rows = [
-            {
-                "id": it["id"], "column": it.get("column", ""),
-                "source": it.get("original_text", ""),
-                "target_old": current_text.get(it["id"], it.get("translated_text", "")),
-                "confirmed": it["id"] in directly_edited_ids,
-            }
-            for it in review_items if it["id"] != a["id"]
-        ]
-        analysis = _PROPAGATION_ENGINE.analyze(corrected_row, other_rows)
-
-        for match in analysis.auto_apply:
-            target_item = item_by_id.get(match.row_id)
-            p_row_num = target_item.get("row") if target_item else None
-            p_column  = target_item.get("column", "") if target_item else ""
-            p_col_idx = col_idx_by_header.get(p_column)
-            if not target_item or not p_col_idx or not p_row_num:
-                continue
-            p_text = match.proposed_target
-            if p_column == "name":
-                p_text = validate_product_name(
-                    p_text, source=target_item.get("original_text", ""), glossary=glossary,
-                    col_header=p_column, sheet=sheet_name, row_num=p_row_num,
-                )
-            if detect_german_residue(p_text, target_language):
-                continue  # same safety gate a direct edit would have to pass — never write a bad propagated cell
-            p_text = apply_french_typography_rules(p_text)
-
-            ws.cell(row=p_row_num, column=p_col_idx).value = p_text
-            current_text[match.row_id] = p_text
-            propagated.append({
-                "id": match.row_id, "row": p_row_num, "column": p_column,
-                "confidence": match.confidence, "reason": match.reason,
-                "propagated_from_row": a["row"],
-            })
-
-            p_col_type = _tm_col_type(p_column)
-            p_tm_key = tm_put_human_review(
-                tm, target_item.get("original_text", ""), p_text, p_col_type, target_language,
-            )
-            db_log_manual_correction(
-                p_tm_key, sheet_name, p_row_num, p_column,
-                target_item.get("translated_text", ""), p_text,
-                f"{corrected_by} (auto-propagated from row {a['row']})".strip(),
-            )
-
-        for match in analysis.medium + analysis.low:
-            target_item = item_by_id.get(match.row_id)
-            propagation_suggestions.append({
-                "row": target_item.get("row") if target_item else None,
-                "column": target_item.get("column", "") if target_item else a["column"],
-                "confidence": match.confidence,
-                "reason": match.reason,
-                "proposed_target": match.proposed_target,
-                "propagated_from_row": a["row"],
-            })
-
-    save_translation_memory(tm)
 
     out = BytesIO()
     wb.save(out)
@@ -6049,14 +6439,12 @@ def apply_manual_edits(
     )
 
     return {
-        "corrected_workbook_bytes":  corrected_workbook_bytes,
-        "corrected_csv_bytes":       corrected_csv_bytes,
-        "csv_filename":              csv_filename,
-        "csv_removed_col":           csv_removed_col,
-        "applied":                   applied,
-        "rejected":                  rejected,
-        "propagated":                propagated,
-        "propagation_suggestions":   propagation_suggestions,
+        "corrected_workbook_bytes": corrected_workbook_bytes,
+        "corrected_csv_bytes":      corrected_csv_bytes,
+        "csv_filename":             csv_filename,
+        "csv_removed_col":          csv_removed_col,
+        "applied":                  applied,
+        "rejected":                 rejected,
     }
 
 
@@ -6975,63 +7363,58 @@ def translator_page():
             """, unsafe_allow_html=True)
 
             _review_glossary = load_glossary(_r.get("target_language", "French"))
-            _r["manual_edits"] = render_review_and_edit(
-                _r.get("review_items", []), _r.get("manual_edits", {}), _review_glossary,
+            _r.setdefault("manual_edits", {})
+            _r.setdefault("confirmed_ids", set())
+            if _r.get("_tm_cache") is None:
+                _r["_tm_cache"] = load_translation_memory()  # loaded once per session, written-through per confirm
+            render_cat_review_grid(
+                _r.get("review_items", []), _r["manual_edits"], _r["confirmed_ids"],
+                _review_glossary, _r.get("target_language", "French"), _ssh,
+                st.session_state.get("user_email", ""), _r["_tm_cache"],
             )
 
             if _r.get("review_items"):
-                _edited_count = sum(
+                _confirmed_count = len(_r["confirmed_ids"])
+                _unconfirmed_edited = sum(
                     1 for it in _r["review_items"]
-                    if _r["manual_edits"].get(it["id"]) not in (None, it.get("translated_text", ""))
+                    if it["id"] not in _r["confirmed_ids"]
+                    and _r["manual_edits"].get(it["id"]) not in (None, it.get("translated_text", ""))
                 )
                 _apply_col, _status_col = st.columns([1, 2])
                 with _apply_col:
                     _apply_clicked = st.button(
                         "Apply edits and generate corrected files",
-                        disabled=_edited_count == 0,
+                        disabled=(_confirmed_count == 0 and _unconfirmed_edited == 0),
                         use_container_width=True,
                         key="apply_edits_btn",
                     )
                 with _status_col:
+                    _status_bits = []
+                    if _confirmed_count:
+                        _status_bits.append(f"{_confirmed_count} confirmed")
+                    if _unconfirmed_edited:
+                        _status_bits.append(f"{_unconfirmed_edited} edited but not yet confirmed")
                     st.caption(
-                        f"{_edited_count} edited cell(s) ready to apply."
-                        if _edited_count else "No edits yet — edit a French translation above to enable this."
+                        " · ".join(_status_bits) + " — ready to include in the corrected file."
+                        if _status_bits else
+                        "No edits yet — edit a French translation above and press Ctrl+Enter to confirm."
                     )
                 if _apply_clicked:
                     _result = apply_manual_edits(
                         _r["automatic_workbook_bytes"], _ssh, _hdr,
                         _r["review_items"], _r["manual_edits"], _review_glossary,
                         _r.get("target_language", "French"), _ofnm,
+                        corrected_by=st.session_state.get("user_email", ""),
                     )
                     _r["corrected_workbook_bytes"]  = _result["corrected_workbook_bytes"]
                     _r["corrected_csv_bytes"]       = _result["corrected_csv_bytes"]
                     _r["corrected_csv_filename"]    = _result["csv_filename"]
                     _r["corrected_csv_removed_col"] = _result["csv_removed_col"]
                     if _result["applied"]:
-                        st.success(f'{len(_result["applied"])} correction(s) applied and saved to Translation Memory.')
-                    if _result["propagated"]:
-                        st.info(
-                            f'{len(_result["propagated"])} other row(s) updated automatically from these '
-                            "corrections (identical source, or only a model/quantity/dimension differed):\n\n"
-                            + "\n".join(
-                                f'- Row {p["row"]} ({p["column"]}), {p["confidence"].lower()} confidence — '
-                                f'{p["reason"]} (from row {p["propagated_from_row"]})'
-                                for p in _result["propagated"]
-                            )
+                        st.success(
+                            f'{len(_result["applied"])} correction(s) written to the corrected file '
+                            f'({_confirmed_count} confirmed via Ctrl+Enter, already saved to Translation Memory).'
                         )
-                    if _result["propagation_suggestions"]:
-                        st.markdown(
-                            f'<div class="alert alert-info"><span class="alert-icon">ℹ</span>'
-                            f'<span>{len(_result["propagation_suggestions"])} similar row(s) were <b>not</b> '
-                            "changed automatically — review manually if the same fix applies:</span></div>",
-                            unsafe_allow_html=True,
-                        )
-                        for s in _result["propagation_suggestions"]:
-                            st.caption(
-                                f'Row {s["row"]} ({s["column"]}), {s["confidence"].lower()} confidence — '
-                                f'{s["reason"]} (from row {s["propagated_from_row"]}). '
-                                f'Proposed: "{s["proposed_target"]}"'
-                            )
                     if _result["rejected"]:
                         st.error(
                             f'{len(_result["rejected"])} edit(s) could not be applied — fix and retry:\n\n'
