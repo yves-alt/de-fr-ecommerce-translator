@@ -11,7 +11,16 @@
               border-bottom: 1px solid #E8ECF2; font-size: 11px; font-weight: 700;
               text-transform: uppercase; letter-spacing: 0.04em; color: #6B7A99; }
   .cat-head > div { padding: 8px 10px; }
-  .cat-body { max-height: 60vh; overflow-y: auto; overflow-x: hidden; }
+  /* Fixed px, not vh: this stylesheet lives inside the component's own
+     iframe, and setFrameHeight() below measures document.documentElement.
+     scrollHeight to size that same iframe from the outside. A vh value
+     here is relative to the iframe's current height — exactly the value
+     we're trying to compute — so it never grows past whatever the iframe
+     happened to start at (one row). A fixed max-height breaks that
+     circular dependency: content can grow up to this many px regardless
+     of the iframe's current size, and setFrameHeight() then reports the
+     real total. */
+  .cat-body { max-height: 600px; overflow-y: auto; overflow-x: hidden; }
   .cat-row { display: grid; grid-template-columns: 6% 41% 12% 41%;
              border-bottom: 1px solid #F0F3F8; min-height: 34px; }
   .cat-row.alt { background: #FAFBFD; }
