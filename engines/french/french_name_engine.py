@@ -13,6 +13,9 @@ import re
 from dataclasses import dataclass
 from enum import Enum
 
+# Shared protected-token registry — see PROTECTED_MODEL_NAMES usage below.
+from engines.french.capitalization_engine import PROTECTED_MODEL_NAMES
+
 
 DEFAULT_LIMIT = 40
 
@@ -62,11 +65,9 @@ _PRODUCT_TYPES_SORTED = sorted(PRODUCT_TYPES, key=len, reverse=True)
 
 # Model names are almost never in a fixed list — detected by capitalization.
 # This set only forces the classification for names we already know about.
-KNOWN_MODELS = {
-    "Sam", "Forrest", "Paku", "Malia", "Levin", "Nordic", "Vedene", "Arin",
-    "Bocca", "Level36", "Asely", "Entry", "Cosy", "Firenze",
-    "Boston", "Ossy", "Hudson", "Scout",
-}
+# Single source of truth shared with the capitalization engine (which also
+# uses it to restore correct casing on protected model/brand names).
+KNOWN_MODELS = PROTECTED_MODEL_NAMES
 
 # Capitalized-looking words that are NOT model names — descriptive adjectives,
 # materials and colors that GPT sometimes capitalizes.

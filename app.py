@@ -118,6 +118,11 @@ from engines.french.french_name_engine import (
     detect_type_designation,
     variant_letter_present,
 )
+from engines.french.capitalization_engine import (
+    FrenchCapitalizationEngine,
+    validate_french_capitalization,
+    auto_fix_protected_casing,
+)
 
 load_dotenv()
 
@@ -1049,6 +1054,30 @@ def _issue_meta(issue_type: str, source: str, translation: str) -> dict:
             "severity":      SEVERITY_MEDIUM,
             "category":      "Possible hallucination",
             "suggested_fix": "Review carefully — unexpected content may have been generated",
+        }
+    if issue_type == "cap_protected_token_altered":
+        return {
+            "severity":      SEVERITY_CRITICAL,
+            "category":      "Capitalization",
+            "suggested_fix": "Restore the protected term's canonical casing (e.g. MDF, LED, USB-C).",
+        }
+    if issue_type in ("cap_lowercase_label_start", "cap_lowercase_sentence_start"):
+        return {
+            "severity":      SEVERITY_HIGH,
+            "category":      "Capitalization",
+            "suggested_fix": "Capitalize the first letter of this label/sentence.",
+        }
+    if issue_type == "cap_value_after_colon_upper":
+        return {
+            "severity":      SEVERITY_MEDIUM,
+            "category":      "Capitalization",
+            "suggested_fix": "Lowercase the value after ':' unless it is a proper name or acronym.",
+        }
+    if issue_type in ("cap_slash_forced_title", "cap_cosmetic_spacing"):
+        return {
+            "severity":      SEVERITY_LOW,
+            "category":      "Capitalization",
+            "suggested_fix": "Cosmetic capitalization normalization.",
         }
     return {
         "severity":      SEVERITY_LOW,
@@ -3016,6 +3045,7 @@ def admin_issue_reports_page():
 # =============================================================================
 
 _NAME_COMPRESSION_ENGINE = FrenchProductNameEngine()
+_CAPITALIZATION_ENGINE = FrenchCapitalizationEngine()
 
 
 def _gpt_name_compression_fallback(client, token_counter: dict | None = None):
@@ -3979,129 +4009,9 @@ def _refinement_progress_html(sheet: str, done: int, total: int) -> str:
 # =============================================================================
 # FRENCH CAPITALIZATION ENGINE
 # =============================================================================
-
-# Known product/collection names whose capitalisation must be preserved
-_KNOWN_BRANDS: frozenset[str] = frozenset({
-    "Arin", "Bocca", "Level36", "Sonoma", "Loft", "Scandi",
-    "Asely", "Vedene", "Lano", "Bori", "Nalo", "Veda",
-})
-
-# Split on <br> tags (case-insensitive), preserving the tag in the result
-_CAP_BR_RE = re.compile(r"(<br\s*/?>)", re.IGNORECASE)
-
-# Capitalized word immediately following a percentage → needs lowercasing
-_CAP_PERCENT_LOWER_RE = re.compile(
-    r"(\d+\s*%)\s+([A-ZÉÀÈÙÂÊÎÔÛËÏÜÇŒÆ][a-zéàèùâêîôûëïüçœæA-ZÉÀÈÙÂÊÎÔÛËÏÜÇŒÆA-zA-Z]*)",
-    re.UNICODE,
-)
-
-# Two words around a bare '/' with no surrounding spaces — structural separator
-# Minimum 3 chars per side; matches any case so cap_first handles normalisation
-_CAP_SLASH_RE = re.compile(
-    r"([a-zA-Zéàèùâêîôûëïüçœæ][a-zA-Zéàèùâêîôûëïüçœæ'’\-]{2,})"
-    r"/"
-    r"([a-zA-Zéàèùâêîôûëïüçœæ][a-zA-Zéàèùâêîôûëïüçœæ'’\-]{2,})",
-    re.UNICODE,
-)
-
-
-def _cap_first(s: str) -> str:
-    """Capitalize the first alphabetic character of s only when s starts with a letter.
-
-    Skips when the segment begins with a digit or symbol (e.g. "100% polyester",
-    "60% coton/lin") to avoid re-capitalising words that follow percentages.
-    """
-    stripped = s.lstrip()
-    if not stripped or not stripped[0].isalpha():
-        return s
-    for i, ch in enumerate(s):
-        if ch.isalpha():
-            return s[:i] + ch.upper() + s[i + 1:]
-    return s
-
-
-def _apply_slash_caps(segment: str) -> str:
-    """Capitalise both sides of structural '/' separators within a text segment."""
-    def repl(m: re.Match) -> str:
-        # Skip if a percentage figure appears before this slash in the same segment
-        # (material composition context: "60% polyester/coton")
-        if re.search(r"\d+\s*%", segment[: m.start()]):
-            return m.group(0)
-        return _cap_first(m.group(1)) + "/" + _cap_first(m.group(2))
-
-    return _CAP_SLASH_RE.sub(repl, segment)
-
-
-def _apply_percent_lowercase(segment: str) -> str:
-    """Lowercase a capitalised word that immediately follows a percentage figure."""
-    return _CAP_PERCENT_LOWER_RE.sub(
-        lambda m: m.group(1) + " " + m.group(2)[0].lower() + m.group(2)[1:],
-        segment,
-    )
-
-
-def _restore_brand_caps(text: str) -> str:
-    """Re-apply correct capitalisation for known product/brand names."""
-    for brand in _KNOWN_BRANDS:
-        text = re.sub(
-            r"\b" + re.escape(brand) + r"\b",
-            brand,
-            text,
-            flags=re.IGNORECASE | re.UNICODE,
-        )
-    return text
-
-
-def apply_french_capitalization_rules(
-    text: str, canonical: str, glossary: dict | None = None
-) -> str:
-    """Apply French e-commerce capitalisation rules to a translated cell value.
-
-    Execution order per segment (between <br> tags):
-      1. Structural '/' caps  — before start-cap so both sides get processed
-      2. Percentage lowercase — "100% Polyester" → "100% polyester"
-      3. Start-of-segment cap — always capitalise the first alphabetic character
-      4. Known brand restore  — re-capitalise brand/model names anywhere in text
-
-    Rules honoured:
-    - Capitalise start of text + each <br>-delimited segment
-    - Capitalise both words around a structural '/' (not inside % compositions)
-    - Never capitalise after ':' (French convention)
-    - Lowercase fibre/material words immediately following a percentage
-    - Preserve HTML <br> tags, numbers, dimensions, and glossary terms
-    - Restore known product/brand names to their canonical capitalisation
-    """
-    if not text or not text.strip():
-        return text
-
-    parts = _CAP_BR_RE.split(text)
-    result: list[str] = []
-    capitalize_next = True  # first segment always gets a capital start
-
-    for part in parts:
-        if _CAP_BR_RE.match(part):
-            result.append("<br>")
-            capitalize_next = True
-            continue
-        if not part:
-            result.append(part)
-            continue
-
-        # Step 1: structural slash caps (before start-cap avoids missed right-side words)
-        part = _apply_slash_caps(part)
-        # Step 2: percentage lowercase
-        part = _apply_percent_lowercase(part)
-        # Step 3: capitalise start of segment
-        if capitalize_next and part.strip():
-            part = _cap_first(part)
-            capitalize_next = False
-        # Step 4: restore brand names
-        part = _restore_brand_caps(part)
-        result.append(part)
-
-    return "".join(result)
-
-
+# The authoritative implementation lives in
+# engines/french/capitalization_engine.py (_CAPITALIZATION_ENGINE, imported
+# above) — column-aware, context-aware, and no longer a blanket regex pass.
 
 # When the LLM replaces those <br> with " ; " I restore them — but ONLY when
 # the source itself had <br>, so natural semicolons in source text are kept.
@@ -5609,7 +5519,11 @@ def process_excel_with_progress(
         stats["review_count"]       = len(all_warnings)
 
         # ── Final capitalisation / formatting pass ────────────────────────────
+        # Runs last, after glossary/TM/GPT/residue-fix/product-name-compression
+        # text has already been written to every cell — the single
+        # authoritative capitalization sweep (engines/french/capitalization_engine.py).
         if target_language == "French":
+            ts_cap = datetime.now().isoformat(timespec="seconds")
             for row_num in range(data_start_row, worksheet.max_row + 1):
                 for col_header, (col_idx, canonical) in to_translate.items():
                     cell = worksheet.cell(row=row_num, column=col_idx)
@@ -5620,9 +5534,49 @@ def process_excel_with_progress(
                             if _fc > 0:
                                 stats["forbidden_corrections"] += _fc
                         val = apply_french_semantic_normalization(val)
-                        val = apply_french_capitalization_rules(val, canonical, glossary)
+                        src_text, _ = source_lookup.get((row_num, col_idx), ("", "other"))
+                        cap_result = _CAPITALIZATION_ENGINE.capitalize(
+                            val, canonical, source=src_text, glossary=glossary,
+                        )
+                        val = cap_result.text
                         val = apply_french_typography_rules(val)
                         cell.value = val
+
+                        for issue in validate_french_capitalization(val, canonical, source=src_text):
+                            # _issue_meta maps the issue type to the app's own
+                            # Critical/High/Medium/Low scale — the engine's
+                            # own Critical/Warning/Info severities (issue["severity"])
+                            # are informational only and not reused here, so
+                            # capitalization warnings sort/filter/badge
+                            # identically to every other warning category.
+                            meta = _issue_meta(issue["type"], src_text, val)
+                            all_warnings.append({
+                                **meta,
+                                "row":             row_num,
+                                "column":          col_header,
+                                "original_text":   src_text[:120],
+                                "translated_text": val[:120],
+                                "reason":          issue["reason"],
+                                "timestamp":       ts_cap,
+                            })
+
+            # Unconditional recompute — capitalization warnings must be
+            # visible even when enable_final_qa is off below (that block's
+            # own recompute is conditional on the flag).
+            _crit = sum(1 for w in all_warnings if w["severity"] == SEVERITY_CRITICAL)
+            _high = sum(1 for w in all_warnings if w["severity"] == SEVERITY_HIGH)
+            _med  = sum(1 for w in all_warnings if w["severity"] == SEVERITY_MEDIUM)
+            _low  = sum(1 for w in all_warnings if w["severity"] == SEVERITY_LOW)
+            from collections import Counter as _CapCounter
+            _cat_counts = _CapCounter(w["category"] for w in all_warnings)
+            stats["all_warnings"]       = all_warnings
+            stats["critical_warnings"]  = _crit
+            stats["high_warnings"]      = _high
+            stats["medium_warnings"]    = _med
+            stats["low_warnings"]       = _low
+            stats["quality_score"]      = compute_quality_score(all_warnings)
+            stats["warning_categories"] = dict(_cat_counts)
+            stats["review_count"]       = len(all_warnings)
 
         # ── Phase 5: Final QA — full-file local scan ──────────────────────────
         if enable_final_qa:
@@ -5825,8 +5779,25 @@ def _live_validate_other_edit(edited: str, source: str) -> tuple[bool, str]:
 
 def validate_review_edit(edited: str, source: str, column: str, glossary: dict | None = None) -> tuple[bool, str]:
     if column == "name":
-        return _live_validate_name_edit(edited, source, glossary)
-    return _live_validate_other_edit(edited, source)
+        ok, msg = _live_validate_name_edit(edited, source, glossary)
+    else:
+        ok, msg = _live_validate_other_edit(edited, source)
+    if not ok:
+        return ok, msg
+
+    # Capitalization check (Part 20) — non-destructive. A protected model/
+    # acronym casing defect blocks the edit like any other rule violation;
+    # a stylistic label/sentence/colon casing gap never blocks, it only adds
+    # a visible suggestion so the reviewer stays in control of their edit.
+    cap_issues = validate_french_capitalization(edited, column, source=source, glossary=glossary)
+    critical_cap = [i for i in cap_issues if i["severity"] == "Critical"]
+    if critical_cap:
+        return False, f"Capitalization: {critical_cap[0]['reason']}"
+    if cap_issues:
+        suggestion = _CAPITALIZATION_ENGINE.capitalize(edited, column, source=source, glossary=glossary)
+        if suggestion.changed:
+            msg += f' (Suggestion: capitalization could be "{suggestion.text}")'
+    return True, msg
 
 
 def render_review_and_edit(review_items: list, manual_edits: dict, glossary: dict | None) -> dict:
@@ -5949,10 +5920,33 @@ def apply_manual_edits(
             })
             continue
 
-        ws.cell(row=row_num, column=col_idx).value = edited
+        # Re-run the same authoritative passes the automatic pipeline used
+        # (Part 19) so corrected files never regress residue/capitalization/
+        # product-name quality relative to the automatic file. This only
+        # touches `wb` — a fresh in-memory copy loaded above — so
+        # automatic_workbook_bytes stays byte-for-byte untouched. The TM/
+        # audit record further below keeps the reviewer's literal `edited`
+        # text; only the exported cell value goes through this pass.
+        final_text = edited
+        if column == "name":
+            final_text = validate_product_name(
+                final_text, source=source, glossary=glossary,
+                col_header=column, sheet=sheet_name, row_num=row_num,
+            )
+        residue = detect_german_residue(final_text, target_language)
+        if residue:
+            rejected.append({
+                "id": iid, "row": row_num, "column": column,
+                "reason": f"German residue remains after edit: {', '.join(residue[:3])}.",
+            })
+            continue
+        cap_result = _CAPITALIZATION_ENGINE.capitalize(final_text, column, source=source, glossary=glossary)
+        final_text = apply_french_typography_rules(cap_result.text)
+
+        ws.cell(row=row_num, column=col_idx).value = final_text
         applied.append({
             "id": iid, "row": row_num, "column": column,
-            "source": source, "old": original_translated, "new": edited,
+            "source": source, "old": original_translated, "new": final_text,
         })
 
         # Part 17 — Translation Memory (highest trust) + audit log
