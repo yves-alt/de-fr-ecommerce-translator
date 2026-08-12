@@ -123,6 +123,10 @@ from engines.french.capitalization_engine import (
     validate_french_capitalization,
     auto_fix_protected_casing,
 )
+from engines.french.propagation_engine import (
+    HumanCorrectionPropagationEngine,
+    suggest_glossary_update,
+)
 
 load_dotenv()
 
@@ -3046,6 +3050,7 @@ def admin_issue_reports_page():
 
 _NAME_COMPRESSION_ENGINE = FrenchProductNameEngine()
 _CAPITALIZATION_ENGINE = FrenchCapitalizationEngine()
+_PROPAGATION_ENGINE = HumanCorrectionPropagationEngine(_CAPITALIZATION_ENGINE)
 
 
 def _gpt_name_compression_fallback(client, token_counter: dict | None = None):
@@ -5856,19 +5861,6 @@ def render_review_and_edit(review_items: list, manual_edits: dict, glossary: dic
     return manual_edits
 
 
-def _looks_like_single_term(text: str) -> bool:
-    """Conservative gate for Part 17's glossary suggestion: only short,
-    punctuation-free, few-word spans look like a clean term-to-term swap
-    rather than a contextual sentence — the glossary must never be polluted
-    with full-sentence corrections."""
-    t = (text or "").strip()
-    if not t or len(t) > 40:
-        return False
-    if any(p in t for p in (".", "!", "?", ";", "<br>")):
-        return False
-    return len(t.split()) <= 3
-
-
 def apply_manual_edits(
     automatic_workbook_bytes: bytes,
     sheet_name: str,
@@ -5958,19 +5950,93 @@ def apply_manual_edits(
 
         # Conservative glossary suggestion — only a clean, short, single-term
         # swap; never auto-committed, always routed through admin approval.
-        if _looks_like_single_term(source) and _looks_like_single_term(edited):
+        glossary_suggestion = suggest_glossary_update(source, original_translated, edited)
+        if glossary_suggestion:
             db_save_glossary_suggestions(
                 [{
-                    "term": source,
+                    "term": glossary_suggestion["source_term"],
                     "occurrences": 1,
-                    "example_context": (
-                        f'Suggested from human-reviewed correction: "{source}" -> "{edited}" '
-                        f"(row {row_num}, {column})."
-                    ),
+                    "example_context": f'{glossary_suggestion["reason"]} (row {row_num}, {column}).',
                 }],
                 job_id=f"manual-review-{sheet_name}",
                 target_language=target_language,
             )
+
+    # Human-correction propagation (Part D/H) — one accepted edit teaches
+    # every *other* row still in this batch, not just its own cell. SAFE
+    # (identical source) and HIGH (same pattern, only a recognized
+    # protected variable differs) are safe enough to write automatically;
+    # MEDIUM/LOW are only ever reported back for the reviewer to act on by
+    # hand — never written to the workbook. Rows the reviewer directly
+    # edited in this same batch are "confirmed" and are never overwritten
+    # by a propagated suggestion (their own deliberate choice always wins).
+    directly_edited_ids = {a["id"] for a in applied}
+    current_text = {it["id"]: it.get("translated_text", "") for it in review_items}
+    current_text.update({a["id"]: a["new"] for a in applied})
+    item_by_id = {it["id"]: it for it in review_items}
+
+    propagated, propagation_suggestions = [], []
+    for a in applied:  # snapshot — a propagated write never itself re-propagates
+        corrected_row = {
+            "id": a["id"], "column": a["column"], "source": a["source"],
+            "target_old": a["old"], "target_new": a["new"],
+        }
+        other_rows = [
+            {
+                "id": it["id"], "column": it.get("column", ""),
+                "source": it.get("original_text", ""),
+                "target_old": current_text.get(it["id"], it.get("translated_text", "")),
+                "confirmed": it["id"] in directly_edited_ids,
+            }
+            for it in review_items if it["id"] != a["id"]
+        ]
+        analysis = _PROPAGATION_ENGINE.analyze(corrected_row, other_rows)
+
+        for match in analysis.auto_apply:
+            target_item = item_by_id.get(match.row_id)
+            p_row_num = target_item.get("row") if target_item else None
+            p_column  = target_item.get("column", "") if target_item else ""
+            p_col_idx = col_idx_by_header.get(p_column)
+            if not target_item or not p_col_idx or not p_row_num:
+                continue
+            p_text = match.proposed_target
+            if p_column == "name":
+                p_text = validate_product_name(
+                    p_text, source=target_item.get("original_text", ""), glossary=glossary,
+                    col_header=p_column, sheet=sheet_name, row_num=p_row_num,
+                )
+            if detect_german_residue(p_text, target_language):
+                continue  # same safety gate a direct edit would have to pass — never write a bad propagated cell
+            p_text = apply_french_typography_rules(p_text)
+
+            ws.cell(row=p_row_num, column=p_col_idx).value = p_text
+            current_text[match.row_id] = p_text
+            propagated.append({
+                "id": match.row_id, "row": p_row_num, "column": p_column,
+                "confidence": match.confidence, "reason": match.reason,
+                "propagated_from_row": a["row"],
+            })
+
+            p_col_type = _tm_col_type(p_column)
+            p_tm_key = tm_put_human_review(
+                tm, target_item.get("original_text", ""), p_text, p_col_type, target_language,
+            )
+            db_log_manual_correction(
+                p_tm_key, sheet_name, p_row_num, p_column,
+                target_item.get("translated_text", ""), p_text,
+                f"{corrected_by} (auto-propagated from row {a['row']})".strip(),
+            )
+
+        for match in analysis.medium + analysis.low:
+            target_item = item_by_id.get(match.row_id)
+            propagation_suggestions.append({
+                "row": target_item.get("row") if target_item else None,
+                "column": target_item.get("column", "") if target_item else a["column"],
+                "confidence": match.confidence,
+                "reason": match.reason,
+                "proposed_target": match.proposed_target,
+                "propagated_from_row": a["row"],
+            })
 
     save_translation_memory(tm)
 
@@ -5983,12 +6049,14 @@ def apply_manual_edits(
     )
 
     return {
-        "corrected_workbook_bytes": corrected_workbook_bytes,
-        "corrected_csv_bytes":      corrected_csv_bytes,
-        "csv_filename":             csv_filename,
-        "csv_removed_col":          csv_removed_col,
-        "applied":                  applied,
-        "rejected":                 rejected,
+        "corrected_workbook_bytes":  corrected_workbook_bytes,
+        "corrected_csv_bytes":       corrected_csv_bytes,
+        "csv_filename":              csv_filename,
+        "csv_removed_col":           csv_removed_col,
+        "applied":                   applied,
+        "rejected":                  rejected,
+        "propagated":                propagated,
+        "propagation_suggestions":   propagation_suggestions,
     }
 
 
@@ -6941,6 +7009,29 @@ def translator_page():
                     _r["corrected_csv_removed_col"] = _result["csv_removed_col"]
                     if _result["applied"]:
                         st.success(f'{len(_result["applied"])} correction(s) applied and saved to Translation Memory.')
+                    if _result["propagated"]:
+                        st.info(
+                            f'{len(_result["propagated"])} other row(s) updated automatically from these '
+                            "corrections (identical source, or only a model/quantity/dimension differed):\n\n"
+                            + "\n".join(
+                                f'- Row {p["row"]} ({p["column"]}), {p["confidence"].lower()} confidence — '
+                                f'{p["reason"]} (from row {p["propagated_from_row"]})'
+                                for p in _result["propagated"]
+                            )
+                        )
+                    if _result["propagation_suggestions"]:
+                        st.markdown(
+                            f'<div class="alert alert-info"><span class="alert-icon">ℹ</span>'
+                            f'<span>{len(_result["propagation_suggestions"])} similar row(s) were <b>not</b> '
+                            "changed automatically — review manually if the same fix applies:</span></div>",
+                            unsafe_allow_html=True,
+                        )
+                        for s in _result["propagation_suggestions"]:
+                            st.caption(
+                                f'Row {s["row"]} ({s["column"]}), {s["confidence"].lower()} confidence — '
+                                f'{s["reason"]} (from row {s["propagated_from_row"]}). '
+                                f'Proposed: "{s["proposed_target"]}"'
+                            )
                     if _result["rejected"]:
                         st.error(
                             f'{len(_result["rejected"])} edit(s) could not be applied — fix and retry:\n\n'
