@@ -178,19 +178,49 @@ def build_variable_template(source_a: str, source_b: str):
     return pairs or None  # empty pairs means the sources were identical — caller handles that as exact match
 
 
+def _match_case(token: str, style: str) -> str:
+    """Re-case `token` (a variable value from the *other* row's German
+    source, e.g. "LEDO") to match the casing style actually found in the
+    human-corrected target (`style`, e.g. "Paku") — so a correction that
+    also fixes a protected variable's casing still propagates with the
+    corrected casing rather than the source's raw spelling. Tokens with no
+    case-bearing letters (dimensions, quantities) or mixed/ambiguous
+    casing are returned unchanged — nothing to transfer either way."""
+    letters = [c for c in style if c.isalpha()]
+    if not letters:
+        return token
+    if all(c.isupper() for c in letters):
+        return token.upper()
+    if style[:1].isupper() and style[1:].islower():
+        return token[:1].upper() + token[1:].lower()
+    if all(c.islower() for c in letters):
+        return token.lower()
+    return token
+
+
 def apply_variable_template(target_new: str, template: list[tuple[str, str, str]]) -> str | None:
     """Substitute each corrected row's variable value with the candidate
-    row's own value inside the human-corrected target text. Returns None
-    (never guess) if a value can't be located unambiguously — those cases
-    fall back to a LOW suggestion rather than a silent wrong edit."""
+    row's own value inside the human-corrected target text. Matches
+    case-insensitively and on a whole-word boundary — a correction may
+    fix the variable's casing along the way (e.g. "PAKU" -> "Paku", which
+    the capitalization engine itself can require), so a literal
+    case-sensitive search for the source's exact spelling would silently
+    fail to find it — and re-cases the substituted value to match
+    whatever casing style was actually found, via `_match_case`, rather
+    than blindly reusing the source-side spelling. Returns None (never
+    guess) if a value can't be located unambiguously — those cases fall
+    back to a LOW suggestion rather than a silent wrong edit."""
     result = target_new
     for _cat, val_a, val_b in template:
         bare_a = val_a.strip(".,;:()")
-        occurrences = [m for m in re.finditer(re.escape(bare_a), result)]
+        bare_b = val_b.strip(".,;:()")
+        pattern = re.compile(r'\b' + re.escape(bare_a) + r'\b', re.IGNORECASE)
+        occurrences = list(pattern.finditer(result))
         if len(occurrences) != 1:
             return None
         m = occurrences[0]
-        result = result[:m.start()] + val_b.strip(".,;:()") + result[m.end():]
+        replacement = _match_case(bare_b, m.group(0))
+        result = result[:m.start()] + replacement + result[m.end():]
     return result
 
 

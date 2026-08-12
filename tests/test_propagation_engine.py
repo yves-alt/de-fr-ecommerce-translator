@@ -102,6 +102,34 @@ class TestModelSafePatternPropagation:
         result = apply_variable_template("Chaise à accoudoirs pivotante EVIRA 2er-Set", template)
         assert result == "Chaise à accoudoirs pivotante NOVA 2er-Set"
 
+    def test_apply_template_matches_even_when_correction_also_fixed_casing(self):
+        """Regression: a human correction that both fixes wording and
+        title-cases an all-caps German model spelling (e.g. "PAKU" ->
+        "Paku", which the capitalization engine itself can require) must
+        still propagate — a case-sensitive search for the source's literal
+        "PAKU" spelling would find nothing in "...Paku..." and silently
+        skip the row."""
+        template = [("MODEL", "PAKU", "LEDO")]
+        result = apply_variable_template("Chaise Paku 2er-Set opt. reglage", template)
+        assert result == "Chaise Ledo 2er-Set opt. reglage"
+
+    def test_engine_end_to_end_propagates_corrected_casing(self):
+        engine = HumanCorrectionPropagationEngine()
+        corrected = {
+            "id": "r1", "column": "name",
+            "source": "Drehbarer Armlehnenstuhl PAKU 2er-Set opt. Sitzhoehenverstellung",
+            "target_old": "Chaise pivotante PAKU 2er-Set opt. reglage",
+            "target_new": "Chaise Paku 2er-Set opt. reglage",
+        }
+        others = [row(
+            "r2", "name",
+            "Drehbarer Armlehnenstuhl LEDO 2er-Set opt. Sitzhoehenverstellung",
+            "Chaise pivotante LEDO 2er-Set opt. reglage",
+        )]
+        analysis = engine.analyze(corrected, others)
+        assert len(analysis.high) == 1
+        assert analysis.high[0].proposed_target == "Chaise Ledo 2er-Set opt. reglage"
+
 
 # =============================================================================
 # 3. Quantity safety
