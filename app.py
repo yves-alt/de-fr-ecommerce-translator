@@ -5453,6 +5453,7 @@ def process_excel_with_progress(
                     "column":  col_header,
                     "text":    text[:50] + "..." if len(text) > 50 else text,
                     "residue": detected[:3],
+                    "source":  _src_text[:120],
                 })
 
             cell.value = text
@@ -5491,11 +5492,13 @@ def process_excel_with_progress(
                     )
                     if not already:
                         stats["unresolved_warnings"] += 1
+                        _src_text, _ = source_lookup.get((row_num, col_idx), ("", "other"))
                         stats["warning_details"].append({
                             "row":     row_num,
                             "column":  col_header,
                             "text":    corrected[:50] + "..." if len(corrected) > 50 else corrected,
                             "residue": detect_german_residue(corrected)[:3],
+                            "source":  _src_text[:120],
                         })
                 cell.value = corrected
 
@@ -5507,7 +5510,7 @@ def process_excel_with_progress(
                 "category":        "German residue",
                 "row":             wd["row"],
                 "column":          wd["column"],
-                "original_text":   "",
+                "original_text":   wd.get("source", ""),
                 "translated_text": wd["text"],
                 "reason":          f"Unresolved German words after 3 fix attempts: {', '.join(wd.get('residue', []))}",
                 "suggested_fix":   "Retranslate manually — automated residue fixing failed",
@@ -5638,12 +5641,13 @@ def process_excel_with_progress(
                         )
                         if not already:
                             qa_issues += 1
+                            _src_text, _ = source_lookup.get((row_num, col_idx), ("", "other"))
                             all_warnings.append({
                                 "severity":        SEVERITY_CRITICAL,
                                 "category":        "German residue",
                                 "row":             row_num,
                                 "column":          col_header,
-                                "original_text":   "",
+                                "original_text":   _src_text[:120],
                                 "translated_text": text[:120],
                                 "reason":          f"German residue detected in Final QA: {', '.join(residue[:3])}",
                                 "suggested_fix":   "Retranslate manually",
